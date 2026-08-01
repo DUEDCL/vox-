@@ -3,10 +3,9 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from datetime import datetime, timezone
 from typing import Any
-from uuid import uuid4
 
+from core.events import build_event
 from core.state import VoiceState, VoiceStateMachine
 
 
@@ -29,13 +28,7 @@ class VoicePlugin:
     last_reply: str | None = None
 
     def _event(self, event_type: str, payload: dict | None = None) -> dict:
-        event = {
-            "version": "1",
-            "type": event_type,
-            "id": str(uuid4()),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "payload": payload or {},
-        }
+        event = build_event(event_type, payload)
         self.events.append(event)
         return event
 

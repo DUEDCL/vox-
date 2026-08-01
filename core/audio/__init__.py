@@ -12,14 +12,24 @@ from __future__ import annotations
 from .base import ProviderStatus, ProviderUnavailable
 from .capture import SounddeviceWakeCapture
 from .kws import SherpaKeywordProvider
+from .speaker import (
+    EnrollmentResult,
+    SpeakerStore,
+    SpeakerVerificationProvider,
+    VerificationResult,
+)
 from .vad import SherpaVadProvider
 from .voxcord import VoxCordAdapter
 
 __all__ = [
+    "EnrollmentResult",
     "ProviderStatus",
     "ProviderUnavailable",
     "SherpaKeywordProvider",
     "SherpaVadProvider",
     "SounddeviceWakeCapture",
+    "SpeakerStore",
+    "SpeakerVerificationProvider",
+    "VerificationResult",
     "VoxCordAdapter",
 ]

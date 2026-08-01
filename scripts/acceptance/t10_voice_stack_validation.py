@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import sherpa_onnx  # noqa: F401  (import-time availability is part of the check)
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from core.providers import SherpaKeywordProvider, SherpaVadProvider  # noqa: E402
