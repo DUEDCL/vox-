@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EvoX Platform Event",
+  "description": "Dispatch, tool, and memory events. Same envelope as voice-events.schema.json so the two streams merge at the transport boundary; separate file so voice-events.schema.json stays byte-identical at version 1.",
+  "type": "object",
+  "required": ["version", "type", "id", "timestamp"],
+  "properties": {
+    "version": {"const": "1"},
+    "type": {"type": "string", "enum": ["task.dispatched", "task.progress", "task.done", "task.failed", "agent.tripped", "agent.recovered", "tool.requested", "tool.confirm_required", "tool.executed", "tool.refused", "memory.written", "memory.recalled"]},
+    "id": {"type": "string", "minLength": 1},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "payload": {"type": "object"}
+  },
+  "additionalProperties": false
+}

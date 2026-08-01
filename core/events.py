@@ -1,7 +1,7 @@
 """Single construction and validation point for event envelopes.
 
-Every event the platform emits -- the nine voice events today, agent and task
-events once the platform layer lands -- shares one envelope::
+Every event the platform emits -- the nine voice events and the twelve platform
+events -- shares one envelope::
 
     {"version": "1", "type": ..., "id": ..., "timestamp": ..., "payload": {...}}
 
@@ -9,6 +9,12 @@ Centralising it here buys two things. The envelope can gain a field in exactly
 one place, and the contract's ``type`` enum is read from the schema file instead
 of being duplicated in Python -- so the contract stays the single gate that
 design red line 2 assumes it is.
+
+Two contract files, not one. ``voice-events.schema.json`` is frozen byte-for-byte
+at version ``"1"``; platform events therefore live in
+``agent-events.schema.json`` with an identical envelope. Because the envelopes
+match and the two ``type`` enums are disjoint, ``validate_any_event`` can accept
+either, which is what lets the streams merge at the transport boundary.
 """
 
 from __future__ import annotations
@@ -24,6 +30,10 @@ ENVELOPE_VERSION = "1"
 
 _ROOT = Path(__file__).resolve().parents[1]
 VOICE_SCHEMA_PATH = _ROOT / "contracts" / "voice-events.schema.json"
+AGENT_SCHEMA_PATH = _ROOT / "contracts" / "agent-events.schema.json"
+
+#: Every contract that describes an event envelope, in resolution order.
+CONTRACT_PATHS: tuple[Path, ...] = (VOICE_SCHEMA_PATH, AGENT_SCHEMA_PATH)
 
 
 class EventContractError(ValueError):
@@ -91,3 +101,38 @@ def validate_event(
             f"event type {event['type']!r} is not in the contract enum"
         )
     return event
+
+
+def contract_for(event_type: str) -> Path:
+    """The contract file that declares ``event_type``.
+
+    Resolution is by lookup, not by convention on the name's prefix: a contract
+    gains a type by being edited, and this function keeps working without a
+    matching edit here. An event type declared by two contracts is an error
+    rather than a silent first-match, because the envelopes are interchangeable
+    and the ambiguity would never surface on its own.
+    """
+    owners = [path for path in CONTRACT_PATHS if event_type in allowed_types(path)]
+    if not owners:
+        raise EventContractError(
+            f"event type {event_type!r} is not declared by any contract"
+        )
+    if len(owners) > 1:
+        raise EventContractError(
+            f"event type {event_type!r} is declared by more than one contract: "
+            f"{[p.name for p in owners]}"
+        )
+    return owners[0]
+
+
+def validate_any_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Validate against whichever contract declares the event's ``type``.
+
+    This is the confluence point for the two streams. Callers that handle a
+    mixed stream -- the transport boundary, the desktop bridge -- use this;
+    callers that own exactly one contract keep passing its path to
+    ``validate_event`` so a misrouted event still fails loudly.
+    """
+    if "type" not in event:
+        raise EventContractError("event is missing required keys: ['type']")
+    return validate_event(event, contract_for(event["type"]))

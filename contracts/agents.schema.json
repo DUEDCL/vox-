@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EvoX Agent Registry",
+  "description": "Shape of config/agents.toml once parsed by tomllib. The config file itself lands with the adapters in P5; this contract exists first so the adapters are written against a checked shape rather than a convention.",
+  "type": "object",
+  "required": ["agents"],
+  "properties": {
+    "agents": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/agent"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "agent": {
+      "type": "object",
+      "required": ["name", "kind"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "enum": ["cli", "acp", "http", "evox"]},
+        "enabled": {"type": "boolean"},
+        "command": {"type": "string", "minLength": 1},
+        "args": {"type": "array", "items": {"type": "string"}},
+        "url": {"type": "string", "minLength": 1},
+        "capabilities": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "cost": {"type": "integer", "minimum": 1, "maximum": 5},
+        "latency_ms": {"type": "integer", "minimum": 0},
+        "timeout_s": {"type": "number", "exclusiveMinimum": 0}
+      },
+      "additionalProperties": false
+    }
+  }
+}
