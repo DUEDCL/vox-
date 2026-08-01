@@ -1,7 +1,7 @@
 # 项目总览与当前进度
 
 > 工作区:`D:\program\vioce-wake`
-> 最后更新:2026-08-02(Phase 4 平台化 P1 声纹门落地)
+> 最后更新:2026-08-02(Phase 4 平台化 P2 平台事件契约落地)
 > 本文件是项目的单一入口(single source of truth,唯一事实来源),其它文档由此索引。
 
 ## 1. 项目是什么
@@ -27,17 +27,18 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 
 | 维度 | 状态 |
 |---|---|
-| 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架 + P1 声纹门已落,P2 契约起 |
+| 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架 + P1 声纹门 + P2 平台契约已落,P3 记忆起 |
 | 技术选型 | **已定案**,见 [ADR 001](adr/001-voice-stack-selection.md) ~ [ADR 005](adr/005-task-dispatch-model.md) |
-| Python 测试 | **67 passed, 2 skipped**(skipped 为可选 VoxCord 依赖) |
+| Python 测试 | **101 passed, 2 skipped**(skipped 为可选 VoxCord 依赖) |
 | 前端构建 | `npm run build`(tsc + vite)通过;`cargo check` 通过 |
 | 真机麦克风唤醒 | **已验证一次**(2026-07-26,`你好问问`,7.193s;当时打印的 score 1.0 是硬编码常量,不是测量值 —— 已改正,见 §7) |
 | 声纹准入 | 门**已接线**,模型已下载(dim 512);判别力 **AUTO 已验**(簇内 0.736 / 簇间 0.370,阈值 0.5 落在间隙);校验耗时 41 ms;**真机通过率未验** |
-| 平台层四包 | **仅契约**(315 行 Protocol),无实现 |
+| 事件契约 | 语音 9 种 + 平台 12 种,**两个文件一个信封**、枚举互斥;语音契约字节不变由 SHA-256 钉死 |
+| 平台层四包 | **仅契约**(315 行 Protocol + 146 行配置校验),无 adapter/tool/store 实现 |
 | 真实 EvoX 会话桥接 | **未验证** — 发布阻塞项 |
 | 真实外部 agent | **未验证** — 发布阻塞项(REAL-AGENT) |
 | 真实透明窗口验收 | **未验证** — 发布阻塞项 |
-| 版本控制 | **已 git init**,基线 `9f7d923`(Phase 3 原型固化)+ `9b5f029`(`core/audio` 拆包) |
+| 版本控制 | **已 git init**,基线 `9f7d923`(Phase 3 原型固化);P0 `02c6304`+`c02eb59`,P1 `dcbc827`+`d590497` |
 
 ## 3. 已定案的技术选型
 
@@ -89,13 +90,24 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 
 原 `feed()` 对每次命中报 `score=1.0`。核实结果:sherpa-onnx 1.13.4 的 `KeywordResult` 只有 `keyword` / `timestamps` / `tokens`,**这个绑定根本不暴露置信度**。那个 `1.0` 看起来像测量值而不是测量值,并且已经进过 2026-07-26 的真机记录。现在 `feed()` 返回 `(keyword, None)` —— `None` 是一个经核实的陈述;进入 `wake.detected` 的数字改成声纹余弦相似度,那个**是**测出来的。
 
+### Phase 4:P2 平台事件契约(2026-08-02)
+- **两个契约,一个信封** — 平台 12 种事件走新增的 `contracts/agent-events.schema.json`,`voice-events.schema.json` 一个字节没动。信封逐字段同形、两个 `type` 枚举互斥,这两条是有测试的:同形让两条流能在传输边界合流,互斥让 `contract_for()` 不歧义。
+- **字节不变从意愿变成约束** — NFR-5.8 此前只是「我们没打算改它」。现在 `tests/test_agent_event_schema.py` 用 SHA-256 摘要钉住语音契约(575 字节,`4f60…5de5`),原地编辑会立刻变红,并在断言消息里说明该去哪个文件加事件。
+- **`validate_any_event()` 是合流点,不是放宽** — 它按 `type` 查表选契约;调用方只归属单一契约时继续传路径,这样把平台事件送进语音流仍然会响。宽松路径是显式选择的。
+- **配置校验先于配置文件** — `contracts/agents.schema.json` + `core/agents/schema.py`(146 行手写子集校验器)。16 条拒绝路径有测试,报错指到 `agents[1].kind` 这种具体位置。`kind` 枚举与 `AGENT_KINDS` 由测试锁死相等 —— 否则会出现「配置校验通过、构造适配器时才炸」。
+- **一条反向断言** — schema **不许**长出校验器没实现的关键字。声明了却不生效的约束比不声明更糟:它读起来像保护。
+- **零新依赖** — 确认 `.venv` 里没有 `jsonschema`,两个校验器都手写,理由与 `core/events.py` 当初一致:契约只有十几行,不值得换一个运行时依赖。
+
 ### 已实现的代码骨架
 
 | 模块 | 文件 | 行数 | 说明 |
 |---|---|---:|---|
-| 事件契约 | `contracts/voice-events.schema.json` | 14 | 9 种事件类型,版本 `"1"`(**字节不变**) |
+| 事件契约(语音) | `contracts/voice-events.schema.json` | 14 | 9 种事件类型,版本 `"1"`(**字节不变**,SHA-256 钉死) |
+| 事件契约(平台) | `contracts/agent-events.schema.json` | 15 | 12 种 `task.*`/`agent.*`/`tool.*`/`memory.*`,信封与语音契约同形 |
+| 配置契约 | `contracts/agents.schema.json` | 33 | `config/agents.toml` 的形状(配置文件本身在 P5) |
 | 状态机 | `core/state.py` | 53 | 6 状态 + 严格转移表(**不扩展**) |
-| 事件构造 | `core/events.py` | 93 | 信封唯一构造点 + 契约校验 |
+| 事件构造 | `core/events.py` | 138 | 信封唯一构造点 + 两契约校验 + `contract_for()` 查表 |
+| 配置校验 | `core/agents/schema.py` | 146 | 手写 JSON Schema 子集校验器,报错指到 `agents[1].kind` |
 | 语音提供器 | `core/audio/`(7 模块 + `__init__`) | 946 | KWS/VAD/采集/**声纹**/**环形缓冲**/VoxCord |
 | 重导出薄壳 | `core/providers.py` | 29 | 保旧导入路径不断 |
 | 会话桥接 | `core/session_bridge.py` | 92 | `ConversationTransport` 协议 + HTTP 实现 |
@@ -105,7 +117,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 录入 CLI | `scripts/enroll_speaker.py` | 125 | 交互式录入,音频不落盘 |
 | 前端 | `desktop/src/main.ts` + `style.css` | 35 | 唤醒球与状态标签 |
 | 窗口 | `desktop/src-tauri/src/main.rs` | 31 | 透明、置顶、不占任务栏 |
-| 测试 | `tests/*.py` + `tests/integration/` | 1146 | 69 用例,见 [测试文档](testing.md) |
+| 测试 | `tests/*.py` + `tests/integration/` | 1420 | 103 用例,见 [测试文档](testing.md) |
 
 ## 5. 进行中 / 下一步
 
@@ -115,8 +127,8 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 |---|---|---|---|
 | P0 | 骨架:声纹 provider、`events.py`、四包契约、测试归位、ADR 与文档 | AUTO | ✅ 完成 |
 | P1 | **声纹门**:环形缓冲、fail-closed 门、录入 CLI、`wake.rejected` 产出点 | AUTO | ✅ 完成(真机留 P10) |
-| P2 | 平台事件契约:`agent-events.schema.json` + `agents.schema.json` | AUTO | 🔄 下一步 |
-| P3 | 记忆系统 `core/memory/` | AUTO | ⬜ |
+| P2 | 平台事件契约:`agent-events.schema.json` + `agents.schema.json` | AUTO | ✅ 完成 |
+| P3 | 记忆系统 `core/memory/` | AUTO | 🔄 下一步 |
 | P4 | 本地工具 `core/tools/` + `config/tools.toml` | AUTO | ⬜ |
 | P5 | agent 适配器 `cli.py` + `evox.py` | AUTO+SIM | ⬜ |
 | P6 | 派发/路由/汇总 `core/dispatch/` | AUTO+SIM | ⬜ |

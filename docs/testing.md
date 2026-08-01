@@ -85,12 +85,13 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
       └─────────────────────────────────┘
 ```
 
-### L1–L2 单元与契约(`tests/`,9 文件 830 行,59 用例)
+### L1–L2 单元与契约(`tests/`,10 文件 1161 行,93 用例)
 
 | 文件 | 用例数 | 覆盖内容 |
 |---|---:|---|
 | `test_event_schema.py` | 1 | 产出事件符合 JSON Schema 必填结构 |
 | `test_events.py` | 8 | 契约枚举从文件读取(9 种类型)、信封形状、payload 默认、id 唯一性、四种契约违规被拒 |
+| `test_agent_event_schema.py` | 34 | `voice-events.schema.json` **SHA-256 摘要钉死**;平台契约 12 种类型分四组;两信封同形且枚举互斥;`contract_for()` 全类型解析与未声明类型报错;`validate_any_event()` 双流通过、送错契约仍失败;agent 注册契约 16 条拒绝路径;`kind` 枚举与 `AGENT_KINDS` 一致;**schema 不许超出校验器实现的关键字子集** |
 | `test_voice_contract.py` | 2 | 生命周期契约;非法提交与取消被拒 |
 | `test_plugin_tools.py` | 10 | pause/resume 门控、采集生命周期、启动失败回滚、合成唤醒标记、完整回合契约、传输层接线、诊断不泄漏 token、设备枚举 |
 | `test_speaker.py` | 11 | store 往返/原子写/版本拒绝/损坏 JSON 拒绝;fail-closed 四条路径;`describe()` 不含向量;`remove()` 幂等 |
@@ -148,12 +149,13 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 
 | 目的 | 命令 | 等级 | 预期 |
 |---|---|---|---|
-| Python 全量 | `.venv\Scripts\python.exe -m pytest tests -q` | AUTO | 67 passed, 2 skipped |
+| Python 全量 | `.venv\Scripts\python.exe -m pytest tests -q` | AUTO | 101 passed, 2 skipped |
 | 声纹(免模型) | `.venv\Scripts\python.exe -m pytest tests/test_speaker.py tests/test_speaker_privacy.py -q` | AUTO | 30 passed(**无需模型**) |
 | 声纹(真实模型) | `.venv\Scripts\python.exe -m pytest tests/integration/test_speaker_model.py -q` | AUTO | 5 passed(缺模型时 5 skipped) |
 | 声纹录入 | `.venv\Scripts\python.exe scripts/enroll_speaker.py --name <名字>` | REAL-MIC | 写入向量,不写音频 |
 | 声纹注册状态 | `.venv\Scripts\python.exe scripts/enroll_speaker.py --name x --list-only` | AUTO | 只出名字与样本数 |
-| 事件契约 | `.venv\Scripts\python.exe -m pytest tests/test_events.py tests/test_event_schema.py -q` | AUTO | 9 passed |
+| 事件契约(语音) | `.venv\Scripts\python.exe -m pytest tests/test_events.py tests/test_event_schema.py -q` | AUTO | 9 passed |
+| 事件契约(平台 + 注册) | `.venv\Scripts\python.exe -m pytest tests/test_agent_event_schema.py -q` | AUTO | 34 passed |
 | 集成 | `.venv\Scripts\python.exe -m pytest tests/integration -q` | AUTO+SIM | 10 passed(缺模型时 3 passed, 7 skipped) |
 | 语音冒烟 | `.venv\Scripts\python.exe scripts/smoke_voice.py` | SIM | 打印生命周期事件 |
 | 端到端模拟 | `.venv\Scripts\python.exe scripts/e2e_simulated.py` | SIM | `E2E SIMULATED OK` |
@@ -247,6 +249,14 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 | 缺配置文件仍默认 `require_verification=True` | ✅ 降级路径不是保护静默关闭的时机 |
 | 事件类型枚举从契约文件读取 | ✅ 9 种,Python 里不镜像 |
 | 四种契约违规被 `validate_event()` 拒 | ✅ 未知 type / 错 version / 多余字段 / 缺必填键 |
+| `voice-events.schema.json` 字节不变 | ✅ **SHA-256 摘要钉死**(575 字节,`4f60…5de5`) |
+| 平台契约 12 种类型,分 `task`/`agent`/`tool`/`memory` 四组 | ✅ 逐组断言,不只断言总数 |
+| 两个信封可合流 | ✅ 必填键、属性集、`version` 常量、`additionalProperties` 全同;两个 `type` 枚举**互斥** |
+| `contract_for()` 对每个已声明类型解析到正确文件 | ✅ 21 种类型逐一;未声明类型报错;同名被两个契约声明也报错 |
+| 送错契约的事件仍失败 | ✅ 平台事件对着语音契约校验 → `not in the contract enum` |
+| agent 注册契约拒坏配置 | ✅ 16 条:缺 `name`/`kind`、`kind` 不在枚举、`cost` 越界、`True` 冒充整数、负 `latency_ms`、`timeout_s` 为 0、`args` 类型错、未知键、顶层四种 |
+| `kind` 枚举与 `AGENT_KINDS` 一致 | ✅ 测试锁死,避免配置校验通过后在构造适配器时才炸 |
+| schema 不超出校验器实现的关键字子集 | ✅ 反向断言:声明了却不生效的关键字比不声明更糟 |
 | 平台层四包导入无副作用 | ✅ 不启子进程、不开套接字 |
 
 ### 5.6 声纹判别力与延迟(AUTO,需模型,2026-08-02)

@@ -44,30 +44,30 @@ core/agents/ 适配器 · core/dispatch/ 派发 · core/tools/ 工具 · core/me
 
 ## 2. 事件契约(contract,契约)
 
-`contracts/voice-events.schema.json` 是前后端唯一的通信约定,JSON Schema Draft 2020-12。
+两个契约文件,同一个信封。`contracts/voice-events.schema.json` 是语音链路的约定(9 种类型),`contracts/agent-events.schema.json` 是平台层的约定(12 种类型),都是 JSON Schema Draft 2020-12。
 
-**信封结构**(envelope,信封):
+**信封结构**(envelope,信封)—— 两个文件**逐字段相同**:
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `version` | 常量 `"1"` | 是 | 契约版本,破坏性变更时递增 |
-| `type` | 枚举 | 是 | 9 种事件类型之一 |
+| `type` | 枚举 | 是 | 语音 9 种 / 平台 12 种之一 |
 | `id` | 字符串 | 是 | 事件唯一标识(UUID 或 `state-N`) |
 | `timestamp` | ISO 8601 | 是 | UTC 时间戳 |
 | `payload` | 对象 | 否 | 各事件类型自有字段 |
 
 `additionalProperties: false` — 严禁额外字段,这是防止 SDK 类型泄漏的第一道闸门。
 
-**唯一构造点**:`core/events.py`(93 行)。`build_event()` 造信封,`validate_event()` 逐条对照契约校验(必填键、`additionalProperties`、`version` 常量、`type` 枚举)。枚举**在运行时从契约文件读**,不在 Python 里镜像一份 —— 这样 schema 与代码无法各自漂移。校验是手写的,不引 `jsonschema`:契约只有 14 行,一个新依赖换不来什么。
+**唯一构造点**:`core/events.py`。`build_event()` 造信封;`validate_event(event, schema_path)` 对着**指定的**契约校验(必填键、`additionalProperties`、`version` 常量、`type` 枚举);`validate_any_event(event)` 先用 `contract_for()` 按 `type` 查出归属契约再校验 —— 这是**两条流合流的落点**,给传输边界与桌面桥用;只归属单一契约的调用方继续传路径,这样送错流的事件仍会响。枚举**在运行时从契约文件读**,不在 Python 里镜像一份 —— 这样 schema 与代码无法各自漂移。校验是手写的,不引 `jsonschema`:契约只有十几行,一个新依赖换不来什么。
 
-平台事件走**新增的** `contracts/agent-events.schema.json`(P2),信封形状相同、`voice-events.schema.json` 字节不变,两条流在传输边界合流。理由见 ADR 005。
+**为什么分两个文件而不是扩一个枚举**:`voice-events.schema.json` 必须**字节不变**、version 保持 `"1"`(NFR-5.8)。这条约束现在由 `tests/test_agent_event_schema.py` 里的 SHA-256 摘要钉住 —— 「我们没打算改它」不是保证。两个契约的 `type` 枚举**互斥**(有测试),否则 `contract_for()` 会歧义;信封形状相同(有测试),否则合流就变成翻译。理由见 ADR 005。
 
-**9 种事件类型**:
+**语音 9 种事件类型**:
 
 | 事件 | 触发时机 | payload 关键字段 |
 |---|---|---|
-| `wake.detected` | 唤醒词命中 | `keyword`, `score`, `synthetic?` |
-| `wake.rejected` | 声纹校验否决唤醒(产出点 P1) | `reason`, `score` |
+| `wake.detected` | 唤醒词命中且声纹通过 | `keyword`, `score`(声纹相似度), `synthetic?` |
+| `wake.rejected` | 声纹校验否决唤醒 | `reason`, `score` |
 | `turn.started` | 回合开始 | `text` |
 | `asr.final` | 识别文本定稿 | `text` |
 | `llm.delta` | 回复增量 | `text` |
@@ -75,6 +75,23 @@ core/agents/ 适配器 · core/dispatch/ 派发 · core/tools/ 工具 · core/me
 | `turn.done` | 回合正常结束 | — |
 | `turn.cancelled` | 回合被打断 | — |
 | `state.changed` | 状态迁移 | `from`, `to`, `reason` |
+
+**平台 12 种事件类型**(P2 定契约,产出点分散在 P3–P6):
+
+| 事件 | 触发时机 | 产出方 |
+|---|---|---|
+| `task.dispatched` | 路由决定了模式与 agent 集合 | P6 dispatcher |
+| `task.progress` | 派发中的进度(**不是**回复增量,增量仍走 `llm.delta`) | P6 dispatcher |
+| `task.done` / `task.failed` | 派发结束 | P6 dispatcher |
+| `agent.tripped` / `agent.recovered` | 熔断器开合 | P6 breaker |
+| `tool.requested` | 工具请求进入政策门 | P4 policy |
+| `tool.confirm_required` | 政策原则上允许但要求显式确认(`shell.run`) | P4 policy |
+| `tool.executed` / `tool.refused` | 工具执行结果 / 被拒 | P4 policy |
+| `memory.written` / `memory.recalled` | 记忆写入 / 召回 | P3 store |
+
+**六态状态机不为这些事件加子状态。** 派发全过程发生在 `thinking` 内部,进度只由 `task.*` 表达 —— 状态机因此不反映派发细节,换来的是三个现有契约测试一个字不改(ADR 005)。
+
+**配置契约**:`contracts/agents.schema.json` 定 `config/agents.toml` 解析后的形状(`agents` 数组,每项 `name` + `kind` 必填,`kind` 枚举与 `AGENT_KINDS` 由测试锁死一致)。校验在 `core/agents/schema.py`,同样手写、同样只实现契约实际用到的关键字子集 —— 并有一条反向测试断言 schema **不许**超出这个子集,否则会出现「写着像约束、实际不生效」的字段。配置文件本身随适配器在 P5 落地。
 
 ## 3. 核心层:状态机(`core/state.py`,53 行)
 
@@ -246,20 +263,22 @@ cancel         → transport.cancel(last_turn_id) + state.changed(cancelled) + t
 - 已内置自验证钩子:`__READY__`、`render_state_to_text()`、`step(ms)`,以及 `?test=1` 冻结模式。
 - CSP 收紧为 `default-src 'self'; style-src 'self' 'unsafe-inline'`。
 
-## 8. 平台层(`core/{agents,dispatch,tools,memory}/`,仅契约)
+## 8. 平台层(`core/{agents,dispatch,tools,memory}/`,契约 + 契约校验)
 
-Phase 4 新增的四个包。当前**每个包里只有 `contract.py`**,共 315 行 Protocol(协议)与冻结 dataclass,没有任何实现。导入这四个包**不得**启动子进程或打开套接字,这条写在各自的模块 docstring 里。
+Phase 4 新增的四个包。当前**只有契约与契约校验**:四个 `contract.py` 共 315 行 Protocol(协议)与冻结 dataclass,加 `core/agents/schema.py` 的配置校验(P2),没有任何 adapter/tool/store 实现。导入这四个包**不得**启动子进程或打开套接字,这条写在各自的模块 docstring 里,并有测试。
 
 六个新边界:
 
 | # | 边界 | 位置 | 守什么 |
 |---|---|---|---|
-| 1 | **声纹门** | `core/audio/speaker.py` + 采集层 | 未授权语音在此静默终止,拒绝先于一切交互(ADR 002) |
+| 1 | **声纹门** | `core/audio/speaker.py` + 采集层 | 未授权语音在此静默终止,拒绝先于一切交互(ADR 002)。**已接线**(P1) |
 | 2 | **agent 适配** | `core/agents/contract.py`(83 行) | `AgentAdapter` 三方法 + `AgentChunk` 三种类型;字段只许 `str`/`int`/`float`/`frozenset`/`tuple`/`Mapping`,**任何 agent SDK 类型都进不来** —— 红线 2 由构造保证,不靠评审(ADR 003) |
 | 3 | **派发** | `core/dispatch/contract.py`(93 行) | `single`/`race`/`fanout` 三模式;语音默认前两者,`fanout` 会把首字延迟拖成最慢 agent 的延迟(ADR 005) |
 | 4 | **路由汇总** | 同上 | 五维打分(能力/成本/延迟/成功率/负载)+ 熔断器;`Aggregator.merge(mode, streams)` |
 | 5 | **工具** | `core/tools/contract.py`(80 行) | `ToolPolicy.check()` 返回 `None` 放行、返回拒绝的 `ToolResult` 挡下。`voice` 与 `agent` 两个 origin 走**同一道门**,agent 拿不到用户语音拿不到的能力 |
 | 6 | **记忆** | `core/memory/contract.py`(59 行) | 三层(short/mid/long)× 三类(turn/fact/audit);**只存文本,音频永不入库**,`asr.final` 入库前过敏感模式过滤(ADR 004) |
+
+另有两条契约边界在 §2:平台事件契约(12 种 `task.*`/`agent.*`/`tool.*`/`memory.*`)与 agent 注册契约,两者都在 P2 落地,产出方与消费方分散在 P3–P6。
 
 意图分类**先用规则不用模型**:「读一下 X」「搜一下 Y」「运行 Z」正则命中直执行本地工具,延迟从秒级降到毫秒级,且规则命中的部分可以纯 AUTO 测试;未命中才走 agent 路由。
 
@@ -272,6 +291,7 @@ Phase 4 新增的四个包。当前**每个包里只有 `contract.py`**,共 315 
 | 模型推理 ↔ 音频设备 | `SherpaKeywordProvider` 不碰麦克风 | 采集逻辑独立在 `SounddeviceWakeCapture` |
 | 核心层 ↔ 插件层 | `core/` 不 import `evox_plugin/` | 单向依赖,插件层 import 核心层 |
 | 后端 ↔ 前端 | 前端只认事件契约 | JSON Schema + `additionalProperties: false` |
+| 语音契约 ↔ 平台契约 | 两个契约互不知道对方的类型 | 枚举互斥 + 信封同形(测试断言),归属由 `contract_for()` 查表 |
 | 业务 ↔ 会话后端 | 插件只认 `ConversationTransport` | Protocol 接口,mock 可完全替代 |
 | 项目 ↔ VoxCord | 无 VoxCord 也能跑全部发布路径测试 | 动态 import + skipif 门控 |
 | 渲染路线 ↔ 应用协调 | 换 Canvas/WebGL 不动业务代码 | 计划中的 `Renderer` 接口(Phase 4) |
@@ -284,10 +304,10 @@ Phase 4 新增的四个包。当前**每个包里只有 `contract.py`**,共 315 
 
 | 组件 | 计划位置 | 阶段 | 说明 |
 |---|---|---|---|
-| 声纹门与内存环形缓冲 | `core/audio/capture.py` | P1 | provider 已就绪,门与缓冲未接 |
-| `wake.rejected` 事件产出 | 插件层 | P1 | 契约早已定义,声纹门是它第一个真实触发条件 |
-| `feed()` 返回真实 score | `core/audio/kws.py` | P1 | 现在硬编码 `1.0`,真实置信度从未取到 |
-| 平台事件契约 | `contracts/agent-events.schema.json` | P2 | 与 `agents.schema.json` 一起 |
+| ~~声纹门与内存环形缓冲~~ | `core/audio/{capture,ring}.py` | P1 | ✅ **已完成** |
+| ~~`wake.rejected` 事件产出~~ | 插件层 | P1 | ✅ **已完成** —— 声纹门是它第一个真实触发条件 |
+| ~~`feed()` 返回真实 score~~ | `core/audio/kws.py` | P1 | ✅ **已改正**:`KeywordResult` 不含置信度,`feed()` 返回 `(keyword, None)`;`wake.detected` 的分数来自声纹相似度 |
+| ~~平台事件契约~~ | `contracts/agent-events.schema.json` + `agents.schema.json` | P2 | ✅ **已完成** |
 | 记忆实现 | `core/memory/{store,write,recall}.py` | P3 | SQLite + FTS5 |
 | 工具实现 | `core/tools/{fs,web,shell,policy}.py` | P4 | `policy.py` 先于任何需要它的工具写 |
 | agent 适配器 | `core/agents/{cli,evox}.py` | P5 | 再 `acp.py`/`http.py`/`openclaw.py`(P7) |

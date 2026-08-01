@@ -25,7 +25,7 @@ python scripts/e2e_simulated.py
 
 第一条检查单元、契约和适配器；第二条检查插件最小生命周期；第三条覆盖模拟链路：唤醒、识别文本、会话发送、回复、TTS 事件、连续对话、取消和停止。
 
-当前基线 **67 passed, 2 skipped**（2 个 skip 是可选的 VoxCord 适配器）。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
+当前基线 **101 passed, 2 skipped**（2 个 skip 是可选的 VoxCord 适配器）。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
 
 ## 契约或事件字段变更
 
@@ -37,7 +37,19 @@ python -m pytest tests/test_event_schema.py tests/test_events.py tests/test_voic
 
 同时检查 `contracts/voice-events.schema.json` 的枚举是否覆盖新增事件。**信封的唯一构造点是 `core/events.py`** —— 新事件类型只需加进契约文件，`allowed_types()` 在运行时读取，Python 侧不需要同步改动；`tests/test_events.py` 会在两者漂移时失败。事件版本变更时，更新协议文档和兼容性测试，不要只改生产代码。
 
-平台事件走 `contracts/agent-events.schema.json`（P2 新增），`voice-events.schema.json` 保持字节不变、version 保持 `"1"`。
+平台事件走 `contracts/agent-events.schema.json`（P2 新增），另跑一组：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_agent_event_schema.py -q
+```
+
+预期 **34 passed**。这一组还守着三件与语音契约有关的事：
+
+- `voice-events.schema.json` **字节不变**（SHA-256 摘要钉死，575 字节 `4f60…5de5`）。这条测试变红意味着有人在原地改语音契约 —— 平台事件属于另一个文件，语音事件真要变则是**信封版本递增**，不是原地编辑。
+- 两个契约的信封**逐字段同形**、两个 `type` 枚举**互斥**。同形是合流的前提，互斥是 `contract_for()` 不歧义的前提；任一变红，`validate_any_event()` 就不再可信。
+- `contracts/agents.schema.json` **不许长出校验器没实现的关键字**。声明了却不生效的约束比不声明更糟，反向断言把这条钉住；`kind` 枚举与 `AGENT_KINDS` 必须相等，否则配置校验通过后会在构造适配器时才炸。
+
+新增平台事件类型时只改契约文件，但记得同步 `test_platform_contract_declares_the_expected_surface` 里的分组断言 —— 它逐组断言而不是只断言总数，这是有意的。
 
 ## Provider 适配器变更
 
@@ -325,4 +337,4 @@ rg "TODO|FIXME|release blocker|not verified" core evox_plugin desktop docs tests
 - 前端修改：`npm run build`；窗口属性修改再加 `cargo check` 和 Windows 实机验收。
 - 模型或依赖变更：记录版本、来源、归档校验结果到 `THIRD_PARTY_NOTICES.md` 和 `docs/research/prototype-results.md`。
 
-每个阶段收尾一律跑全量 `python -m pytest tests -q`（当前基线 **67 passed, 2 skipped**），不用单文件绿灯代替全量。
+每个阶段收尾一律跑全量 `python -m pytest tests -q`（当前基线 **101 passed, 2 skipped**），不用单文件绿灯代替全量。

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted 2026-08-02. Contracts written (AUTO); adapters are P5 (`cli`, `evox`) and P7 (`acp`, `http`).
+Accepted 2026-08-02. Contracts written (AUTO); the registry contract and its validator landed in P2 (`contracts/agents.schema.json` + `core/agents/schema.py`, 16 rejection paths covered). Adapters are P5 (`cli`, `evox`) and P7 (`acp`, `http`); `config/agents.toml` itself lands with them.
 
 ## Decision
 

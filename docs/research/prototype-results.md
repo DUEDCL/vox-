@@ -27,9 +27,10 @@ Current status: DOC/AUTO/SIM and one REAL-MIC wake are established. REAL-AGENT, 
 
 | Purpose | Command | Level |
 |---|---|---|
-| Python suite | `.venv/Scripts/python.exe -m pytest tests -q` → 67 passed, 2 skipped | AUTO |
+| Python suite | `.venv/Scripts/python.exe -m pytest tests -q` → 101 passed, 2 skipped | AUTO |
 | Speaker gate (model-free) | `.venv/Scripts/python.exe -m pytest tests/test_speaker.py tests/test_speaker_privacy.py -q` | AUTO |
 | Speaker gate (real model) | `.venv/Scripts/python.exe -m pytest tests/integration/test_speaker_model.py -q` | AUTO |
+| Event + registry contracts | `.venv/Scripts/python.exe -m pytest tests/test_agent_event_schema.py -q` → 34 passed | AUTO |
 | Voiceprint enrollment | `.venv/Scripts/python.exe scripts/enroll_speaker.py --name <名字>` | REAL-MIC |
 | Voice smoke | `.venv/Scripts/python.exe scripts/smoke_voice.py` | SIM |
 | Simulated E2E | `.venv/Scripts/python.exe scripts/e2e_simulated.py` | SIM |
@@ -193,6 +194,29 @@ Enrolled a 120 Hz harmonic stack (7 partials + noise), verified a 240 Hz one —
 - Suite: **67 passed, 2 skipped** (was 43 at the end of P0; 19 privacy/fail-closed tests plus 5 model-gated integration tests added).
 
 Fail-closed paths asserted individually: model missing → `start()` raises; nobody enrolled → raises; no verifier attached but verification required → raises; verifier throws mid-decision → rejection, not a pass; score below threshold → silent rejection with no state change. A full gate cycle inside a `tmp_path` CWD leaves the directory **empty**.
+
+## Session 2026-08-02 (P2 platform event contract — AUTO)
+
+Two contracts, one envelope. Measured on the committed files:
+
+| Fact | Measured value |
+|---|---|
+| `contracts/voice-events.schema.json` | 575 bytes, SHA-256 `4f60b6124dcb9704624a0606f411981d0bf572de22fcf4a25fad133bd3c75de5`, 9 types, version `"1"` |
+| `contracts/agent-events.schema.json` | 880 bytes, 12 types (`task.*` 4 / `agent.*` 2 / `tool.*` 4 / `memory.*` 2) |
+| `contracts/agents.schema.json` | 1,294 bytes, registry shape for `config/agents.toml` |
+| `core/events.py` | 138 lines (was 93): `+ AGENT_SCHEMA_PATH`, `CONTRACT_PATHS`, `contract_for()`, `validate_any_event()` |
+| `core/agents/schema.py` | 146 lines, hand-rolled subset validator |
+| `tests/test_agent_event_schema.py` | 274 lines, **34 passed** |
+| Suite | **101 passed, 2 skipped** in 13.04 s, 103 collected (was 67 at the end of P1) |
+| New runtime dependency | **none** — `import jsonschema` in the `.venv` raises `ImportError`, checked, so both validators stay hand-rolled |
+
+Three properties are now enforced rather than intended:
+
+- **NFR-5.8 is a digest, not an intention.** `test_voice_contract_is_byte_identical` fails on any in-place edit of the voice contract and its assertion message says where platform events belong instead.
+- **The two envelopes are interchangeable.** Same `required` set, same property set, same `version` const, both `additionalProperties: false` — and the two `type` enums are **disjoint**, which is what keeps `contract_for()` from being ambiguous. Both are asserted; a type declared by two contracts raises rather than silently first-matching.
+- **The registry schema cannot over-declare.** `test_the_schema_stays_inside_the_validator_subset` walks every key in `agents.schema.json` and fails on any keyword the validator does not implement, because a declared-but-inert constraint reads as protection. `kind`'s enum is asserted equal to `AGENT_KINDS` for the same reason: a config that validates and then fails at adapter construction is the worst of the two failure modes.
+
+Not established by this session: any platform event has an actual producer. All 12 types are declared and validated; `memory.*` gets one in P3, `tool.*` in P4, `task.*`/`agent.*` in P6. `config/agents.toml` does not exist yet either — only its shape does.
 
 ## Not yet verified
 

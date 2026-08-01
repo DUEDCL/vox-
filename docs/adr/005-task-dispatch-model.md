@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted 2026-08-02. Contracts written (AUTO); `core/tools/` is P4 and `core/dispatch/` is P6.
+Accepted 2026-08-02. Contracts written (AUTO). The 12 platform event types this ADR relies on were declared in P2 (`contracts/agent-events.schema.json`), with the envelope-merge and enum-disjointness properties under test; their producers are still ahead — `core/tools/` is P4, `core/memory/` is P3, `core/dispatch/` is P6.
 
 ## Decision
 
