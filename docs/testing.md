@@ -60,11 +60,14 @@ python -m venv .venv
 | Silero VAD | `models/silero_vad.onnx` | 2.3 MB | 端点检测 |
 | MeloTTS VITS | `models/vits-melo-tts-zh_en/` | 183 MB | 中英合成 |
 | (未清理归档) | `models/kws.tar.bz2` + `tts.tar.bz2` | 192 MB | 可删除 |
-| 声纹 3D-Speaker ERes2Net | `models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx` | 37 MB | 声纹准入(P1,**尚未下载**) |
+| 声纹 3D-Speaker ERes2Net | `models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx` | 37.8 MB | 声纹准入(**已下载**,dim 512) |
 
 Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3`
+声纹模型 SHA-256:`1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b`(39,593,761 字节,embedding dim **512**,2026-08-02 下载并自检)
 
-声纹模型来源(核实等级:**官方文档确认**,k2-fsa.github.io):`https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx`。release tag 里 `recongition` 的拼写是官方笔误,不是本文档写错。**`tests/test_speaker.py` 的 11 个用例全部不依赖此模型** —— 需要守的性质恰恰是模型缺失时必须成立的那些。
+声纹模型来源(核实等级:**官方文档确认**,k2-fsa.github.io):`https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx`。release tag 里 `recongition` 的拼写是官方笔误,不是本文档写错。
+
+模型-测试的分工是有意设计的:**`tests/test_speaker.py` 与 `tests/test_speaker_privacy.py` 的 30 个用例全部不依赖此模型** —— 需要守的性质(fail-closed、音频不落盘、`describe()` 不含向量)恰恰是模型缺失时必须成立的那些。只有 `tests/integration/test_speaker_model.py` 需要权重,模型缺失时它 skip 而不是 fail。
 
 ## 3. 测试分层
 
@@ -82,7 +85,7 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
       └─────────────────────────────────┘
 ```
 
-### L1–L2 单元与契约(`tests/`,8 文件 540 行,40 用例)
+### L1–L2 单元与契约(`tests/`,9 文件 830 行,59 用例)
 
 | 文件 | 用例数 | 覆盖内容 |
 |---|---:|---|
@@ -91,13 +94,14 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 | `test_voice_contract.py` | 2 | 生命周期契约;非法提交与取消被拒 |
 | `test_plugin_tools.py` | 10 | pause/resume 门控、采集生命周期、启动失败回滚、合成唤醒标记、完整回合契约、传输层接线、诊断不泄漏 token、设备枚举 |
 | `test_speaker.py` | 11 | store 往返/原子写/版本拒绝/损坏 JSON 拒绝;fail-closed 四条路径;`describe()` 不含向量;`remove()` 幂等 |
+| `test_speaker_privacy.py` | 19 | 环形缓冲窗口语义与超长块;**AST 断言缓冲无文件系统面**;全周期空目录断言;决策后窗口即丢;四条 fail-closed `start()` 拒绝;校验异常算拒绝;拒绝不改状态不发回复;`diagnose()` 报计数不报向量、门关时告警;`enrollment/` 在 `.gitignore` 内;缺配置仍默认要求校验 |
 | `test_provider_adapter.py` | 2 | VoxCord 加载与 VAD 回退契约(**无 VoxCord 时 skip**) |
 | `test_session_bridge.py` | 3 | token 与 loopback 强制、认证发送、缺 turn_id 判失败 |
 | `test_sherpa_provider.py` | 3 | 缺模型不导入运行时、真实模型加载且静音无命中、VAD 拒静音识语音 |
 
-### L3 集成(`tests/integration/test_voice_stack.py`,5 用例 121 行)
+### L3 集成(`tests/integration/`,2 文件 10 用例)
 
-原 `tmp_proto/t10_voice_stack_validation.py` 的**行为断言部分**已升格为默认收集的正式测试(2026-08-02,消化 §7 自列的「`tmp_proto/` 与 `tests/` 边界模糊」债务):
+`test_voice_stack.py`(5 用例 121 行)—— 原 `tmp_proto/t10_voice_stack_validation.py` 的**行为断言部分**已升格为默认收集的正式测试(2026-08-02,消化 §7 自列的「`tmp_proto/` 与 `tests/` 边界模糊」债务):
 
 1. 双后端驱动同一回合路径(红线 2)
 2. 打断取消同时到达传输层与状态机
@@ -114,6 +118,14 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 5. 会话后端可替换(双 mock 传输行为一致)
 6. 可打断 TTS(speaking 中 cancel)
 
+`test_speaker_model.py`(5 用例)—— 需要 37.8 MB 声纹模型,**缺模型时整文件 skip**。这是唯一需要权重的声纹测试:
+
+1. 模型加载并报告 dim 512
+2. 7 段真实人声的余弦矩阵可分:簇内最低 **0.736** > 簇间最高 **0.370**,默认阈值 0.5 落在间隙内
+3. 注册 0 号后 1、2 号放行,3–6 号被拒且 `reason` 含 `below threshold`
+4. 追加样本不丢先前注册,`samples_per_speaker` 计到 2
+5. **反向断言**:合成音调(120 Hz vs 240 Hz)仍互相通过(0.767),证明合成音频**不能**用来测判别力 —— 这条测试存在的意义是让这个陷阱留在文档里,而不是被后人重新踩一遍
+
 ### L4 端到端模拟(`scripts/e2e_simulated.py`)
 
 链路:唤醒 → ASR 文本 → 桥接发送 → 回复 → TTS 事件 → 连续对话 → 取消 → 停止。产出 17 事件、2 次桥接发送、1 次取消。**mock 传输,无麦克风、无真实 EvoX**。
@@ -126,7 +138,8 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 |---|---|---|
 | `scripts/acceptance/smoke_microphone.py` | REAL-MIC | ✅ 设备开合与 VAD 管线可用 |
 | `scripts/acceptance/live_wake.py` | REAL-MIC | ✅ 一次 `你好问问` 命中 |
-| (无) 声纹本人通过 / 他人拒绝 | REAL-MIC | ❌ 缺模型与录入 |
+| `scripts/enroll_speaker.py` | REAL-MIC | ⚠️ 已实现,**需你本人到场读 3–5 句** |
+| (无) 声纹本人通过 / 他人拒绝 / 录音回放 | REAL-MIC | ❌ 模型已就位,缺本人录入与第二个人(P10) |
 | (无) 真实 agent CLI 联调 | REAL-AGENT | ❌ 缺适配器(P5) |
 | (无) 真实 EvoX 联调 | REAL-EVOX | ❌ 缺脚本与端点 |
 | (无) 真机窗口验收 | REAL-WIN | ❌ 缺清单与脚本 |
@@ -135,10 +148,13 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 
 | 目的 | 命令 | 等级 | 预期 |
 |---|---|---|---|
-| Python 全量 | `.venv\Scripts\python.exe -m pytest tests -q` | AUTO | 43 passed, 2 skipped |
-| 声纹 | `.venv\Scripts\python.exe -m pytest tests/test_speaker.py -q` | AUTO | 11 passed(无需模型) |
+| Python 全量 | `.venv\Scripts\python.exe -m pytest tests -q` | AUTO | 67 passed, 2 skipped |
+| 声纹(免模型) | `.venv\Scripts\python.exe -m pytest tests/test_speaker.py tests/test_speaker_privacy.py -q` | AUTO | 30 passed(**无需模型**) |
+| 声纹(真实模型) | `.venv\Scripts\python.exe -m pytest tests/integration/test_speaker_model.py -q` | AUTO | 5 passed(缺模型时 5 skipped) |
+| 声纹录入 | `.venv\Scripts\python.exe scripts/enroll_speaker.py --name <名字>` | REAL-MIC | 写入向量,不写音频 |
+| 声纹注册状态 | `.venv\Scripts\python.exe scripts/enroll_speaker.py --name x --list-only` | AUTO | 只出名字与样本数 |
 | 事件契约 | `.venv\Scripts\python.exe -m pytest tests/test_events.py tests/test_event_schema.py -q` | AUTO | 9 passed |
-| 集成 | `.venv\Scripts\python.exe -m pytest tests/integration -q` | AUTO+SIM | 5 passed(缺模型时 3 passed, 2 skipped) |
+| 集成 | `.venv\Scripts\python.exe -m pytest tests/integration -q` | AUTO+SIM | 10 passed(缺模型时 3 passed, 7 skipped) |
 | 语音冒烟 | `.venv\Scripts\python.exe scripts/smoke_voice.py` | SIM | 打印生命周期事件 |
 | 端到端模拟 | `.venv\Scripts\python.exe scripts/e2e_simulated.py` | SIM | `E2E SIMULATED OK` |
 | t10 栈验证(证据生成) | `.venv\Scripts\python.exe scripts/acceptance/t10_voice_stack_validation.py` | AUTO+SIM | `t10 OK` |
@@ -200,7 +216,7 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 
 ### 5.5 声纹与平台层(AUTO,2026-08-02)
 
-全部**不依赖 37 MB 声纹模型**,这是有意的:要守的性质恰恰是模型缺失时必须成立的那些 —— 一个模型缺失就静默放行的门比没有门更糟。
+下表**不依赖 37 MB 声纹模型**,这是有意的:要守的性质恰恰是模型缺失时必须成立的那些 —— 一个模型缺失就静默放行的门比没有门更糟。需要权重的结论单列在 §5.6。
 
 | 检查项 | 结果 |
 |---|---|
@@ -216,9 +232,38 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 | 空名字注册被拒 | ✅ |
 | `describe()` 不含任何向量值 | ✅ 逐值断言不出现在序列化输出里 |
 | `remove()` 删除且幂等 | ✅ 第二次返回 `False` |
+| 环形缓冲只留最近窗口 / 超长块不崩 / `clear()` 丢音频 | ✅ |
+| 环形缓冲**无文件系统面** | ✅ AST 解析断言:只 import `numpy`/`typing`,无 `open`/`tofile`/`socket`/`Popen` 等标识符 |
+| 一整轮门周期后工作目录**为空** | ✅ `chdir(tmp_path)` 后 31 次回调 + 一次命中,目录零文件 |
+| 决策后校验窗口立即丢弃 | ✅ `len(ring) == 0` |
+| 要求校验但无 verifier → `start()` 拒绝 | ✅ 且不留开着的设备 |
+| 无人注册 → `start()` 拒绝 | ✅ |
+| 模型缺失 → `start()` 拒绝 | ✅ |
+| 校验器抛异常 → 记为拒绝 | ✅ `verifier error`,不是放行 |
+| 低分拒绝**静默**:不改状态、不发回复 | ✅ 状态机原地不动,只多一条 `wake.rejected` |
+| 门关闭时 `diagnose()` 出显式告警 | ✅ `anyone can wake the platform` |
+| `diagnose()` 报计数与名字,不报向量 | ✅ `repr` 里无 `raw`,无 `embeddings`/`vectors` 键 |
+| `enrollment/` 在 `.gitignore` 内 | ✅ 解析行断言,不是子串搜索 |
+| 缺配置文件仍默认 `require_verification=True` | ✅ 降级路径不是保护静默关闭的时机 |
 | 事件类型枚举从契约文件读取 | ✅ 9 种,Python 里不镜像 |
 | 四种契约违规被 `validate_event()` 拒 | ✅ 未知 type / 错 version / 多余字段 / 缺必填键 |
 | 平台层四包导入无副作用 | ✅ 不启子进程、不开套接字 |
+
+### 5.6 声纹判别力与延迟(AUTO,需模型,2026-08-02)
+
+| 检查项 | 结果 |
+|---|---|
+| 模型自检 | dim **512**,SHA-256 `1a33…5e4b`,39,593,761 字节 |
+| 冷加载耗时 | **0.234 s** |
+| 注册耗时(1 段 5.61 s) | 0.166 s |
+| **校验耗时(1.5 s 窗口,12 次)** | 中位数 **41 ms**(min 39.8 / max 42.7)—— NFR-1.9 目标 < 300 ms,达标 |
+| 真实人声簇内最低相似度 | **0.736**(7 段分三簇) |
+| 真实人声簇间最高相似度 | **0.370** |
+| 默认阈值 0.5 是否落在间隙 | ✅ 下侧余量 0.24,上侧 0.13 |
+| 注册一人后同人放行 / 他人拒绝 | ✅ 2/2 放行,4/4 拒绝 |
+| 合成音调能否替代人声测判别力 | ❌ **不能**:120 Hz vs 240 Hz 仍互通(0.767) |
+
+**这一节是 AUTO,不是 REAL-MIC。** 音频是模型自带的真实人声录音,不是本机麦克风采集。它能证明「模型确实能分辨人」并给阈值 0.5 提供依据;它**不能**证明本人通过率、他人拒绝率或回放行为 —— 那三项仍是第 17–19 项待验收。
 
 ## 6. 待验收矩阵(release gate)
 
@@ -240,10 +285,10 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 | 14 | RDP 软件渲染降级 | REAL-WIN | 远程桌面会话 | ❌ 缺 |
 | 15 | ≥30 min 资源画像 | REAL-WIN | CPU/内存/FPS 采样器 | ❌ 缺 |
 | 16 | 打包产物可安装运行 | REAL-WIN | NSIS/MSI 安装验证 | ❌ 缺 |
-| 17 | 声纹本人通过率(安静/远场/噪声) | REAL-MIC | 模型 + 本人录入 + 重复统计 | ❌ 缺 |
+| 17 | 声纹本人通过率(安静/远场/噪声) | REAL-MIC | ~~模型~~ + 本人录入 + 重复统计 | ❌ 缺(模型与录入 CLI 已就位,**待你本人到场**) |
 | 18 | 声纹他人拒绝(**球不弹、无任何输出**) | REAL-MIC | 第二个人配合 | ❌ 缺 |
 | 19 | 声纹录音回放攻击 | REAL-MIC | 录音回放 + 结果诚实记录 | ❌ 缺(**本轮不做反欺骗模型**,见 ADR 002 局限) |
-| 20 | 音频不落盘断言进默认套件 | AUTO | 采集路径写盘断言 | ❌ 缺(P1) |
+| 20 | 音频不落盘断言进默认套件 | AUTO | 采集路径写盘断言 | ✅ **已完成**(`test_a_full_gate_cycle_writes_nothing_to_disk` + 环形缓冲 AST 断言) |
 | 21 | agent 适配器真机(每种 kind 一项) | REAL-AGENT | 已装且已登录的 CLI | ❌ 缺(P5/P7) |
 | 22 | 路由在真实延迟下的表现 | REAL-AGENT | 计时埋点 + 多 agent | ❌ 缺(P6) |
 | 23 | `shell.run` 确认流程实机验收(含拒绝路径) | REAL-WIN | 唤醒球确认 UI | ❌ 缺(P4/P8) |
@@ -251,7 +296,7 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 | 25 | 记忆跨会话持久性 | REAL | 重启后召回 + 手改 Markdown 生效 | ❌ 缺(P3) |
 | 26 | 唤醒球运行时显隐(`show_orb`/`hide_orb`) | REAL-WIN | 功能未实现 | ❌ 缺(P8) |
 
-**26 项待验收,全部空白**。这是从「原型可用」到「可发布」之间的真实距离。第 17–26 项是 Phase 4 平台化新增的:声纹三项、隐私断言一项、agent 与路由两项、工具安全两项、记忆一项、唤醒球一项。
+**26 项里 1 项已完成(第 20 项,P1 交付),25 项待验收**。这是从「原型可用」到「可发布」之间的真实距离。第 17–26 项是 Phase 4 平台化新增的:声纹三项、隐私断言一项、agent 与路由两项、工具安全两项、记忆一项、唤醒球一项 —— 其中唯一能纯 AUTO 关掉的就是隐私断言那一项,其余全部需要真实硬件或真实第三方进程。
 
 ## 7. 测试债务与改进建议
 
@@ -280,3 +325,5 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 7. **mock 子进程 ≠ 真实 agent** — `cli.py` 的解析测试无论多全都只是 SIM,不能升级成 REAL-AGENT。
 8. **无声纹模型时的声纹测试** — 覆盖的是 fail-closed 与 store 行为,**不覆盖识别准确率**。本人通过率与他人拒绝率必须 REAL-MIC 实测。
 9. **声纹不防录音回放** — 本轮不做反欺骗模型,这是已知缺口(ADR 002 局限节),不是尚未测到。
+10. **合成音频不能测声纹判别力** — 已实测:120 Hz 与 240 Hz 两组谐波栈互相通过(0.767),因为模型把两者都读成同一种「非人声」。任何用生成音调测判别力的测试都会**空过**。`test_synthetic_tones_cannot_stand_in_for_speech` 把这个陷阱钉住了。
+11. **模型自带录音 ≠ 本机麦克风** — §5.6 的簇内 0.736 / 簇间 0.370 是真实人声,但是既有录音。它给阈值提供依据,等级是 AUTO,**不得当 REAL-MIC 报告**。

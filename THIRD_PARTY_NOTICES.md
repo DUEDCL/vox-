@@ -18,6 +18,7 @@
 | Model | Source | License | Status | Notes |
 |---|---|---|---|---|
 | sherpa-onnx-kws-zipformer-wenetspeech-3.3M | https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/ | model card per HF page; training data WenetSpeech (CC BY 4.0) | **adopted for prototype** | Custom keywords via keywords.txt, no retraining; release archive checksum still required |
+| 3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx | https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/ (tag typo `recongition` is upstream's) | 3D-Speaker upstream: Apache-2.0 | **adopted** (speaker gate) | SHA-256 `1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b`; 39,593,761 bytes; embedding dim 512; downloaded 2026-08-02, executed through the existing sherpa-onnx runtime — no new dependency |
 | silero_vad.onnx | local copy from `D:\program\voxcord\reference\silero-vad` (upstream package data) | MIT | **adopted for prototype** | SHA-256 `1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3`; replace local provenance with pinned upstream release URL before distribution |
 | sherpa-onnx-streaming-zipformer zh-en | https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-transducer/ | per model card | candidate (streaming ASR) | |
 | SenseVoiceSmall | https://modelscope.cn/models/iic/SenseVoiceSmall | **weights license to be captured from ModelScope card** | candidate (fast ASR) | Release blocker: archive license text + screenshot |

@@ -10,10 +10,11 @@ Every claim below is tagged by how it was established. Do not promote a lower le
 - **AUTO** — automated test / script run in this workspace's `.venv` or `desktop`, deterministic, no external hardware.
 - **SIM** — simulated/synthesized input (mock transport, synthesized audio, headless browser); exercises real code paths but not real devices.
 - **REAL-MIC** — real microphone on this Windows host.
+- **REAL-AGENT** — a real external agent process was launched, streamed real output, and completed a turn. Mock subprocesses are SIM.
 - **REAL-EVOX** — real EvoX session over the live bridge.
 - **REAL-WIN** — real Tauri/WebView2 window behavior (transparency, DPI, multi-monitor, RDP).
 
-Current status: DOC/AUTO/SIM and one REAL-MIC wake are established. REAL-EVOX and REAL-WIN acceptance are **not yet done** and remain release blockers.
+Current status: DOC/AUTO/SIM and one REAL-MIC wake are established. REAL-AGENT, REAL-EVOX and REAL-WIN acceptance are **not yet done** and remain release blockers.
 
 ## Environment of record (2026-07-28)
 
@@ -26,7 +27,10 @@ Current status: DOC/AUTO/SIM and one REAL-MIC wake are established. REAL-EVOX an
 
 | Purpose | Command | Level |
 |---|---|---|
-| Python suite | `.venv/Scripts/python.exe -m pytest tests -q` → 19 passed, 2 skipped | AUTO |
+| Python suite | `.venv/Scripts/python.exe -m pytest tests -q` → 67 passed, 2 skipped | AUTO |
+| Speaker gate (model-free) | `.venv/Scripts/python.exe -m pytest tests/test_speaker.py tests/test_speaker_privacy.py -q` | AUTO |
+| Speaker gate (real model) | `.venv/Scripts/python.exe -m pytest tests/integration/test_speaker_model.py -q` | AUTO |
+| Voiceprint enrollment | `.venv/Scripts/python.exe scripts/enroll_speaker.py --name <名字>` | REAL-MIC |
 | Voice smoke | `.venv/Scripts/python.exe scripts/smoke_voice.py` | SIM |
 | Simulated E2E | `.venv/Scripts/python.exe scripts/e2e_simulated.py` | SIM |
 | t10 stack validation | `.venv/Scripts/python.exe tmp_proto/t10_voice_stack_validation.py` | AUTO+SIM |
@@ -149,8 +153,50 @@ Additional evidence captured this run:
 
 Verification level: automated + headless Chromium visual capture. **Not** verified here: transparent-window compositing inside the real WebView2 runtime, true Windows DPI scaling at 125%/150%/175%, GPU load under sustained animation, and remote-desktop (RDP) software-render fallback. Those require the actual Tauri window and remain Phase 6 / t53 acceptance items. The spike confirms the plan's chosen architecture (Canvas 2D primary + CSS degradation + WebGL as v2) is technically sound at the render-route level before committing the production renderer files (t28–t35).
 
+## Session 2026-08-02 (P1 speaker gate — measured on real speech)
+
+Model: `models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx`, 39,593,761 bytes, SHA-256 `1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b`, embedding **dim 512**. Loaded through the already-installed sherpa-onnx 1.13.4 — **zero new Python dependency**, confirmed by return value (`load()` → `available=True`), not by absence of an exception.
+
+### Cosine separation on the 7 bundled KWS wavs — AUTO
+
+The recordings in `models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/test_wavs/` are real human speech (3.55–8.03 s each). No speaker labels ship with them; the grouping below was **derived from** the score matrix, then used to state the separation:
+
+| Pair | Score | Pair | Score |
+|---|---:|---|---:|
+| 0–1 | 0.777 | 0–3 | −0.074 |
+| 0–2 | 0.813 | 0–4 | 0.027 |
+| 1–2 | **0.866** | 1–5 | −0.105 |
+| 3–4 | **0.736** | 2–6 | −0.039 |
+| 5–6 | 0.755 | 3–5 | 0.270 |
+| | | 4–6 | 0.346 |
+| | | 4–5 | **0.370** |
+
+Three clusters: {0,1,2}, {3,4}, {5,6}. Within-cluster minimum **0.736**; cross-cluster maximum **0.370**. The shipped default `threshold = 0.5` sits inside that gap with ≈0.24 margin below and ≈0.13 above. Enrolling wav 0 then admits 1 and 2 and refuses 3, 4, 5, 6 — asserted in `tests/integration/test_speaker_model.py`.
+
+**Evidence level is AUTO, not REAL-MIC.** The audio is real speech but recorded and pre-existing. What this establishes: the model discriminates, and 0.5 is a defensible default. What it does **not** establish: own-voice pass rate on this host's microphone, another person's rejection rate, or replay behaviour. All three still need P10 (release blocker #8).
+
+### Negative result: synthetic audio cannot test discrimination — AUTO
+
+Enrolled a 120 Hz harmonic stack (7 partials + noise), verified a 240 Hz one — an octave apart, about as different as two synthetic signals get. Result: **accepted, score 0.767**. The model is trained on speech and reads both as the same non-voice. Any discrimination test built on generated tones would pass vacuously; `test_synthetic_tones_cannot_stand_in_for_speech` pins this so the trap stays documented rather than rediscovered.
+
+### KWS exposes no confidence — finding, corrects FR-1.8
+
+`sherpa_onnx.lib._sherpa_onnx.KeywordResult` carries only `keyword`, `timestamps`, `tokens`, and `KeywordSpotter.get_result()` returns a bare `str`. There is **no per-hit confidence in this binding at all**. The previous code reported `1.0`, which read like a measurement and was not one — including in the 2026-07-26 REAL-MIC entry above, where "score 1.0" was that constant, not a detector output. `feed()` now returns `(keyword, None)`, and the number that reaches `wake.detected` is the speaker cosine similarity, which *is* measured. See ADR 002.
+
+### Implemented and verified this session
+
+- `core/audio/ring.py` — 3 s in-memory ring buffer (~192 KB @16 kHz float32). Red line 1's literal enforcement point: an AST test asserts the module imports nothing beyond `numpy`/`typing` and references no filesystem, socket, or subprocess name.
+- `core/audio/capture.py` — gate wired at the KWS hit (ADR 002 option A). Preconditions checked **before** the device opens; every fail-closed branch raises.
+- `core/audio/speaker.py` — `load_speaker_config()` + `from_config()` over `config/speaker.toml` via stdlib `tomllib`. Paths deliberately stay on environment variables so a checked-in config can never point at somebody's enrollment data.
+- `evox_plugin/plugin.py` — `wake_rejected()` (no state transition, no reply) and `_diagnose_speaker()` (names and counts only, never a vector; explicit `warnings` when the gate is off).
+- `scripts/enroll_speaker.py` — interactive Chinese-prompted enrollment, append-only, audio never written anywhere.
+- Suite: **67 passed, 2 skipped** (was 43 at the end of P0; 19 privacy/fail-closed tests plus 5 model-gated integration tests added).
+
+Fail-closed paths asserted individually: model missing → `start()` raises; nobody enrolled → raises; no verifier attached but verification required → raises; verifier throws mid-decision → rejection, not a pass; score below threshold → silent rejection with no state change. A full gate cycle inside a `tmp_path` CWD leaves the directory **empty**.
+
 ## Not yet verified
 
+- Speaker gate on this host's microphone: own-voice pass rate, another person's rejection, recorded-replay behaviour (the gate does **not** claim replay resistance — ADR 002 「局限」).
 - Spoken real-microphone Silero endpointing acceptance (device opening and quiet-input rejection are verified).
 - Live EvoX conversation bridge.
 - Real streaming first-token latency.

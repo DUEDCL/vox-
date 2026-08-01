@@ -1,7 +1,7 @@
 # 项目总览与当前进度
 
 > 工作区:`D:\program\vioce-wake`
-> 最后更新:2026-08-02(Phase 4 平台化 P0 骨架落地)
+> 最后更新:2026-08-02(Phase 4 平台化 P1 声纹门落地)
 > 本文件是项目的单一入口(single source of truth,唯一事实来源),其它文档由此索引。
 
 ## 1. 项目是什么
@@ -27,12 +27,12 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 
 | 维度 | 状态 |
 |---|---|
-| 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架已落,P1 声纹起 |
+| 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架 + P1 声纹门已落,P2 契约起 |
 | 技术选型 | **已定案**,见 [ADR 001](adr/001-voice-stack-selection.md) ~ [ADR 005](adr/005-task-dispatch-model.md) |
-| Python 测试 | **43 passed, 2 skipped**(skipped 为可选 VoxCord 依赖) |
+| Python 测试 | **67 passed, 2 skipped**(skipped 为可选 VoxCord 依赖) |
 | 前端构建 | `npm run build`(tsc + vite)通过;`cargo check` 通过 |
-| 真机麦克风唤醒 | **已验证一次**(2026-07-26,`你好问问`,7.193s,score 1.0) |
-| 声纹准入 | provider 与 fail-closed 路径 **AUTO 已验**;门未接线,模型未下载,真机未验 |
+| 真机麦克风唤醒 | **已验证一次**(2026-07-26,`你好问问`,7.193s;当时打印的 score 1.0 是硬编码常量,不是测量值 —— 已改正,见 §7) |
+| 声纹准入 | 门**已接线**,模型已下载(dim 512);判别力 **AUTO 已验**(簇内 0.736 / 簇间 0.370,阈值 0.5 落在间隙);校验耗时 41 ms;**真机通过率未验** |
 | 平台层四包 | **仅契约**(315 行 Protocol),无实现 |
 | 真实 EvoX 会话桥接 | **未验证** — 发布阻塞项 |
 | 真实外部 agent | **未验证** — 发布阻塞项(REAL-AGENT) |
@@ -76,6 +76,19 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 - **测试边界归位** — t10 的行为断言升格 `tests/integration/`,需真实硬件的脚本移入 `scripts/acceptance/`。
 - **ADR 002–005 定案** — 声纹准入、agent 接入协议、记忆架构、任务派发模型。
 
+### Phase 4:P1 声纹门(2026-08-02)
+- **3 秒内存环形缓冲** — `core/audio/ring.py`,约 192 KB @16 kHz float32。红线 1 的字面执行点:AST 断言该模块只 import `numpy`/`typing`,不出现任何文件、套接字、子进程标识符。
+- **门接在 KWS 命中的瞬间** — ADR 002 的 (A) 方案。未授权者连球都不弹,拒绝发生在任何交互之前。
+- **fail-closed 五条路径** — 模型缺失 / 无人注册 / 无 verifier / 校验抛异常 / 分数低于阈值,全部落在拒绝一侧。前三条在 `start()` 就拒绝**且不留开着的设备**。
+- **`wake.rejected` 有了产出点** — 静默:不改状态、不发回复、不弹球。事件只为事后能回答「刚才为什么什么都没发生」。
+- **模型已下载并实测** — dim 512,冷加载 0.234 s,校验 41 ms(NFR-1.9 目标 300 ms)。真实人声簇内 0.736 / 簇间 0.370,默认阈值 0.5 落在间隙内。
+- **`feed()` 的诚实性缺口已补** — 见下节。
+- **录入 CLI** — `scripts/enroll_speaker.py`,追加语义,音频只在内存里。
+
+### 一个被改正的不诚实数字
+
+原 `feed()` 对每次命中报 `score=1.0`。核实结果:sherpa-onnx 1.13.4 的 `KeywordResult` 只有 `keyword` / `timestamps` / `tokens`,**这个绑定根本不暴露置信度**。那个 `1.0` 看起来像测量值而不是测量值,并且已经进过 2026-07-26 的真机记录。现在 `feed()` 返回 `(keyword, None)` —— `None` 是一个经核实的陈述;进入 `wake.detected` 的数字改成声纹余弦相似度,那个**是**测出来的。
+
 ### 已实现的代码骨架
 
 | 模块 | 文件 | 行数 | 说明 |
@@ -83,14 +96,16 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 事件契约 | `contracts/voice-events.schema.json` | 14 | 9 种事件类型,版本 `"1"`(**字节不变**) |
 | 状态机 | `core/state.py` | 53 | 6 状态 + 严格转移表(**不扩展**) |
 | 事件构造 | `core/events.py` | 93 | 信封唯一构造点 + 契约校验 |
-| 语音提供器 | `core/audio/`(6 模块 + `__init__`) | 688 | KWS/VAD/采集/**声纹**/VoxCord |
+| 语音提供器 | `core/audio/`(7 模块 + `__init__`) | 946 | KWS/VAD/采集/**声纹**/**环形缓冲**/VoxCord |
 | 重导出薄壳 | `core/providers.py` | 29 | 保旧导入路径不断 |
 | 会话桥接 | `core/session_bridge.py` | 92 | `ConversationTransport` 协议 + HTTP 实现 |
 | 平台层契约 | `core/{agents,dispatch,tools,memory}/contract.py` | 315 | **仅 Protocol,无实现** |
-| 插件门面 | `evox_plugin/plugin.py` | 191 | EvoX 工具面 + 回合编排 |
+| 插件门面 | `evox_plugin/plugin.py` | 257 | EvoX 工具面 + 回合编排 + 声纹诊断 |
+| 声纹配置 | `config/speaker.toml` | 28 | 阈值与时长下限,`tomllib` 读 |
+| 录入 CLI | `scripts/enroll_speaker.py` | 125 | 交互式录入,音频不落盘 |
 | 前端 | `desktop/src/main.ts` + `style.css` | 35 | 唤醒球与状态标签 |
 | 窗口 | `desktop/src-tauri/src/main.rs` | 31 | 透明、置顶、不占任务栏 |
-| 测试 | `tests/*.py` + `tests/integration/` | 661 | 45 用例,见 [测试文档](testing.md) |
+| 测试 | `tests/*.py` + `tests/integration/` | 1146 | 69 用例,见 [测试文档](testing.md) |
 
 ## 5. 进行中 / 下一步
 
@@ -99,8 +114,8 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 阶段 | 内容 | 证据等级 | 状态 |
 |---|---|---|---|
 | P0 | 骨架:声纹 provider、`events.py`、四包契约、测试归位、ADR 与文档 | AUTO | ✅ 完成 |
-| P1 | **声纹门**:环形缓冲、fail-closed 门、录入 CLI、`wake.rejected` 产出点、真实 score | AUTO | 🔄 下一步 |
-| P2 | 平台事件契约:`agent-events.schema.json` + `agents.schema.json` | AUTO | ⬜ |
+| P1 | **声纹门**:环形缓冲、fail-closed 门、录入 CLI、`wake.rejected` 产出点 | AUTO | ✅ 完成(真机留 P10) |
+| P2 | 平台事件契约:`agent-events.schema.json` + `agents.schema.json` | AUTO | 🔄 下一步 |
 | P3 | 记忆系统 `core/memory/` | AUTO | ⬜ |
 | P4 | 本地工具 `core/tools/` + `config/tools.toml` | AUTO | ⬜ |
 | P5 | agent 适配器 `cli.py` + `evox.py` | AUTO+SIM | ⬜ |
@@ -125,7 +140,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 5 | **独立透明置顶窗口**(合成/DPI 125-175%/多显示器/托盘/远程桌面) | 定义并编译通过 | REAL-WIN |
 | 6 | 持续运行资源画像(≥30 分钟 CPU/内存/FPS) | 未测 | REAL-WIN 长跑 |
 | 7 | 提供器可替换性(契约强制,无 SDK 类型泄漏) | AUTO 已验证 | 保持 |
-| 8 | **声纹准入实测**(本人通过 / 他人拒绝球不弹 / 录音回放) | AUTO(fail-closed 与 store) | REAL-MIC([ADR 002](adr/002-speaker-verification.md)) |
+| 8 | **声纹准入实测**(本人通过 / 他人拒绝球不弹 / 录音回放) | AUTO(fail-closed、store、判别力与阈值) | REAL-MIC([ADR 002](adr/002-speaker-verification.md)) |
 | 9 | **真实外部 agent 跑通一轮** | 仅契约 | REAL-AGENT([ADR 003](adr/003-agent-integration-protocol.md)) |
 | 10 | **工具安全实机**(`shell.run` 确认含拒绝路径、误唤醒防护) | 仅契约 | AUTO 全绿 + REAL-WIN([ADR 005](adr/005-task-dispatch-model.md)) |
 
@@ -152,10 +167,10 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 ## 8. 已知风险与注意事项
 
 - **`shell.run` 是全项目最大的安全风险面** — 「语音说一句话就能在本机执行命令」。声纹门砍掉「他人语音」这一支,但**误识别与录音回放仍然存在**,所以默认关闭 + 白名单 + 每次 UI 确认 + 危险模式拦截 + 审计日志五层一条都不能省(ADR 005)。
-- **声纹不防录音回放** — 本轮不做反欺骗模型,这是**已知缺口**而非尚未测到(ADR 002 局限节)。
+- **声纹不防录音回放** — 本轮不做反欺骗模型,这是**已知缺口**而非尚未测到(ADR 002 局限节)。真实人声的判别力已有 AUTO 背书(簇内 0.736 / 簇间 0.370),但**合成音频完全测不出判别力** —— 120 Hz 与 240 Hz 两组谐波栈互相通过 0.767,任何用生成音调测声纹的测试都会空过。
 - **声纹注册数据是生物特征** — `enrollment/` 已在 `.gitignore` 内,永不提交;查看注册状态只用 `describe()`。
 - **VoxCord 不在本机** — `D:\program\voxcord` 不存在,相关测试自动 skip;它是可选参考依赖,不影响发布路径。
-- **模型体积大** — `models/` 约 413 MB(含两个未清理的 `.tar.bz2` 归档共 192 MB),再加声纹模型 37 MB;打包策略需在 P8 前决定。多 agent 子进程并发另有内存压力,P6 需加派发并发上限。
+- **模型体积大** — `models/` 约 451 MB(含两个未清理的 `.tar.bz2` 归档共 192 MB,以及 37.8 MB 声纹模型);打包策略需在 P8 前决定。多 agent 子进程并发另有内存压力,P6 需加派发并发上限。
 - **开源项目判定多为「社区来源」** — `github.com` / `api.github.com` / `raw.githubusercontent.com` 的 WebFetch 在本环境全部被拦截,无法读取一手 README。除注明「官方文档确认」者外,star 数、许可证、最后提交时间均未直接核实,不得当官方结论用。
 - **SenseVoiceSmall 权重许可证未取证** — 若启用该 ASR 备选,须先归档 ModelScope 许可证文本。
 - **控制台中文乱码** — Windows 代码页显示问题,UTF-8 字节本身正确,不是数据缺陷。

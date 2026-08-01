@@ -7,7 +7,7 @@ desktop/src-tauri/target/
 *.pyc
 .env
 
-# 模型权重与归档：约 413 MB，不入版本库（获取方式见 docs/routines.md）
+# 模型权重与归档：约 451 MB（含 37.8 MB 声纹模型），不入版本库（获取方式见 docs/routines.md）
 models/
 
 # 声纹注册数据：生物特征，绝不入版本库

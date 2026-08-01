@@ -25,7 +25,7 @@ python scripts/e2e_simulated.py
 
 第一条检查单元、契约和适配器；第二条检查插件最小生命周期；第三条覆盖模拟链路：唤醒、识别文本、会话发送、回复、TTS 事件、连续对话、取消和停止。
 
-当前基线 **43 passed, 2 skipped**（2 个 skip 是可选的 VoxCord 适配器）。有声纹模型时 `tests/integration` 的两个模型用例也会跑，无模型时它们 skip —— 所以 skip 数会随环境变化，**passed 数下降才是回归**。
+当前基线 **67 passed, 2 skipped**（2 个 skip 是可选的 VoxCord 适配器）。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
 
 ## 契约或事件字段变更
 
@@ -113,9 +113,17 @@ python -c "from core.providers import VoxCordAdapter; print(VoxCordAdapter().loa
 .\.venv\Scripts\python.exe -m pytest tests/test_speaker.py tests/test_speaker_privacy.py -q
 ```
 
-这组测试**故意不依赖 37 MB 声纹模型**：要守的性质恰恰是模型缺失时必须成立的那些。逐条必须成立的是 fail-closed（失败即关闭）四条路径 —— 模型缺失、无人注册、embedding 抛异常、分数低于阈值 —— 全部落在拒绝一侧，`verify()` 对普通拒绝从不抛异常而是返回 `accepted=False`。另外两条是隐私断言：`describe()` 不含任何向量值，音频不落盘。
+预期 **30 passed**。这组测试**故意不依赖 37.8 MB 声纹模型**：要守的性质恰恰是模型缺失时必须成立的那些。逐条必须成立的是 fail-closed（失败即关闭）四条路径 —— 模型缺失、无人注册、embedding 抛异常、分数低于阈值 —— 全部落在拒绝一侧，`verify()` 对普通拒绝从不抛异常而是返回 `accepted=False`。另外两条是隐私断言：`describe()` 不含任何向量值，音频不落盘。
 
 **任何一条 fail-closed 断言变红都不许绕过。** 一个模型缺失就静默放行的声纹门，比没有门更糟 —— 它给了一种不存在的安全感。
+
+判别力与阈值另跑需要模型的那一组（预期 **5 passed**，模型缺失时 5 skipped）：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_speaker_model.py -q
+```
+
+它在模型自带的 7 段真实人声上断言簇内最低相似度高于簇间最高（实测 0.736 vs 0.370），默认阈值 0.5 落在这个间隙里。**这是 AUTO 不是 REAL-MIC** —— 既有录音不等于本机麦克风，本人通过率与他人拒绝率仍待 P10。其中一条是反向断言：合成音调**必须**继续互相通过，一旦它变红说明合成音频开始能测判别力了，改文档再依赖它。
 
 改完阈值后同时看诊断：
 
@@ -210,6 +218,12 @@ release tag 里 `recongition` 的拼写是**官方笔误**，照抄即可，改�
 ```
 
 预期 `available: True` 且 `dim` 为正整数。文件截断时 `load()` 会返回不可用及原因，**不会抛异常** —— 所以必须看返回值，不能靠「没报错」判定成功。
+
+本机 2026-08-02 实测值,用于比对完整性:39,593,761 字节,SHA-256 `1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b`,`dim 512`,冷加载 0.234 s。
+
+```powershell
+(Get-FileHash models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx -Algorithm SHA256).Hash
+```
 
 ## 声纹录入
 
@@ -311,4 +325,4 @@ rg "TODO|FIXME|release blocker|not verified" core evox_plugin desktop docs tests
 - 前端修改：`npm run build`；窗口属性修改再加 `cargo check` 和 Windows 实机验收。
 - 模型或依赖变更：记录版本、来源、归档校验结果到 `THIRD_PARTY_NOTICES.md` 和 `docs/research/prototype-results.md`。
 
-每个阶段收尾一律跑全量 `python -m pytest tests -q`（当前基线 **43 passed, 2 skipped**），不用单文件绿灯代替全量。
+每个阶段收尾一律跑全量 `python -m pytest tests -q`（当前基线 **67 passed, 2 skipped**），不用单文件绿灯代替全量。
