@@ -1,0 +1,21 @@
+__pycache__/
+.pytest_cache/
+.venv/
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+*.pyc
+.env
+
+# 模型权重与归档：约 413 MB，不入版本库（获取方式见 docs/routines.md）
+models/
+
+# 声纹注册数据：生物特征，绝不入版本库
+enrollment/
+*.voiceprint
+
+# 运行时产物与日志
+*.log
+.vite.pid
+.evox/
+tmp_proto/*.wav

@@ -1,0 +1,2 @@
+-r requirements-voice.txt
+pytest==9.1.1

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EvoX Voice Event",
+  "type": "object",
+  "required": ["version", "type", "id", "timestamp"],
+  "properties": {
+    "version": {"const": "1"},
+    "type": {"type": "string", "enum": ["wake.detected", "wake.rejected", "turn.started", "asr.final", "llm.delta", "tts.chunk", "turn.done", "turn.cancelled", "state.changed"]},
+    "id": {"type": "string", "minLength": 1},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "payload": {"type": "object"}
+  },
+  "additionalProperties": false
+}

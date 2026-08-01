@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>t11 orb render-route spike</title>
+<style>
+  :root { --amplitude:.4; --phase:0; color-scheme:dark; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; width:100%; height:100%; overflow:hidden; background:transparent; }
+  body { display:grid; place-items:center; font-family:"Segoe UI",sans-serif; }
+  #stage { position:relative; width:180px; height:180px; }
+  /* ---- CSS-only route (degradation baseline) ---- */
+  #css-orb { position:absolute; inset:0; border-radius:50%;
+    background:radial-gradient(circle at 40% 32%,#fff9 0 3%,transparent 18%),
+               radial-gradient(circle,#714bff88 0 24%,#1379e888 44%,#07101add 69%,transparent 72%); }
+  #css-orb .core { position:absolute; inset:25%; border-radius:50%;
+    background:conic-gradient(from calc(var(--phase)*30deg),#48dfff,#7b61ff,#ff4ca9,#ffd65c,#48dfff);
+    filter:blur(calc(7px + var(--amplitude)*6px));
+    transform:scale(calc(.82 + var(--amplitude)*.22)); }
+  /* ---- Canvas 2D + WebGL share the same box ---- */
+  canvas { position:absolute; inset:0; width:100%; height:100%; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="css-orb"><span class="core"></span></div>
+  <canvas id="canvas2d" class="hidden"></canvas>
+  <canvas id="webgl" class="hidden"></canvas>
+</div>
+<script>
+(function () {
+  const stage = document.getElementById('stage');
+  const cssOrb = document.getElementById('css-orb');
+  const c2d = document.getElementById('canvas2d');
+  const cgl = document.getElementById('webgl');
+  const dpr = window.devicePixelRatio || 1;
+
+  // Size the raster canvases for the current DPI.
+  function sizeCanvas(cv) {
+    const r = stage.getBoundingClientRect();
+    cv.width = Math.round(r.width * dpr);
+    cv.height = Math.round(r.height * dpr);
+  }
+  sizeCanvas(c2d); sizeCanvas(cgl);
+
+  let phase = 0, amplitude = 0.4;
+  let route = 'css';
+  let frames = 0, measuring = false, measureStart = 0;
+
+  // ---- Canvas 2D renderer ----
+  const ctx = c2d.getContext('2d');
+  function drawCanvas() {
+    const w = c2d.width, h = c2d.height, cx = w/2, cy = h/2;
+    ctx.clearRect(0,0,w,h);
+    const R = Math.min(w,h)*0.38*(0.82 + amplitude*0.22);
+    const g = ctx.createRadialGradient(cx,cy,R*0.1,cx,cy,R);
+    const hueShift = (Math.sin(phase)*0.5+0.5);
+    g.addColorStop(0, `hsla(${190+hueShift*40},100%,70%,0.95)`);
+    g.addColorStop(0.5, `hsla(${255+hueShift*30},90%,60%,0.6)`);
+    g.addColorStop(1, 'rgba(7,16,26,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2); ctx.fill();
+    // three wave rings responding to amplitude
+    for (let i=0;i<3;i++){
+      ctx.strokeStyle = `hsla(${200+i*60},100%,75%,${0.5-i*0.12})`;
+      ctx.lineWidth = 2*dpr;
+      ctx.beginPath();
+      const rr = R*(1.05+i*0.14) + Math.sin(phase+i)*amplitude*8*dpr;
+      ctx.arc(cx,cy,rr,0,Math.PI*2); ctx.stroke();
+    }
+  }
+
+  // ---- WebGL renderer (optional/v2 route) ----
+  let gl = null, glProgram = null, glOk = false, glLoc = {};
+  function initGL() {
+    gl = cgl.getContext('webgl') || cgl.getContext('experimental-webgl');
+    if (!gl) return false;
+    const vs = `attribute vec2 p; void main(){ gl_Position=vec4(p,0.,1.); }`;
+    const fs = `precision mediump float; uniform vec2 res; uniform float t; uniform float amp;
+      void main(){
+        vec2 uv=(gl_FragCoord.xy-0.5*res)/min(res.x,res.y);
+        float d=length(uv);
+        float r=0.38*(0.82+amp*0.22);
+        float glow=smoothstep(r,r-0.25,d);
+        float ring=abs(sin(d*18.0 - t*2.0))*smoothstep(r+0.15,r,d)*amp;
+        vec3 col=mix(vec3(0.28,0.87,1.0),vec3(0.48,0.38,1.0),0.5+0.5*sin(t+d*4.0));
+        gl_FragColor=vec4(col*glow + vec3(0.6,0.8,1.0)*ring, glow+ring);
+      }`;
+    function sh(type,src){ const s=gl.createShader(type); gl.shaderSource(s,src); gl.compileShader(s);
+      if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    try {
+      glProgram = gl.createProgram();
+      gl.attachShader(glProgram, sh(gl.VERTEX_SHADER, vs));
+      gl.attachShader(glProgram, sh(gl.FRAGMENT_SHADER, fs));
+      gl.linkProgram(glProgram);
+      if(!gl.getProgramParameter(glProgram,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(glProgram));
+      const buf=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+      gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+      const loc=gl.getAttribLocation(glProgram,'p'); gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+      glLoc.res=gl.getUniformLocation(glProgram,'res');
+      glLoc.t=gl.getUniformLocation(glProgram,'t');
+      glLoc.amp=gl.getUniformLocation(glProgram,'amp');
+      glOk=true; return true;
+    } catch(e) { glOk=false; window.__GL_ERROR__=String(e); return false; }
+  }
+  function drawGL() {
+    if(!glOk) return;
+    gl.viewport(0,0,cgl.width,cgl.height);
+    gl.useProgram(glProgram);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.uniform2f(glLoc.res,cgl.width,cgl.height);
+    gl.uniform1f(glLoc.t,phase);
+    gl.uniform1f(glLoc.amp,amplitude);
+    gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.drawArrays(gl.TRIANGLES,0,3);
+  }
+
+  function frame() {
+    phase += 0.045;
+    cssOrb.style.setProperty('--phase', String(Math.sin(phase)));
+    cssOrb.style.setProperty('--amplitude', String(amplitude));
+    if (route==='canvas') drawCanvas();
+    else if (route==='webgl') drawGL();
+    if (measuring) frames++;
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ---- test / self-verification API ----
+  function setRoute(r) {
+    route = r;
+    cssOrb.classList.toggle('hidden', r!=='css');
+    c2d.classList.toggle('hidden', r!=='canvas');
+    cgl.classList.toggle('hidden', r!=='webgl');
+    if (r==='webgl' && gl===null) initGL();
+    return route;
+  }
+
+  window.__SPIKE__ = {
+    ready: true,
+    dpr,
+    setRoute,
+    setAmplitude: (a)=>{ amplitude=Math.max(0.12,Math.min(1,a)); return amplitude; },
+    glSupported: () => { if(gl===null) initGL(); return glOk; },
+    glError: () => window.__GL_ERROR__ || null,
+    // measure fps for a route over `ms` using a promise the driver can await
+    measure: (r, ms) => new Promise((resolve)=>{
+      setRoute(r);
+      frames=0; measuring=true; measureStart=performance.now();
+      setTimeout(()=>{
+        measuring=false;
+        const elapsed=(performance.now()-measureStart)/1000;
+        resolve({ route:r, frames, seconds:+elapsed.toFixed(3), fps:+(frames/elapsed).toFixed(1) });
+      }, ms);
+    }),
+  };
+  window.__READY__ = true;
+})();
+</script>
+</body>
+</html>
