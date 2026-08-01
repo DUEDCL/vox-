@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `evox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **101 passed, 2 skipped** |
+| `core/` `evox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **169 passed, 2 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -22,7 +22,8 @@
 | `core/audio/speaker.py` `ring.py` `capture.py` | `pytest tests/test_speaker.py tests/test_speaker_privacy.py -q` | **30 passed**（**不需要声纹模型**） |
 | 声纹阈值或判别力 | `pytest tests/integration/test_speaker_model.py -q` | 5 passed（缺模型时 5 skipped） |
 | `core/tools/` | `pytest tests/test_tools.py tests/test_tool_security.py -q` | 全绿（P4 起） |
-| `core/memory/` | `pytest tests/test_memory.py -q` | 全绿（P3 起） |
+| `core/memory/` | `pytest tests/test_memory.py -q` | **62 passed** |
+| 记忆与语音路径接线 | `pytest tests/test_memory.py tests/test_plugin_tools.py -q` | **78 passed** |
 | `core/agents/` | `pytest tests/test_agent_contract.py tests/test_agent_cli.py -q` | 全绿（P5 起） |
 | `core/dispatch/` | `pytest tests/test_router.py tests/test_dispatcher.py -q` | 全绿（P6 起） |
 | `core/session_bridge.py` | `pytest tests/test_session_bridge.py tests/test_plugin_tools.py -q` | 全绿 |
@@ -35,25 +36,29 @@ skip 数会随环境变化（VoxCord、模型是否存在），**passed 数下�
 
 ## 当前阶段
 
-Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事件契约已落地，下一步 P3（记忆系统）。十阶段划分与 10 项发布阻塞项见 `docs/project-overview.md` 第 5、6 节。
+Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事件契约、P3 记忆系统已落地，下一步 P4（本地工具与安全门）。十阶段划分与 10 项发布阻塞项见 `docs/project-overview.md` 第 5、6 节。
 
 决策记录：ADR 001 语音栈 · ADR 002 声纹准入 · ADR 003 agent 接入 · ADR 004 记忆 · ADR 005 派发与工具门。
 
 **未实现，不要假设存在**：
-- 平台层四包的**任何实现** —— `core/{agents,dispatch,tools,memory}/` 现在只有 `contract.py`，`agents/` 另有 `schema.py`（配置校验，P2）
+- 平台层的 `agents` / `dispatch` / `tools` 三包 —— 现在只有 `contract.py`，`agents/` 另有 `schema.py`（配置校验，P2）
 - `config/agents.toml` 本身 —— 契约（`contracts/agents.schema.json`）已定，配置文件随适配器在 P5 落地
-- 平台 12 种事件的**产出点** —— 契约已定，`task.*`/`agent.*` 在 P6、`tool.*` 在 P4、`memory.*` 在 P3
+- 平台 12 种事件里除 `memory.*` 之外的**产出点** —— `task.*`/`agent.*` 在 P6、`tool.*` 在 P4
+- 记忆**召回的消费者** —— `MemoryRecaller` 已能查，但把结果注入任务是 dispatcher 的职责（P6）；`prune_turns()` 也还没有调用者，短期层暂不自动裁剪
 - 流式 ASR（识别文本靠外部注入）、TTS 播放队列与真实打断
 - 唤醒球运行时显隐（可见性现由 `EVOX_WAKE_VISIBLE` 静态决定）、Canvas 2D 生产渲染器、工具确认 UI
 - 超时/重连/错误恢复、系统托盘
 - 声纹**反欺骗**：门不防录音回放，这是已知缺口（ADR 002 局限），不是待办
 - 声纹**真机验收**：本人通过率、他人拒绝、回放实测都需你在场（P10）
+- 记忆**跨进程持久性**：Markdown 往返在同进程内已验，重启后仍未验（P10）
 
 **已完成但容易记错的**：
 - 声纹门已接线：3 秒内存环形缓冲 + KWS 命中即校验 + `require_verification` 默认 `True` + `wake.rejected` 产出点
 - 37.8 MB 声纹模型**已下载**（dim 512，SHA-256 记在 `THIRD_PARTY_NOTICES.md`）
 - `feed()` 返回 `(keyword, None)` —— sherpa-onnx 的 `KeywordResult` **根本不含置信度**，`None` 是经核实的陈述不是遗漏；`wake.detected` 的分数来自声纹相似度
 - 两个事件契约共用同一信封：语音 9 种 + 平台 12 种，`type` 枚举互斥。`validate_any_event()` 按 `type` 查表选契约，`validate_event(event, path)` 仍是严格路径
+- 记忆已接进语音路径，但是**opt-in**：`plugin.attach_memory(writer, recaller)` 不调用就没有数据库文件；`submit_text` 写用户轮、`complete_turn` 写助手轮，写入失败被静默吞掉（记忆不是对话的前提条件）
+- **FTS5 默认分词器搜不到中文**（已实测）。索引的是派生 token 列：索引侧 = 单字 + 相邻双字，查询侧 = 只用双字。改分词必须两侧同时改，见 ADR 004 的 2026-08-02 修正
 
 ## 注意事项
 
@@ -61,6 +66,7 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - **`VoiceState` 六态不改**，`contracts/voice-events.schema.json` **字节不变**、version 保持 `"1"` —— 这条现由 `tests/test_agent_event_schema.py` 的 SHA-256 摘要钉死，不靠自觉。平台事件走 `contracts/agent-events.schema.json`。
 - **信封只在 `core/events.py` 构造**。新事件类型加进契约文件即可，Python 侧不需要同步改。
 - **`enrollment/` 是生物特征**，已在 `.gitignore` 内，永不提交；查看注册状态只用 `describe()`，绝不输出向量。
+- **`memory/` 是个人数据**，已在 `.gitignore` 内（要不要纳入版本控制由你决定，取消那一行即可）。记忆事件只带 id / 计数 / 标签，**永不带文本** —— 事件会扇出到每一个日志与传输通道。凭据形状的文本**整条拒绝而不是打码**：多行私钥正是打码会留下正文的那个例子。
 - **声纹 fail-closed 断言不许绕过**：模型缺失、无人注册、校验抛异常都必须落在拒绝一侧。一个静默放行的声纹门比没有门更糟。
 - **`shell.run` 默认关闭**，白名单外的命令**拒绝而非询问**（询问会训练出无脑点确认的习惯）。
 - 文档要同步更新：实测数据进 `docs/research/prototype-results.md`，新例程进 `docs/routines.md`，依赖与模型版本进 `THIRD_PARTY_NOTICES.md`。

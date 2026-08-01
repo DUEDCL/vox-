@@ -27,9 +27,9 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 
 | 维度 | 状态 |
 |---|---|
-| 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架 + P1 声纹门 + P2 平台契约已落,P3 记忆起 |
+| 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架 + P1 声纹门 + P2 平台契约 + P3 记忆已落,P4 工具起 |
 | 技术选型 | **已定案**,见 [ADR 001](adr/001-voice-stack-selection.md) ~ [ADR 005](adr/005-task-dispatch-model.md) |
-| Python 测试 | **101 passed, 2 skipped**(skipped 为可选 VoxCord 依赖) |
+| Python 测试 | **169 passed, 2 skipped**(skipped 为可选 VoxCord 依赖) |
 | 前端构建 | `npm run build`(tsc + vite)通过;`cargo check` 通过 |
 | 真机麦克风唤醒 | **已验证一次**(2026-07-26,`你好问问`,7.193s;当时打印的 score 1.0 是硬编码常量,不是测量值 —— 已改正,见 §7) |
 | 声纹准入 | 门**已接线**,模型已下载(dim 512);判别力 **AUTO 已验**(簇内 0.736 / 簇间 0.370,阈值 0.5 落在间隙);校验耗时 41 ms;**真机通过率未验** |
@@ -98,6 +98,17 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 - **一条反向断言** — schema **不许**长出校验器没实现的关键字。声明了却不生效的约束比不声明更糟:它读起来像保护。
 - **零新依赖** — 确认 `.venv` 里没有 `jsonschema`,两个校验器都手写,理由与 `core/events.py` 当初一致:契约只有十几行,不值得换一个运行时依赖。
 
+### Phase 4:P3 记忆系统(2026-08-02)
+- **三层落在一张表上** — 短期(当前会话轮次)/ 中期(跨会话事实)/ 长期(工具审计与派发统计),`scope` 区分,`records` 一张表加一个 FTS5 索引。单文件、无服务、进程内。
+- **FTS5 默认分词器搜不到中文(实测)** — 「用户喜欢用中文交流 and english too」这一行,`MATCH 'english'` 命中,`MATCH '中文'` **不命中**:`unicode61` 把整段连续汉字当一个 token。ICU 没编进来,加分词扩展等于加一个原生依赖。解法是索引**派生 token 列**而不是原文:索引侧 = 单字 + 相邻双字,查询侧 = 只用双字(丢掉单字,才能让「偏好」不去匹配只含「好」的记录)。召回两段式:严格(全词 AND)不中才退到 bm25 排序的宽松(OR)。
+- **去重规则写进 schema 而不是写在 writer 里** — `(scope, kind, fingerprint) WHERE scope = 'mid'` 的**部分唯一索引**。只有事实层去重;两句相同的话是两个事件,轮次与审计是时间序列,collapse 掉就毁了长期层存在的理由。
+- **凭据整条拒绝,不打码** — 多行私钥是那个决定性例子:模式匹配到头部,打码会把正文存下来。9 个凭据样本被拒且 `count() == 0`,同时 5 句日常话(含「我的密码忘了怎么办」「token 是什么意思」)不许误伤 —— 会误伤日常话的过滤器一天之内就会被关掉。
+- **记忆事件不带文本** — `memory.written` / `memory.recalled` 只带 id、计数、标签、scope。事件会扇出到每一个日志与传输通道,文本留在库里。这也是平台 12 种事件里第一批有真实产出点的。
+- **Markdown 是事实来源,SQLite 是它上面的索引** — `memory/facts/*.md` 可手改,`sync_facts()` 折回索引;无 front matter 的裸文件也能被收录并把 id 写回。`prune=False` 是默认:一次误删目录不该清空记忆。
+- **红线 1 由结构保证** — `records` 每一列都是 `TEXT` 或 `INTEGER`,**没有 BLOB**,音频没有列可以落;`MemoryRecord` 不声明 `bytes` 字段;`write()` / `write_turn()` 遇 `bytes` 抛 `TypeError`。
+- **接进语音路径但是 opt-in** — 不调 `attach_memory()` 就不会有数据库文件。`submit_text` 写用户轮、`complete_turn` 写助手轮;写入失败被静默吞掉 —— 记忆是回合的增强,不是回合的前提,一个被锁住的数据库不该能中断对话。
+- **`success_rate()` 无观测时返回 `None` 而不是 0.0** — 否则一个还没试过的 agent 会输给一个只失败过一次的 agent(ADR 005 的路由第四维)。
+
 ### 已实现的代码骨架
 
 | 模块 | 文件 | 行数 | 说明 |
@@ -111,13 +122,15 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 语音提供器 | `core/audio/`(7 模块 + `__init__`) | 946 | KWS/VAD/采集/**声纹**/**环形缓冲**/VoxCord |
 | 重导出薄壳 | `core/providers.py` | 29 | 保旧导入路径不断 |
 | 会话桥接 | `core/session_bridge.py` | 92 | `ConversationTransport` 协议 + HTTP 实现 |
-| 平台层契约 | `core/{agents,dispatch,tools,memory}/contract.py` | 315 | **仅 Protocol,无实现** |
-| 插件门面 | `evox_plugin/plugin.py` | 257 | EvoX 工具面 + 回合编排 + 声纹诊断 |
+| 平台层契约 | `core/{agents,dispatch,tools}/contract.py` | 256 | **仅 Protocol,无实现** |
+| 记忆系统 | `core/memory/`(`store`/`write`/`recall`/`__init__`) | 1093 | SQLite + FTS5 单文件、中文双字索引、凭据过滤、Markdown 镜像 |
+| 记忆配置 | `config/memory.toml` | 23 | 库路径、事实目录、召回上限、短期保留数 |
+| 插件门面 | `evox_plugin/plugin.py` | 326 | EvoX 工具面 + 回合编排 + 声纹诊断 + 记忆接线 |
 | 声纹配置 | `config/speaker.toml` | 28 | 阈值与时长下限,`tomllib` 读 |
 | 录入 CLI | `scripts/enroll_speaker.py` | 125 | 交互式录入,音频不落盘 |
 | 前端 | `desktop/src/main.ts` + `style.css` | 35 | 唤醒球与状态标签 |
 | 窗口 | `desktop/src-tauri/src/main.rs` | 31 | 透明、置顶、不占任务栏 |
-| 测试 | `tests/*.py` + `tests/integration/` | 1420 | 103 用例,见 [测试文档](testing.md) |
+| 测试 | `tests/*.py` + `tests/integration/` | 2082 | 171 用例,见 [测试文档](testing.md) |
 
 ## 5. 进行中 / 下一步
 
@@ -128,8 +141,8 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | P0 | 骨架:声纹 provider、`events.py`、四包契约、测试归位、ADR 与文档 | AUTO | ✅ 完成 |
 | P1 | **声纹门**:环形缓冲、fail-closed 门、录入 CLI、`wake.rejected` 产出点 | AUTO | ✅ 完成(真机留 P10) |
 | P2 | 平台事件契约:`agent-events.schema.json` + `agents.schema.json` | AUTO | ✅ 完成 |
-| P3 | 记忆系统 `core/memory/` | AUTO | 🔄 下一步 |
-| P4 | 本地工具 `core/tools/` + `config/tools.toml` | AUTO | ⬜ |
+| P3 | 记忆系统 `core/memory/` | AUTO | ✅ 完成(跨进程持久性留 P10) |
+| P4 | 本地工具 `core/tools/` + `config/tools.toml` | AUTO | 🔄 下一步 |
 | P5 | agent 适配器 `cli.py` + `evox.py` | AUTO+SIM | ⬜ |
 | P6 | 派发/路由/汇总 `core/dispatch/` | AUTO+SIM | ⬜ |
 | P7 | `acp.py` + `http.py` / `openclaw.py` | AUTO | ⬜ |
@@ -141,7 +154,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 
 ## 6. 发布阻塞项(release blockers)
 
-以下每一项都必须有**真机证据**才能关闭。第 1–7 项见 [ADR 001](adr/001-voice-stack-selection.md#required-before-release-blockers),第 8–10 项为 Phase 4 平台化新增:
+以下每一项都必须有**真机证据**才能关闭。第 1–7 项见 [ADR 001](adr/001-voice-stack-selection.md#required-before-release-blockers),第 8–11 项为 Phase 4 平台化新增:
 
 | # | 阻塞项 | 当前等级 | 需要达到 |
 |---|---|---|---|
@@ -155,6 +168,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 8 | **声纹准入实测**(本人通过 / 他人拒绝球不弹 / 录音回放) | AUTO(fail-closed、store、判别力与阈值) | REAL-MIC([ADR 002](adr/002-speaker-verification.md)) |
 | 9 | **真实外部 agent 跑通一轮** | 仅契约 | REAL-AGENT([ADR 003](adr/003-agent-integration-protocol.md)) |
 | 10 | **工具安全实机**(`shell.run` 确认含拒绝路径、误唤醒防护) | 仅契约 | AUTO 全绿 + REAL-WIN([ADR 005](adr/005-task-dispatch-model.md)) |
+| 11 | **记忆跨会话持久性**(重开进程后事实仍在、手改 Markdown 被下一次召回看到) | AUTO(同进程往返) | REAL([ADR 004](adr/004-memory-architecture.md)) |
 
 ## 7. 文档地图
 

@@ -85,7 +85,7 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
       └─────────────────────────────────┘
 ```
 
-### L1–L2 单元与契约(`tests/`,10 文件 1161 行,93 用例)
+### L1–L2 单元与契约(`tests/`,11 文件 1823 行,161 用例)
 
 | 文件 | 用例数 | 覆盖内容 |
 |---|---:|---|
@@ -93,7 +93,8 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 | `test_events.py` | 8 | 契约枚举从文件读取(9 种类型)、信封形状、payload 默认、id 唯一性、四种契约违规被拒 |
 | `test_agent_event_schema.py` | 34 | `voice-events.schema.json` **SHA-256 摘要钉死**;平台契约 12 种类型分四组;两信封同形且枚举互斥;`contract_for()` 全类型解析与未声明类型报错;`validate_any_event()` 双流通过、送错契约仍失败;agent 注册契约 16 条拒绝路径;`kind` 枚举与 `AGENT_KINDS` 一致;**schema 不许超出校验器实现的关键字子集** |
 | `test_voice_contract.py` | 2 | 生命周期契约;非法提交与取消被拒 |
-| `test_plugin_tools.py` | 10 | pause/resume 门控、采集生命周期、启动失败回滚、合成唤醒标记、完整回合契约、传输层接线、诊断不泄漏 token、设备枚举 |
+| `test_plugin_tools.py` | 16 | pause/resume 门控、采集生命周期、启动失败回滚、合成唤醒标记、完整回合契约、传输层接线、诊断不泄漏 token、设备枚举;**记忆接线 6 项**:两侧轮次都入库并带 `role:*` 标签、不 attach 就没有数据库文件、writer 抛异常不打断对话、凭据话术经真实 `submit_text` 也进不了库、`diagnose()["memory"]` 报计数不报文本、未接记忆时告警 |
+| `test_memory.py` | 62 | store 与协议一致、构造不开文件、schema 版本与幂等 close、**无 BLOB 列**、`MemoryRecord` 无 `bytes` 字段、未知 scope/kind 与空文本被拒、`bytes` 抛 `TypeError`、forget 连索引一起删;三层各归其位、`memory.written` 属平台契约而非语音契约、事件不带文本、召回只报计数、prune 保留最新;去重(同一事实、3 种近似变体、拉丁大小写、标签合并、轮次与审计**不去重**、fingerprint 边界);召回(中文可搜、精确到能返回空、拉丁忽略大小写、limit 与 scope、**麦克风里的 FTS 语法不炸**、轮次时间序、严格胜过宽松、两侧分词一致);长期层成功率(无观测返回 `None`、按审计标签算出 2/3);凭据过滤(9 样本整条拒绝且无事件无残留、5 句日常话不误伤、每个模式都有名字);Markdown 镜像(落文件带 front matter、手改在下一次召回生效、裸文件被收录并写回 id、文件里的凭据被拒、只有 `prune=True` 才删索引、无目录时是 no-op、未闭合 front matter 当正文);配置(默认值、`open_memory` 三件套、未来 schema 版本被拒、单文件、**`.gitignore` 里 `/memory/` 的前导斜杠**——不带斜杠会连 `core/memory/` 的源码一起忽略) |
 | `test_speaker.py` | 11 | store 往返/原子写/版本拒绝/损坏 JSON 拒绝;fail-closed 四条路径;`describe()` 不含向量;`remove()` 幂等 |
 | `test_speaker_privacy.py` | 19 | 环形缓冲窗口语义与超长块;**AST 断言缓冲无文件系统面**;全周期空目录断言;决策后窗口即丢;四条 fail-closed `start()` 拒绝;校验异常算拒绝;拒绝不改状态不发回复;`diagnose()` 报计数不报向量、门关时告警;`enrollment/` 在 `.gitignore` 内;缺配置仍默认要求校验 |
 | `test_provider_adapter.py` | 2 | VoxCord 加载与 VAD 回退契约(**无 VoxCord 时 skip**) |
@@ -149,7 +150,8 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 
 | 目的 | 命令 | 等级 | 预期 |
 |---|---|---|---|
-| Python 全量 | `.venv\Scripts\python.exe -m pytest tests -q` | AUTO | 101 passed, 2 skipped |
+| Python 全量 | `.venv\Scripts\python.exe -m pytest tests -q` | AUTO | 169 passed, 2 skipped |
+| 记忆 | `.venv\Scripts\python.exe -m pytest tests/test_memory.py -q` | AUTO | 62 passed(**无需模型**) |
 | 声纹(免模型) | `.venv\Scripts\python.exe -m pytest tests/test_speaker.py tests/test_speaker_privacy.py -q` | AUTO | 30 passed(**无需模型**) |
 | 声纹(真实模型) | `.venv\Scripts\python.exe -m pytest tests/integration/test_speaker_model.py -q` | AUTO | 5 passed(缺模型时 5 skipped) |
 | 声纹录入 | `.venv\Scripts\python.exe scripts/enroll_speaker.py --name <名字>` | REAL-MIC | 写入向量,不写音频 |
@@ -275,6 +277,30 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 
 **这一节是 AUTO,不是 REAL-MIC。** 音频是模型自带的真实人声录音,不是本机麦克风采集。它能证明「模型确实能分辨人」并给阈值 0.5 提供依据;它**不能**证明本人通过率、他人拒绝率或回放行为 —— 那三项仍是第 17–19 项待验收。
 
+### 5.7 记忆(AUTO,2026-08-02,P3)
+
+| 检查项 | 结果 |
+|---|---|
+| FTS5 是否可用 | ✅ SQLite **3.49.1**,`ENABLE_FTS5` 在编译选项里 |
+| **FTS5 默认分词器能否搜中文** | ❌ **不能**(实测):同一行里 `MATCH 'english'` 命中、`MATCH '中文'` 不命中 —— `unicode61` 把整段连续汉字当一个 token |
+| 派生 token 列后中文能否搜到 | ✅ 「中文」找到「用户喜欢用中文交流」;「完全无关的查询」返回空 |
+| 索引侧与查询侧分词是否一致 | ✅ 索引 = 单字 + 相邻双字;查询 = 只用双字,所以「偏好」不会匹配只含「好」的记录 |
+| 麦克风里的 FTS 语法 | ✅ `NOT 中文` / `中文 OR *` / `"unbalanced` / `中文 AND (` / 空串都不抛异常 |
+| `records` 表列类型 | ✅ 全部 `TEXT` 或 `INTEGER`,**无 BLOB** —— 音频没有列可落 |
+| `bytes` 入库 | ✅ `store.write()` 与 `writer.write_turn()` 都抛 `TypeError` |
+| 凭据形状文本 | ✅ 9 个样本**整条拒绝**,`count() == 0`,不发事件,`last_refusal` 与 `describe()` 里都找不到原文 |
+| 日常话是否误伤 | ✅ 5 句(含「我的密码忘了怎么办」「token 是什么意思」)全部放行 |
+| 记忆事件是否带文本 | ✅ 只有 id / scope / kind / 计数 / 标签;`memory.written` 在平台契约里、不在语音契约里 |
+| 去重范围 | ✅ 仅中期事实层(部分唯一索引);两句相同的轮次、两条相同的审计都保留 |
+| Markdown 往返 | ✅ 手改 `memory/facts/*.md` → `sync_facts()` → 下一次召回跟着变;裸文件被收录并写回 id;文件里的凭据被拒;删文件只在 `prune=True` 时删索引 |
+| 单文件 | ✅ 只有 `memory.db` 加 SQLite 自己的 `-wal`/`-shm`/`-journal` |
+| 无观测时的成功率 | ✅ `rate` 是 `None` 而不是 `0.0` |
+| 记忆接进语音路径 | ✅ 两侧轮次都入库并带 `role:*`;不 attach 就不产生数据库文件;writer 抛异常不打断回合 |
+| `/memory/` 是否锚定 | ✅ 前导斜杠已加,并有测试解析 `.gitignore` 双向断言 —— 不带斜杠时 `git check-ignore` 实测把 `core/memory/store.py` 也算进忽略 |
+| 用例数 / 耗时 | 62 passed in 0.69 s(`tests/test_memory.py`) |
+
+**跨进程重启未验。** 上面的 Markdown 往返全部发生在一个进程内。「关掉程序重开,事实还在」是第 25 项待验收,等级 REAL,不是 AUTO 能关的。
+
 ## 6. 待验收矩阵(release gate)
 
 | # | 待验收项 | 目标等级 | 需要的测试资产 | 当前 |
@@ -303,7 +329,7 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 | 22 | 路由在真实延迟下的表现 | REAL-AGENT | 计时埋点 + 多 agent | ❌ 缺(P6) |
 | 23 | `shell.run` 确认流程实机验收(含拒绝路径) | REAL-WIN | 唤醒球确认 UI | ❌ 缺(P4/P8) |
 | 24 | 误唤醒触发工具执行的防护验证 | REAL-MIC | 攻击面用例 | ❌ 缺(P4) |
-| 25 | 记忆跨会话持久性 | REAL | 重启后召回 + 手改 Markdown 生效 | ❌ 缺(P3) |
+| 25 | 记忆跨会话持久性 | REAL | 重启后召回 + 手改 Markdown 生效 | ❌ 缺(P10;同进程往返已 AUTO) |
 | 26 | 唤醒球运行时显隐(`show_orb`/`hide_orb`) | REAL-WIN | 功能未实现 | ❌ 缺(P8) |
 
 **26 项里 1 项已完成(第 20 项,P1 交付),25 项待验收**。这是从「原型可用」到「可发布」之间的真实距离。第 17–26 项是 Phase 4 平台化新增的:声纹三项、隐私断言一项、agent 与路由两项、工具安全两项、记忆一项、唤醒球一项 —— 其中唯一能纯 AUTO 关掉的就是隐私断言那一项,其余全部需要真实硬件或真实第三方进程。

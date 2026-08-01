@@ -36,8 +36,8 @@
 │ 声纹 speaker(P1)     │   └───────────────────────────────┘
 └──────────────────────┘
 
-平台层 Platform(仅契约,实现 P3～P7):
-core/agents/ 适配器 · core/dispatch/ 派发 · core/tools/ 工具 · core/memory/ 记忆
+平台层 Platform(`memory` 已实现,其余仅契约,实现 P4～P7):
+core/agents/ 适配器 · core/dispatch/ 派发 · core/tools/ 工具 · **core/memory/ 记忆**
 ```
 
 **依赖方向铁律**:核心层不认识插件层,插件层不认识桌面层。所有跨层通信走事件契约或协议接口,任何 sherpa-onnx / sounddevice / VoxCord 的类型都不得出现在公开事件结构里。
@@ -87,7 +87,7 @@ core/agents/ 适配器 · core/dispatch/ 派发 · core/tools/ 工具 · core/me
 | `tool.requested` | 工具请求进入政策门 | P4 policy |
 | `tool.confirm_required` | 政策原则上允许但要求显式确认(`shell.run`) | P4 policy |
 | `tool.executed` / `tool.refused` | 工具执行结果 / 被拒 | P4 policy |
-| `memory.written` / `memory.recalled` | 记忆写入 / 召回 | P3 store |
+| `memory.written` / `memory.recalled` | 记忆写入 / 召回 | P3 store ✅ **已有产出点** |
 
 **六态状态机不为这些事件加子状态。** 派发全过程发生在 `thinking` 内部,进度只由 `task.*` 表达 —— 状态机因此不反映派发细节,换来的是三个现有契约测试一个字不改(ADR 005)。
 
@@ -265,7 +265,7 @@ cancel         → transport.cancel(last_turn_id) + state.changed(cancelled) + t
 
 ## 8. 平台层(`core/{agents,dispatch,tools,memory}/`,契约 + 契约校验)
 
-Phase 4 新增的四个包。当前**只有契约与契约校验**:四个 `contract.py` 共 315 行 Protocol(协议)与冻结 dataclass,加 `core/agents/schema.py` 的配置校验(P2),没有任何 adapter/tool/store 实现。导入这四个包**不得**启动子进程或打开套接字,这条写在各自的模块 docstring 里,并有测试。
+Phase 4 新增的四个包。`agents` / `dispatch` / `tools` 三包**只有契约与契约校验**:三个 `contract.py` 共 256 行 Protocol(协议)与冻结 dataclass,加 `core/agents/schema.py` 的配置校验(P2),没有任何 adapter/tool 实现。`memory` 已在 P3 落地实现(1093 行)。导入这四个包**不得**启动子进程或打开套接字,这条写在各自的模块 docstring 里,并有测试。
 
 六个新边界:
 
@@ -276,9 +276,21 @@ Phase 4 新增的四个包。当前**只有契约与契约校验**:四个 `contr
 | 3 | **派发** | `core/dispatch/contract.py`(93 行) | `single`/`race`/`fanout` 三模式;语音默认前两者,`fanout` 会把首字延迟拖成最慢 agent 的延迟(ADR 005) |
 | 4 | **路由汇总** | 同上 | 五维打分(能力/成本/延迟/成功率/负载)+ 熔断器;`Aggregator.merge(mode, streams)` |
 | 5 | **工具** | `core/tools/contract.py`(80 行) | `ToolPolicy.check()` 返回 `None` 放行、返回拒绝的 `ToolResult` 挡下。`voice` 与 `agent` 两个 origin 走**同一道门**,agent 拿不到用户语音拿不到的能力 |
-| 6 | **记忆** | `core/memory/contract.py`(59 行) | 三层(short/mid/long)× 三类(turn/fact/audit);**只存文本,音频永不入库**,`asr.final` 入库前过敏感模式过滤(ADR 004) |
+| 6 | **记忆** | `core/memory/`(契约 59 行 + 实现 1093 行) | 三层(short/mid/long)× 三类(turn/fact/audit);**只存文本,音频永不入库**(`records` 无 BLOB 列),入库前过敏感模式过滤(ADR 004)。**已实现**(P3) |
 
-另有两条契约边界在 §2:平台事件契约(12 种 `task.*`/`agent.*`/`tool.*`/`memory.*`)与 agent 注册契约,两者都在 P2 落地,产出方与消费方分散在 P3–P6。
+### 8.1 记忆的内部边界(P3)
+
+| 边界 | 守什么 |
+|---|---|
+| `store.py` ↔ `write.py` | schema 与索引只有 store 认识;去重规则以**部分唯一索引**写在 schema 里,不靠 writer 自觉 |
+| `write.py` ↔ 入库文本 | 凭据形状**整条拒绝**,不打码 —— 多行私钥会让打码只挡住头部 |
+| `recall.py` ↔ 用户语音 | 查询词全部加引号进 FTS5,`NOT` / `*` / `(` 从麦克风来时是普通词而不是运算符 |
+| 索引 ↔ 中文 | FTS5 默认分词器搜不到中文(实测)。索引的是**派生 token 列**:索引侧单字 + 双字,查询侧只用双字。两侧必须同时改 |
+| Markdown ↔ SQLite | `memory/facts/*.md` 是事实来源,SQLite 是它上面的索引;`sync_facts()` 单向折回,`prune=False` 是默认 |
+| 记忆 ↔ 事件 | `memory.written` / `memory.recalled` 只带 id、计数、标签,**永不带文本** —— 事件会扇出到每个日志与传输通道 |
+| 记忆 ↔ 语音路径 | opt-in:不调 `attach_memory()` 就没有数据库文件;写入失败被吞掉,记忆不是回合的前提条件 |
+
+另有两条契约边界在 §2:平台事件契约(12 种 `task.*`/`agent.*`/`tool.*`/`memory.*`)与 agent 注册契约,两者都在 P2 落地;`memory.*` 的产出方在 P3 已就位,其余分散在 P4–P6。
 
 意图分类**先用规则不用模型**:「读一下 X」「搜一下 Y」「运行 Z」正则命中直执行本地工具,延迟从秒级降到毫秒级,且规则命中的部分可以纯 AUTO 测试;未命中才走 agent 路由。
 
@@ -297,7 +309,7 @@ Phase 4 新增的四个包。当前**只有契约与契约校验**:四个 `contr
 | 渲染路线 ↔ 应用协调 | 换 Canvas/WebGL 不动业务代码 | 计划中的 `Renderer` 接口(Phase 4) |
 | 业务 ↔ agent 实现 | 派发层不认识 claude/codex/opencode | `AgentAdapter` Protocol + 类型只许原语 |
 | 工具调用 ↔ 调用来源 | 工具不区别对待 voice 与 agent | 单一 `ToolPolicy.check()` 入口 |
-| 记忆 ↔ 音频 | 记忆层拿不到波形 | 契约里只有 `text` 字段 + 断言测试 |
+| 记忆 ↔ 音频 | 记忆层拿不到波形 | `records` 无 BLOB 列 + `bytes` 抛 `TypeError` + 断言测试 |
 | 记忆 ↔ 任务注入 | 记忆不认识 `Task` 形状 | 注入是 dispatch 的职责,不是 memory 的 |
 
 ## 10. 尚未实现的架构件(Phase 4 起)
@@ -308,7 +320,7 @@ Phase 4 新增的四个包。当前**只有契约与契约校验**:四个 `contr
 | ~~`wake.rejected` 事件产出~~ | 插件层 | P1 | ✅ **已完成** —— 声纹门是它第一个真实触发条件 |
 | ~~`feed()` 返回真实 score~~ | `core/audio/kws.py` | P1 | ✅ **已改正**:`KeywordResult` 不含置信度,`feed()` 返回 `(keyword, None)`;`wake.detected` 的分数来自声纹相似度 |
 | ~~平台事件契约~~ | `contracts/agent-events.schema.json` + `agents.schema.json` | P2 | ✅ **已完成** |
-| 记忆实现 | `core/memory/{store,write,recall}.py` | P3 | SQLite + FTS5 |
+| ~~记忆实现~~ | `core/memory/{store,write,recall}.py` | P3 | ✅ **已完成** —— SQLite + FTS5,中文靠派生双字 token 列,凭据整条拒绝;`prune_turns()` 与召回消费方待 P6 接线 |
 | 工具实现 | `core/tools/{fs,web,shell,policy}.py` | P4 | `policy.py` 先于任何需要它的工具写 |
 | agent 适配器 | `core/agents/{cli,evox}.py` | P5 | 再 `acp.py`/`http.py`/`openclaw.py`(P7) |
 | 派发/路由/汇总 | `core/dispatch/*.py` | P6 | 五维打分 + 熔断器 + 三模式 |

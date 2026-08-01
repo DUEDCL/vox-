@@ -27,7 +27,8 @@ Current status: DOC/AUTO/SIM and one REAL-MIC wake are established. REAL-AGENT, 
 
 | Purpose | Command | Level |
 |---|---|---|
-| Python suite | `.venv/Scripts/python.exe -m pytest tests -q` → 101 passed, 2 skipped | AUTO |
+| Python suite | `.venv/Scripts/python.exe -m pytest tests -q` → 169 passed, 2 skipped | AUTO |
+| Memory | `.venv/Scripts/python.exe -m pytest tests/test_memory.py -q` → 62 passed | AUTO |
 | Speaker gate (model-free) | `.venv/Scripts/python.exe -m pytest tests/test_speaker.py tests/test_speaker_privacy.py -q` | AUTO |
 | Speaker gate (real model) | `.venv/Scripts/python.exe -m pytest tests/integration/test_speaker_model.py -q` | AUTO |
 | Event + registry contracts | `.venv/Scripts/python.exe -m pytest tests/test_agent_event_schema.py -q` → 34 passed | AUTO |
@@ -217,6 +218,44 @@ Three properties are now enforced rather than intended:
 - **The registry schema cannot over-declare.** `test_the_schema_stays_inside_the_validator_subset` walks every key in `agents.schema.json` and fails on any keyword the validator does not implement, because a declared-but-inert constraint reads as protection. `kind`'s enum is asserted equal to `AGENT_KINDS` for the same reason: a config that validates and then fails at adapter construction is the worst of the two failure modes.
 
 Not established by this session: any platform event has an actual producer. All 12 types are declared and validated; `memory.*` gets one in P3, `tool.*` in P4, `task.*`/`agent.*` in P6. `config/agents.toml` does not exist yet either — only its shape does.
+
+## Session 2026-08-02 (P3 memory — AUTO)
+
+The measurement that decided the design, taken **before** any of it was written, in this `.venv`:
+
+| Fact | Measured value |
+|---|---|
+| SQLite version / FTS5 | **3.49.1**, `ENABLE_FTS5` present in `PRAGMA compile_options` |
+| `MATCH 'english'` against a row holding 「用户喜欢用中文交流 and english too」 | **1 hit** |
+| `MATCH '中文'` against the same row | **0 hits** — `unicode61` treats the whole CJK run as one token |
+| ICU tokenizer available | **no** (would be a new native dependency) |
+
+So the FTS table indexes a derived token column instead of the text: index side = every CJK character plus every overlapping bigram, query side = bigrams only. Dropping single characters from the query side is what stops 「偏好」 matching a record that merely contains 「好」. Recall is two-stage — strict AND, then a bm25-ranked OR fallback only when strict comes back empty.
+
+| Fact | Measured value |
+|---|---|
+| `core/memory/store.py` | 501 lines — schema, FTS5, tokenizers, config loading |
+| `core/memory/write.py` | 359 lines — credential filter, dedup, Markdown mirror |
+| `core/memory/recall.py` | 144 lines — match expression, two-stage recall, `MemoryRecaller` |
+| `core/memory/__init__.py` | 89 lines — `open_memory()` returns the three collaborators as a tuple |
+| `config/memory.toml` | 23 lines — `db_path`, `facts_dir`, `recall_limit = 8`, `short_keep = 200` |
+| `records` column types | `TEXT` / `INTEGER` only — **no BLOB**, so audio has no column to land in |
+| Credential samples refused whole | **9/9**, `store.count() == 0`, no event emitted, no copy in `last_refusal` |
+| Ordinary sentences falsely refused | **0/5** (including 「我的密码忘了怎么办」 and 「token 是什么意思」) |
+| Database footprint | one file plus SQLite's own `-wal` / `-shm` / `-journal` |
+| `tests/test_memory.py` | 579 lines, **62 passed** in 0.69 s |
+| `tests/test_plugin_tools.py` | 214 lines, **16 passed** (10 before, 6 for the memory wiring) |
+| Suite | **169 passed, 2 skipped** in 13.78 s, 171 collected (was 101 at the end of P2) |
+| New runtime dependency | **none** — `sqlite3` ships with CPython |
+
+Four choices are worth recording because the obvious alternative was wrong:
+
+- **De-duplication is a schema constraint, not writer discipline.** A partial unique index on `(scope, kind, fingerprint) WHERE scope = 'mid'` means only facts collapse. Turns and audit rows are a time series: two identical utterances are two events, and the long layer exists precisely to keep that history.
+- **Credential-shaped text is refused whole, never redacted.** A multi-line private key is the deciding case — a pattern matches the header, and redaction would store the body.
+- **Memory events carry no text.** An event fans out to every log and transport; ids, counts, scope and tags are enough for `diagnose()` to answer "did that get remembered" without the payload becoming a second copy of the store.
+- **The gitignore pattern is anchored.** Measured, not reasoned about: `git check-ignore -v core/memory/store.py` reported `.gitignore:20:memory/`, and `git status --short` did not list the three new implementation files at all. A gitignore pattern without a leading slash matches at *any* depth, so the line meant to keep the user's personal store out of the repository was also hiding the store's source code — `__init__.py` and `contract.py` were visible only because they were already tracked. `/memory/` fixes it; a test parses `.gitignore` and asserts both directions so it cannot come back.
+
+Not established by this session: cross-process persistence. Every Markdown round trip measured above happens inside one process. "Close the program, open it again, the fact is still there" is release blocker 11, level REAL. `prune_turns()` also has no caller yet, so the short layer does not self-trim, and `MemoryRecaller`'s output has no consumer until the dispatcher lands in P6.
 
 ## Not yet verified
 
