@@ -129,3 +129,86 @@ def test_devices_reports_availability():
     assert "available" in report and "inputs" in report
     if not report["available"]:
         assert "reason" in report
+
+
+# -- memory wiring (P3) ------------------------------------------------------
+
+
+@pytest.fixture()
+def wired(tmp_path):
+    """A running plugin with a real memory writer over a temporary database."""
+    from core.memory import MemoryRecaller, MemoryWriter, SqliteMemoryStore
+
+    store = SqliteMemoryStore(tmp_path / "memory.db")
+    writer = MemoryWriter(store, facts_dir=tmp_path / "facts", session_id="s1")
+    plugin = VoicePlugin()
+    plugin.attach_memory(writer, MemoryRecaller(store))
+    plugin.start()
+    plugin.wake_detected("wake", 0.9)
+    yield plugin, store, writer
+    store.close()
+
+
+def test_a_turn_is_remembered_on_both_sides(wired):
+    plugin, store, _writer = wired
+    plugin.submit_text("今天天气怎么样")
+    plugin.complete_turn("今天晴")
+
+    records = list(reversed(store.list_records(scope="short")))
+    assert [record.text for record in records] == ["今天天气怎么样", "今天晴"]
+    assert "role:user" in records[0].tags
+    assert "role:assistant" in records[1].tags
+
+
+def test_memory_is_opt_in(tmp_path):
+    """No attach, no database: an unasked-for store must not appear on disk."""
+    plugin = VoicePlugin()
+    assert plugin.attach_memory() == {"memory_attached": False}
+    plugin.start()
+    plugin.wake_detected("wake", 0.9)
+    plugin.submit_text("你好")
+    plugin.complete_turn("我在")
+
+    assert list(tmp_path.iterdir()) == []
+    assert plugin.machine.state == VoiceState.LISTENING
+
+
+def test_a_broken_writer_cannot_break_the_conversation():
+    class ExplodingWriter:
+        def write_turn(self, text, *, role="user"):
+            raise RuntimeError("database is locked")
+
+    plugin = VoicePlugin()
+    plugin.attach_memory(ExplodingWriter())
+    plugin.start()
+    plugin.wake_detected("wake", 0.9)
+    plugin.submit_text("你好")
+
+    assert plugin.complete_turn("我在")[-1]["payload"]["to"] == "listening"
+
+
+def test_a_credential_utterance_never_reaches_the_store(wired):
+    """FR-12.6 through the real voice path, not just the writer's own unit test."""
+    plugin, store, writer = wired
+    plugin.submit_text("我的 key 是 sk-abcdefghijklmnopqrstuvwxyz012345")
+
+    assert store.count() == 0
+    assert writer.refusals == 1
+
+
+def test_diagnose_reports_memory_counts_and_no_text(wired):
+    plugin, _store, _writer = wired
+    plugin.submit_text("我住在北京")
+    report = plugin.diagnose()["memory"]
+
+    assert report["attached"] is True
+    assert report["records"] == 1
+    assert report["by_scope"]["short"] == 1
+    assert report["warnings"] == []
+    assert "北京" not in json.dumps(report, ensure_ascii=False)
+
+
+def test_diagnose_warns_when_memory_is_absent():
+    report = VoicePlugin().diagnose()["memory"]
+    assert report["attached"] is False
+    assert report["warnings"]

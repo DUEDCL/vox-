@@ -14,6 +14,12 @@ models/
 enrollment/
 *.voiceprint
 
+# 记忆库：用户说过的话与跨会话事实，属个人数据而非仓库内容。
+# memory/facts/*.md 是人类可读的事实层，可以手改；要不要纳入版本控制由用户自己决定
+# （取消下面这行即可），默认不进。
+# 前导斜杠是必须的：不带斜杠的 memory/ 会连 core/memory/ 的源码一起忽略。
+/memory/
+
 # 运行时产物与日志
 *.log
 .vite.pid

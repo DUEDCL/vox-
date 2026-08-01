@@ -1,0 +1,23 @@
+# 记忆系统配置(ADR 004:SQLite + FTS5,单文件,不做向量检索)
+#
+# 路径相对仓库根解析。可用环境变量覆盖:
+#   EVOX_MEMORY_CONFIG  本文件的位置
+#   EVOX_MEMORY_DB      数据库文件
+#   EVOX_MEMORY_FACTS   中期事实的 Markdown 目录
+#
+# 记忆库只存文本 —— 音频永不入库(红线 1),疑似凭据的文本整条拒绝而不是打码。
+
+[memory]
+# 单个 SQLite 文件,含 FTS5 索引。删掉它等于清空全部记忆。
+db_path = "memory/memory.db"
+
+# 中期事实的人类可读层:这些 .md 文件是事实的唯一事实来源,
+# 手改后由 sync_facts() 折回索引;SQLite 只是它们上面的索引。
+facts_dir = "memory/facts"
+
+# 单次召回返回的最大条数(dispatch 注入上下文时的默认预算)。
+recall_limit = 8
+
+# 短期层保留的最近轮次数,超出的在 prune_turns() 时丢弃。
+# 短期层是当前对话的窗口,不是档案。
+short_keep = 200

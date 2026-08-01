@@ -28,6 +28,8 @@ class VoicePlugin:
     last_reply: str | None = None
     rejections: int = 0
     last_rejection: dict | None = None
+    memory_writer: Any = None
+    memory_recaller: Any = None
 
     def _event(self, event_type: str, payload: dict | None = None) -> dict:
         event = build_event(event_type, payload)
@@ -116,6 +118,7 @@ class VoicePlugin:
             raise RuntimeError("text can only be submitted while listening")
         events = [self._event("turn.started", {"text": text})]
         events.append(self._event("asr.final", {"text": text}))
+        self._remember(text, role="user")
         events.append(self._state_event(VoiceState.THINKING, "asr final"))
         if self.transport is not None:
             result = self.transport.send(text)
@@ -134,9 +137,38 @@ class VoicePlugin:
         events.append(self._state_event(VoiceState.SPEAKING, "tts playback"))
         events.append(self._event("turn.done", {}))
         events.append(self._state_event(VoiceState.LISTENING, "continuous conversation"))
+        self._remember(reply, role="assistant")
         self.last_turn_id = None
         self.last_reply = None
         return events
+
+    # -- memory --------------------------------------------------------------
+
+    def attach_memory(self, writer: Any = None, recaller: Any = None) -> dict:
+        """Wire the short-term layer into the turn path.
+
+        Opt-in rather than automatic: attaching is what creates a database file,
+        and a voice client that has not been asked to remember anything should
+        not leave one behind.
+        """
+        self.memory_writer = writer
+        self.memory_recaller = recaller
+        return {"memory_attached": writer is not None or recaller is not None}
+
+    def _remember(self, text: str, *, role: str) -> None:
+        """Store one turn, if memory is attached.
+
+        Failures here are swallowed on purpose. Memory is an enhancement to the
+        turn, not a precondition for it -- a locked database must not be able to
+        break a conversation. The writer's own credential filter still applies,
+        so this is also the point where FR-12.6 takes effect.
+        """
+        if self.memory_writer is None or not (text or "").strip():
+            return
+        try:
+            self.memory_writer.write_turn(text, role=role)
+        except Exception:
+            pass
 
     def cancel(self) -> dict:
         if self.transport is not None and self.last_turn_id:
@@ -196,6 +228,7 @@ class VoicePlugin:
                 "vad_model_ready": (root / "models" / "silero_vad.onnx").is_file(),
             },
             "speaker": self._diagnose_speaker(),
+            "memory": self._diagnose_memory(),
             "provider": {
                 "available": provider.available,
                 "source": provider.source,
@@ -255,3 +288,39 @@ class VoicePlugin:
             "last_rejection": self.last_rejection,
             "warnings": warnings,
         }
+
+    def _diagnose_memory(self) -> dict:
+        """Memory readiness: paths and counts, never a remembered sentence.
+
+        Reads the writer's own ``describe()`` for the same reason the speaker
+        section reads the verifier's -- it is the one view of the store that is
+        guaranteed to carry no text, including no refused text.
+        """
+        writer = self.memory_writer
+        recaller = self.memory_recaller
+        report: dict = {
+            "attached": writer is not None or recaller is not None,
+            "writer_attached": writer is not None,
+            "recaller_attached": recaller is not None,
+        }
+        if writer is None:
+            report["warnings"] = ["memory is not attached: this session will not be remembered"]
+            return report
+        try:
+            described = writer.describe()
+        except Exception as exc:
+            report["warnings"] = [f"memory store unreadable: {type(exc).__name__}: {exc}"]
+            return report
+        report.update(
+            {
+                "db_path": described.get("path"),
+                "db_exists": described.get("exists"),
+                "facts_dir": described.get("facts_dir"),
+                "records": described.get("records"),
+                "by_scope": described.get("by_scope"),
+                "refusals": described.get("refusals"),
+                "last_refusal": described.get("last_refusal"),
+                "warnings": [],
+            }
+        )
+        return report
