@@ -1,0 +1,53 @@
+# 平台自有工具配置(ADR 005:一道政策门,voice 与 agent 同样对待)
+#
+# 可用环境变量覆盖本文件位置:EVOX_TOOLS_CONFIG
+# 路径相对仓库根解析。未知键会**报错**而不是被忽略 —— 一个拼错的
+# denied_names 会静默削弱沙箱,拼错比缺失更危险。
+
+[fs]
+enabled = true
+
+# 沙箱根白名单。默认只有工作区;解析后不在任一根之下的路径一律拒绝
+# (先 resolve 再判断,所以符号链接逃逸也拒)。
+roots = ["."]
+
+# 单文件读取上限,超出部分截断并在审计里标 truncated。
+max_bytes = 262144
+
+# 文件名黑名单(fnmatch,大小写不敏感)。凭据、私钥、生物特征。
+denied_names = [
+  ".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_ed25519*",
+  "credentials.json", "*secret*", "*.voiceprint", "voiceprints.json",
+  "*.pfx", "*.p12", ".netrc", ".npmrc", ".git-credentials",
+]
+
+# 目录黑名单:任一路径分量命中即拒。enrollment 是生物特征,memory 是个人数据。
+denied_dirs = ["enrollment", "memory", ".git", ".venv", "node_modules", "__pycache__"]
+
+[web]
+enabled = true
+
+# 域名黑名单(后缀匹配,含子域)。
+blocked_domains = []
+
+# 只保留标题 / URL / 摘要,不注入正文;条数与摘要长度都有上限。
+max_results = 5
+snippet_chars = 280
+
+[shell]
+# **默认关闭**。要用就自己打开,并且自己维护下面的白名单。
+# 「语音说一句话就能在本机执行命令」是本项目最大的攻击面。
+enabled = false
+
+# 命令前缀白名单(按 token 前缀匹配)。白名单外**拒绝而非询问** ——
+# 询问会训练出无脑点确认的习惯。空列表 + enabled = true 等于什么都不许跑。
+allow = []
+
+# 白名单内的命令仍需一次显式确认(唤醒球上显示待执行命令)。
+require_confirmation = true
+
+# 未通过声纹校验的来源不许跑命令;agent 来源天然没有 speaker,因此也进不来。
+require_verified_speaker = true
+
+timeout_s = 20
+max_output_bytes = 20000

@@ -212,3 +212,120 @@ def test_diagnose_warns_when_memory_is_absent():
     report = VoicePlugin().diagnose()["memory"]
     assert report["attached"] is False
     assert report["warnings"]
+
+
+# -- tool wiring (P4) --------------------------------------------------------
+
+
+@pytest.fixture()
+def toolset(tmp_path):
+    """A plugin with the tool gate attached and rooted at a temporary directory."""
+    from core.tools import open_tools
+
+    config = {
+        "fs": {
+            "enabled": True,
+            "roots": [str(tmp_path)],
+            "max_bytes": 1024,
+            "denied_names": [".env"],
+            "denied_dirs": ["memory"],
+        },
+        "web": {"enabled": True, "blocked_domains": [], "max_results": 3,
+                "snippet_chars": 80},
+        "shell": {"enabled": False, "allow": ["git status"],
+                  "require_confirmation": True, "require_verified_speaker": True,
+                  "timeout_s": 5, "max_output_bytes": 500},
+    }
+    plugin = VoicePlugin()
+    plugin.attach_tools(open_tools(config))
+    return plugin, tmp_path, config
+
+
+def test_a_tool_runs_through_the_plugin(toolset):
+    plugin, root, _config = toolset
+    (root / "notes.md").write_text("第一段", encoding="utf-8")
+
+    result = plugin.run_tool("fs.read", {"path": "notes.md"})
+
+    assert result["ok"] is True
+    assert result["output"] == "第一段"
+
+
+def test_tools_are_opt_in(tmp_path):
+    """No attach, no capability: the platform can still talk, and only talk."""
+    plugin = VoicePlugin()
+    assert plugin.attach_tools() == {"tools_attached": False}
+    assert plugin.run_tool("fs.read", {"path": "x.md"})["ok"] is False
+
+
+def test_the_plugin_does_not_widen_the_sandbox(toolset):
+    plugin, _root, _config = toolset
+    result = plugin.run_tool("fs.read", {"path": "../outside.md"})
+    assert (result["ok"], result["error"]) == (False, "path is outside the sandbox")
+
+
+def test_the_plugin_supplies_no_speaker_of_its_own(toolset):
+    """``shell.run`` demands a verified name; the plugin must not invent one."""
+    plugin, _root, config = toolset
+    from core.tools import open_tools
+
+    config = {section: dict(values) for section, values in config.items()}
+    config["shell"]["enabled"] = True
+    plugin.attach_tools(open_tools(config))
+
+    result = plugin.run_tool("shell.run", {"command": "git status", "confirmed": True})
+
+    assert (result["ok"], result["error"]) == (False, "no verified speaker")
+
+
+def test_a_confirmation_is_surfaced_rather_than_swallowed(toolset):
+    plugin, _root, config = toolset
+    from core.tools import open_tools
+
+    config = {section: dict(values) for section, values in config.items()}
+    config["shell"]["enabled"] = True
+    plugin.attach_tools(open_tools(config))
+
+    result = plugin.run_tool(
+        "shell.run", {"command": "git status"}, speaker="due"
+    )
+
+    assert result["needs_confirmation"] is True
+    assert result["ok"] is False
+
+
+def test_diagnose_reports_the_gate_without_naming_arguments(toolset):
+    plugin, root, _config = toolset
+    (root / "notes.md").write_text("x", encoding="utf-8")
+    plugin.run_tool("fs.read", {"path": "notes.md"})
+    plugin.run_tool("fs.read", {"path": "../outside.md"})
+
+    report = plugin.diagnose()["tools"]
+
+    assert report["attached"] is True
+    assert report["registered"] == ["fs.read", "web.search"]
+    assert report["executed"] == 1
+    assert report["refused"] == 1
+    assert report["shell_enabled"] is False
+    assert report["warnings"] == []
+    assert "notes.md" not in json.dumps(report, ensure_ascii=False)
+
+
+def test_diagnose_warns_when_the_shell_is_switched_on(toolset):
+    plugin, _root, config = toolset
+    from core.tools import open_tools
+
+    config = {section: dict(values) for section, values in config.items()}
+    config["shell"]["enabled"] = True
+    plugin.attach_tools(open_tools(config))
+
+    report = plugin.diagnose()["tools"]
+
+    assert report["shell_enabled"] is True
+    assert any("shell.run is enabled" in warning for warning in report["warnings"])
+
+
+def test_diagnose_warns_when_tools_are_absent():
+    report = VoicePlugin().diagnose()["tools"]
+    assert report["attached"] is False
+    assert report["warnings"]

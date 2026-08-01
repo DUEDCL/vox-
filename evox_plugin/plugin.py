@@ -30,6 +30,7 @@ class VoicePlugin:
     last_rejection: dict | None = None
     memory_writer: Any = None
     memory_recaller: Any = None
+    tools: Any = None
 
     def _event(self, event_type: str, payload: dict | None = None) -> dict:
         event = build_event(event_type, payload)
@@ -170,6 +171,53 @@ class VoicePlugin:
         except Exception:
             pass
 
+    # -- tools ---------------------------------------------------------------
+
+    def attach_tools(self, runner: Any = None) -> dict:
+        """Wire the tool gate in. Opt-in, like memory, and for the same reason.
+
+        The plugin does not build a runner of its own. One funnel is what makes
+        FR-9.8 true: an agent must not be able to reach a capability by a path the
+        user's own voice could not take, and two runners would be two paths.
+        """
+        self.tools = runner
+        return {"tools_attached": runner is not None}
+
+    def run_tool(
+        self,
+        tool: str,
+        arguments: dict | None = None,
+        *,
+        origin: str = "voice",
+        speaker: str | None = None,
+    ) -> dict:
+        """Run one tool through the attached gate.
+
+        ``speaker`` is supplied by the caller rather than invented here. The
+        capture layer knows who was verified; the plugin does not, and guessing
+        would hand ``shell.run`` the one credential it exists to demand. With no
+        speaker the gate refuses it -- which is the correct answer until the
+        dispatcher threads the verified name through.
+        """
+        from core.tools import ToolRequest
+
+        if self.tools is None:
+            return {"ok": False, "error": "tools are not attached"}
+        result = self.tools.run(
+            ToolRequest(
+                tool=tool,
+                arguments=dict(arguments or {}),
+                origin=origin,
+                speaker=speaker,
+            )
+        )
+        return {
+            "ok": result.ok,
+            "output": result.output,
+            "error": result.error,
+            "needs_confirmation": result.needs_confirmation,
+        }
+
     def cancel(self) -> dict:
         if self.transport is not None and self.last_turn_id:
             self.transport.cancel(self.last_turn_id)
@@ -229,6 +277,7 @@ class VoicePlugin:
             },
             "speaker": self._diagnose_speaker(),
             "memory": self._diagnose_memory(),
+            "tools": self._diagnose_tools(),
             "provider": {
                 "available": provider.available,
                 "source": provider.source,
@@ -287,6 +336,44 @@ class VoicePlugin:
             "rejections": self.rejections,
             "last_rejection": self.last_rejection,
             "warnings": warnings,
+        }
+
+    def _diagnose_tools(self) -> dict:
+        """What the tool gate is enforcing right now.
+
+        The runner's own ``describe()`` is the sanctioned view: it reports
+        decisions, counters and flags, and no argument ever passed through it. The
+        interesting field is ``warnings`` -- if ``shell.run`` has been switched on,
+        this is where the user finds out without reading the config file.
+        """
+        runner = self.tools
+        if runner is None:
+            return {
+                "attached": False,
+                "warnings": ["tools are not attached: the platform can only talk"],
+            }
+        try:
+            described = runner.describe()
+        except Exception as exc:
+            return {
+                "attached": True,
+                "warnings": [f"tool gate unreadable: {type(exc).__name__}: {exc}"],
+            }
+        gate = described.get("policy", {})
+        return {
+            "attached": True,
+            "registered": described.get("registered", []),
+            "executed": described.get("executed"),
+            "refused": described.get("refused"),
+            "confirmations": described.get("confirmations"),
+            "audit_attached": described.get("audit_attached"),
+            "audit_dropped": described.get("audit_dropped"),
+            "roots": gate.get("roots", []),
+            "shell_enabled": gate.get("shell_enabled"),
+            "shell_allow_count": gate.get("shell_allow_count"),
+            "dangerous_patterns": gate.get("dangerous_patterns"),
+            "refusals": gate.get("refusals", {}),
+            "warnings": list(gate.get("warnings", [])),
         }
 
     def _diagnose_memory(self) -> dict:
