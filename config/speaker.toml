@@ -1,0 +1,28 @@
+# 声纹准入配置 —— 见 docs/adr/002-speaker-verification.md
+#
+# 这个文件里只有阈值与时长。注册数据本身（生物特征）落在
+# enrollment/voiceprints.json，已在 .gitignore 内，永不进版本控制。
+
+[speaker]
+# 是否要求声纹校验。false 是逃生阀（escape hatch）：它把系统退回
+# 「谁都能唤醒」的旧行为，diagnose() 会把它报成一个警告。
+require_verification = true
+
+# 余弦相似度阈值。高了误拒本人，低了放进他人。
+# 0.5 是 3D-Speaker ERes2Net 的常用起点，最终值应按 REAL-MIC 实测
+# 分布调定（发布阻塞项 #8），不要凭感觉调。
+threshold = 0.5
+
+# 校验用的最短音频时长（秒）。短于此值 embed() 拒绝而不是勉强算。
+min_verify_seconds = 0.6
+
+# 单次注册的最短总时长（秒）。enroll 是追加语义，补录可以叠加。
+min_enroll_seconds = 1.5
+
+[capture]
+# 内存环形缓冲长度（秒）。永不落盘、永不出进程。
+# 3 秒 @16 kHz float32 约 192 KB。
+buffer_seconds = 3.0
+
+# KWS 命中时回看多长的音频送去校验（秒）。
+verify_seconds = 1.5

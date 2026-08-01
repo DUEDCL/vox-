@@ -12,16 +12,19 @@ from __future__ import annotations
 from .base import ProviderStatus, ProviderUnavailable
 from .capture import SounddeviceWakeCapture
 from .kws import SherpaKeywordProvider
+from .ring import AudioRingBuffer
 from .speaker import (
     EnrollmentResult,
     SpeakerStore,
     SpeakerVerificationProvider,
     VerificationResult,
+    load_speaker_config,
 )
 from .vad import SherpaVadProvider
 from .voxcord import VoxCordAdapter
 
 __all__ = [
+    "AudioRingBuffer",
     "EnrollmentResult",
     "ProviderStatus",
     "ProviderUnavailable",
@@ -32,4 +35,5 @@ __all__ = [
     "SpeakerVerificationProvider",
     "VerificationResult",
     "VoxCordAdapter",
+    "load_speaker_config",
 ]

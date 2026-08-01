@@ -67,17 +67,29 @@ class SherpaKeywordProvider:
                 raise ProviderUnavailable(status.details["reason"])
         return self._spotter.create_stream()
 
-    def feed(self, stream: Any, samples: Any, sample_rate: int = 16000) -> list[str]:
-        """Feed one realtime chunk and return all keyword hits from the chunk."""
+    def feed(
+        self, stream: Any, samples: Any, sample_rate: int = 16000
+    ) -> list[tuple[str, float | None]]:
+        """Feed one realtime chunk and return ``(keyword, score)`` per hit.
+
+        ``score`` is ``None``, and that is a deliberate, checked statement rather
+        than an omission: sherpa-onnx 1.13.4's ``KeywordResult`` carries only
+        ``keyword``, ``timestamps`` and ``tokens`` -- the binding exposes no
+        per-hit confidence at all. The previous code reported ``1.0`` here, which
+        read like a measurement and was not one.
+
+        The number that reaches ``wake.detected`` is therefore the speaker
+        verification similarity, which *is* measured. See ADR 002.
+        """
         if self._spotter is None:
             raise ProviderUnavailable("sherpa keyword provider is not loaded")
         stream.accept_waveform(sample_rate, samples)
-        hits: list[str] = []
+        hits: list[tuple[str, float | None]] = []
         while self._spotter.is_ready(stream):
             self._spotter.decode_stream(stream)
             result = self._spotter.get_result(stream)
             if result:
-                hits.append(result)
+                hits.append((result, None))
                 self._spotter.reset_stream(stream)
         return hits
 

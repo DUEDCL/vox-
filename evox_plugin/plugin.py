@@ -26,6 +26,8 @@ class VoicePlugin:
     audio_capture: Any = None
     last_turn_id: str | None = None
     last_reply: str | None = None
+    rejections: int = 0
+    last_rejection: dict | None = None
 
     def _event(self, event_type: str, payload: dict | None = None) -> dict:
         event = build_event(event_type, payload)
@@ -78,7 +80,7 @@ class VoicePlugin:
 
     # -- wake / turn tools ---------------------------------------------------
 
-    def wake_detected(self, keyword: str, score: float) -> list[dict]:
+    def wake_detected(self, keyword: str, score: float | None) -> list[dict]:
         if not self.running:
             raise RuntimeError("voice plugin is not running")
         if self.paused:
@@ -86,6 +88,22 @@ class VoicePlugin:
         state_event = self._state_event(VoiceState.LISTENING, "wake detected")
         wake_event = self._event("wake.detected", {"keyword": keyword, "score": score})
         return [wake_event, state_event]
+
+    def wake_rejected(self, keyword: str, reason: str, score: float = 0.0) -> dict:
+        """Record a wake hit the speaker gate refused.
+
+        Rejection is silent by design (ADR 002): no state transition, no orb, no
+        sound, no reply. The event exists only so ``diagnose()`` and the logs can
+        answer "why did nothing happen" afterwards -- a security control should
+        not confirm its own decision boundary to whoever tripped it.
+
+        Unlike ``wake_detected`` this does not require the plugin to be running:
+        the gate can refuse during startup, and losing that record would hide
+        exactly the case worth seeing.
+        """
+        self.last_rejection = {"keyword": keyword, "reason": reason, "score": score}
+        self.rejections += 1
+        return self._event("wake.rejected", {"keyword": keyword, "reason": reason, "score": score})
 
     def wake_test(self, keyword: str = "小沃小沃", score: float = 1.0) -> list[dict]:
         """Run a synthetic wake through the same path as a real detection."""
@@ -136,6 +154,7 @@ class VoicePlugin:
             "paused": self.paused,
             "state": self.machine.state.value,
             "events": len(self.events),
+            "rejections": self.rejections,
         }
 
     def devices(self) -> dict:
@@ -176,6 +195,7 @@ class VoicePlugin:
                 "kws_model_dir": str(kws_root),
                 "vad_model_ready": (root / "models" / "silero_vad.onnx").is_file(),
             },
+            "speaker": self._diagnose_speaker(),
             "provider": {
                 "available": provider.available,
                 "source": provider.source,
@@ -188,4 +208,50 @@ class VoicePlugin:
             "transport_attached": self.transport is not None,
             "capture_attached": self.audio_capture is not None,
             "audio_backend": self.devices()["available"],
+        }
+
+    def _diagnose_speaker(self) -> dict:
+        """Speaker gate status: names and counts only, never a vector.
+
+        The verifier's own ``describe()`` is the single sanctioned view of
+        enrollment data (it is biometric), so this method reads that and adds the
+        capture-side wiring. When the gate is off the report carries an explicit
+        ``warnings`` entry -- an escape hatch that looks like a normal
+        configuration line is an escape hatch nobody notices is open.
+        """
+        from core.audio import SpeakerVerificationProvider
+
+        capture = self.audio_capture
+        verifier = getattr(capture, "verifier", None)
+        if verifier is None:
+            verifier = SpeakerVerificationProvider.from_config()
+        described = verifier.describe()
+        require = bool(getattr(capture, "require_verification", True)) if capture is not None else True
+        gate_active = bool(getattr(capture, "gate_active", False)) if capture is not None else False
+
+        warnings: list[str] = []
+        if not require:
+            warnings.append(
+                "require_verification is False: anyone can wake the platform"
+            )
+        if not described["available"]:
+            warnings.append("speaker model is missing; the gate cannot admit anyone")
+        if not described["speakers"]:
+            warnings.append("nobody is enrolled; run scripts/enroll_speaker.py")
+        if capture is not None and require and not gate_active:
+            warnings.append("capture requires verification but has no verifier attached")
+
+        return {
+            "speaker_model_ready": described["available"],
+            "model": described["model"],
+            "store": described["store"],
+            "enrolled_count": len(described["speakers"]),
+            "enrolled": described["speakers"],
+            "samples_per_speaker": described.get("samples_per_speaker", {}),
+            "threshold": described.get("threshold"),
+            "require_verification": require,
+            "gate_active": gate_active,
+            "rejections": self.rejections,
+            "last_rejection": self.last_rejection,
+            "warnings": warnings,
         }

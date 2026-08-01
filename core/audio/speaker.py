@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -23,7 +24,40 @@ from typing import Any, Iterable
 from .base import ProviderStatus, ProviderUnavailable
 
 DEFAULT_MODEL_NAME = "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
+DEFAULT_CONFIG_NAME = "speaker.toml"
 STORE_VERSION = 1
+
+
+def load_speaker_config(path: str | Path | None = None) -> dict[str, Any]:
+    """Read ``config/speaker.toml``, falling back to the built-in defaults.
+
+    ``tomllib`` is standard library from 3.11, so configurability costs no new
+    dependency. A missing file is not an error -- the shipped defaults are the
+    secure ones (``require_verification = true``), and the fallback must not be
+    the moment protection quietly turns off.
+    """
+    root = Path(__file__).resolve().parents[2]
+    config_path = Path(path or os.getenv("EVOX_SPEAKER_CONFIG", root / "config" / DEFAULT_CONFIG_NAME))
+    defaults: dict[str, Any] = {
+        "require_verification": True,
+        "threshold": 0.5,
+        "min_verify_seconds": 0.6,
+        "min_enroll_seconds": 1.5,
+        "buffer_seconds": 3.0,
+        "verify_seconds": 1.5,
+    }
+    if not config_path.is_file():
+        return defaults
+    try:
+        raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ProviderUnavailable(f"speaker config is unreadable: {exc}") from exc
+    merged = dict(defaults)
+    for section in ("speaker", "capture"):
+        for key, value in (raw.get(section) or {}).items():
+            if key in merged:
+                merged[key] = value
+    return merged
 
 
 @dataclass(frozen=True)
@@ -327,6 +361,26 @@ class SpeakerVerificationProvider:
         self._extractor = None
         self._manager = None
         self._dim = 0
+
+    @classmethod
+    def from_config(
+        cls,
+        config_path: str | Path | None = None,
+        **overrides: Any,
+    ) -> SpeakerVerificationProvider:
+        """Build a provider from ``config/speaker.toml``.
+
+        Only the threshold and duration limits come from the file. Paths stay on
+        environment variables so a config file checked into a repository can
+        never point at somebody's enrollment data.
+        """
+        config = load_speaker_config(config_path)
+        return cls(
+            threshold=overrides.pop("threshold", config["threshold"]),
+            min_verify_seconds=overrides.pop("min_verify_seconds", config["min_verify_seconds"]),
+            min_enroll_seconds=overrides.pop("min_enroll_seconds", config["min_enroll_seconds"]),
+            **overrides,
+        )
 
 
 
