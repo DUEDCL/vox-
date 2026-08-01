@@ -1,8 +1,9 @@
 # 技术架构与组件边界
 
 > 工作区:`D:\program\vioce-wake`
-> 最后更新:2026-07-28
+> 最后更新:2026-08-02
 > 本文描述磁盘上**已实现**的架构。计划中但未落地的部分明确标注「未实现」。
+> 平台层(第 9 节)目前**只有契约,没有实现** —— 这是有意的:契约先落地并锁死类型边界,实现按 P1～P8 分阶段填。
 
 ## 1. 分层总览
 
@@ -23,14 +24,20 @@
 │ 核心层 Core           │   │ 传输层 Transport               │
 │ core/state.py        │   │ core/session_bridge.py         │
 │   状态机              │   │   ConversationTransport 协议   │
-│ core/providers.py    │   │   LocalEvoXTransport 实现       │
-│   语音提供器           │   └──────────┬────────────────────┘
+│ core/events.py       │   │   LocalEvoXTransport 实现       │
+│   信封构造与校验       │   └──────────┬────────────────────┘
+│ core/audio/          │              │
+│   语音提供器包         │              │
 └──────┬───────────────┘              │
        │                              │
 ┌──────┴───────────────┐   ┌──────────┴────────────────────┐
 │ 本地模型 models/      │   │ EvoX 会话(外部)                │
 │ KWS / VAD / TTS      │   │ HTTP localhost:8765            │
-└──────────────────────┘   └───────────────────────────────┘
+│ 声纹 speaker(P1)     │   └───────────────────────────────┘
+└──────────────────────┘
+
+平台层 Platform(仅契约,实现 P3～P7):
+core/agents/ 适配器 · core/dispatch/ 派发 · core/tools/ 工具 · core/memory/ 记忆
 ```
 
 **依赖方向铁律**:核心层不认识插件层,插件层不认识桌面层。所有跨层通信走事件契约或协议接口,任何 sherpa-onnx / sounddevice / VoxCord 的类型都不得出现在公开事件结构里。
@@ -51,12 +58,16 @@
 
 `additionalProperties: false` — 严禁额外字段,这是防止 SDK 类型泄漏的第一道闸门。
 
+**唯一构造点**:`core/events.py`(93 行)。`build_event()` 造信封,`validate_event()` 逐条对照契约校验(必填键、`additionalProperties`、`version` 常量、`type` 枚举)。枚举**在运行时从契约文件读**,不在 Python 里镜像一份 —— 这样 schema 与代码无法各自漂移。校验是手写的,不引 `jsonschema`:契约只有 14 行,一个新依赖换不来什么。
+
+平台事件走**新增的** `contracts/agent-events.schema.json`(P2),信封形状相同、`voice-events.schema.json` 字节不变,两条流在传输边界合流。理由见 ADR 005。
+
 **9 种事件类型**:
 
 | 事件 | 触发时机 | payload 关键字段 |
 |---|---|---|
 | `wake.detected` | 唤醒词命中 | `keyword`, `score`, `synthetic?` |
-| `wake.rejected` | 唤醒被否决(未实现) | — |
+| `wake.rejected` | 声纹校验否决唤醒(产出点 P1) | `reason`, `score` |
 | `turn.started` | 回合开始 | `text` |
 | `asr.final` | 识别文本定稿 | `text` |
 | `llm.delta` | 回复增量 | `text` |
@@ -93,9 +104,20 @@ idle ──→ listening ──→ thinking ──→ speaking
 - 允许**同态迁移**(`target == self.state`)不报错,便于幂等调用。
 - `VoiceState` 用 `StrEnum`,序列化直接得字符串,不需要额外转换。
 
-## 4. 核心层:语音提供器(`core/providers.py`,295 行)
+## 4. 核心层:语音提供器(`core/audio/` 包)
 
-四个类,**全部懒加载**(lazy loading,延迟加载):模型缺失、依赖未安装、设备不可用时返回诊断结果,**绝不在模块导入阶段崩溃**。这是让项目在无模型环境下仍可测试的关键。
+原 `core/providers.py`(295 行)已按职责拆包,`providers.py` 只剩 29 行的 re-export(重导出)薄壳,现有导入零改动:
+
+| 模块 | 行数 | 内容 |
+|---|---|---|
+| `core/audio/base.py` | 15 | `ProviderStatus`、`ProviderUnavailable` |
+| `core/audio/kws.py` | 86 | `SherpaKeywordProvider` |
+| `core/audio/vad.py` | 88 | `SherpaVadProvider` |
+| `core/audio/capture.py` | 70 | `SounddeviceWakeCapture` |
+| `core/audio/speaker.py` | 332 | `SpeakerVerificationProvider`、`SpeakerStore` |
+| `core/audio/voxcord.py` | 62 | `VoxCordAdapter`(可选外部参考) |
+
+四个语音类,**全部懒加载**(lazy loading,延迟加载):模型缺失、依赖未安装、设备不可用时返回诊断结果,**绝不在模块导入阶段崩溃**。这是让项目在无模型环境下仍可测试的关键。
 
 统一返回结构 `ProviderStatus(available: bool, source: str, details: dict)`。
 
@@ -127,6 +149,17 @@ idle ──→ listening ──→ thinking ──→ speaking
 - 本机无此目录,`load()` 返回 `available: False, reason: "voxcord core not found"`。
 - 相关测试已用 `pytest.mark.skipif` 优雅跳过,**不影响发布路径**。
 
+### 4.5 `SpeakerVerificationProvider` — 声纹准入(332 行)
+
+唤醒门。KWS 只答「有没有说这个词」,声纹答「是谁说的」。完整决策见 ADR 002。
+
+- 复用 sherpa-onnx 1.13.4 已含的 `SpeakerEmbeddingExtractor` + `SpeakerEmbeddingManager`,**零新依赖**,不扩大 ADR 001 的运行时边界。
+- `SpeakerStore` 管 `enrollment/voiceprints.json`:带 `version` 字段、原子写(先写 `.tmp` 再 `replace`)、版本不认识或 JSON 损坏都抛 `ProviderUnavailable` 而非静默降级。
+- **fail-closed(失败即关闭)**:`verify()` 对普通拒绝**从不抛异常**,而是返回 `accepted=False` 加原因;模型缺失、无人注册、embedding 抛异常三条路径全部落在拒绝一侧。只看 `accepted` 分支的调用方天然是 fail-closed 的。
+- `_best_match()` 逐个 `score()` 而不用 `manager.search()`:后者只答是否,前者还给出分数,阈值调优与 `wake.rejected` 诊断都要这个数。
+- `describe()` 是**唯一**被许可的注册状态视图,只报名字与样本数,**绝不含向量** —— 注册数据是生物特征,有专门测试守这一条。
+- 门的位置是 **KWS 命中的瞬间**,校验采集层 3 秒内存环形缓冲(P1),拒绝发生在任何交互之前。缓冲永不落盘、永不出进程。
+
 ## 5. 传输层:EvoX 会话桥接(`core/session_bridge.py`,92 行)
 
 ### 5.1 `ConversationTransport` 协议
@@ -156,9 +189,9 @@ cancel(turn_id: str) -> dict
 
 响应缺 `turn_id` 视为失败;HTTPS 则不受 loopback 限制,可指向远端。
 
-## 6. 插件门面层(`evox_plugin/plugin.py`,198 行)
+## 6. 插件门面层(`evox_plugin/plugin.py`,191 行)
 
-`VoicePlugin` 是 EvoX 看到的唯一接口,dataclass 实现,持有状态机、事件列表、可选传输层与可选采集层。
+`VoicePlugin` 是 EvoX 看到的唯一接口,dataclass 实现,持有状态机、事件列表、可选传输层与可选采集层。信封构造已下沉到 `core/events.py`,`_event()` 现在只负责调 `build_event()` 并把结果追加进 `self.events`。
 
 ### 6.1 工具面(tool surface)
 
@@ -213,7 +246,26 @@ cancel         → transport.cancel(last_turn_id) + state.changed(cancelled) + t
 - 已内置自验证钩子:`__READY__`、`render_state_to_text()`、`step(ms)`,以及 `?test=1` 冻结模式。
 - CSP 收紧为 `default-src 'self'; style-src 'self' 'unsafe-inline'`。
 
-## 8. 组件边界速查表
+## 8. 平台层(`core/{agents,dispatch,tools,memory}/`,仅契约)
+
+Phase 4 新增的四个包。当前**每个包里只有 `contract.py`**,共 315 行 Protocol(协议)与冻结 dataclass,没有任何实现。导入这四个包**不得**启动子进程或打开套接字,这条写在各自的模块 docstring 里。
+
+六个新边界:
+
+| # | 边界 | 位置 | 守什么 |
+|---|---|---|---|
+| 1 | **声纹门** | `core/audio/speaker.py` + 采集层 | 未授权语音在此静默终止,拒绝先于一切交互(ADR 002) |
+| 2 | **agent 适配** | `core/agents/contract.py`(83 行) | `AgentAdapter` 三方法 + `AgentChunk` 三种类型;字段只许 `str`/`int`/`float`/`frozenset`/`tuple`/`Mapping`,**任何 agent SDK 类型都进不来** —— 红线 2 由构造保证,不靠评审(ADR 003) |
+| 3 | **派发** | `core/dispatch/contract.py`(93 行) | `single`/`race`/`fanout` 三模式;语音默认前两者,`fanout` 会把首字延迟拖成最慢 agent 的延迟(ADR 005) |
+| 4 | **路由汇总** | 同上 | 五维打分(能力/成本/延迟/成功率/负载)+ 熔断器;`Aggregator.merge(mode, streams)` |
+| 5 | **工具** | `core/tools/contract.py`(80 行) | `ToolPolicy.check()` 返回 `None` 放行、返回拒绝的 `ToolResult` 挡下。`voice` 与 `agent` 两个 origin 走**同一道门**,agent 拿不到用户语音拿不到的能力 |
+| 6 | **记忆** | `core/memory/contract.py`(59 行) | 三层(short/mid/long)× 三类(turn/fact/audit);**只存文本,音频永不入库**,`asr.final` 入库前过敏感模式过滤(ADR 004) |
+
+意图分类**先用规则不用模型**:「读一下 X」「搜一下 Y」「运行 Z」正则命中直执行本地工具,延迟从秒级降到毫秒级,且规则命中的部分可以纯 AUTO 测试;未命中才走 agent 路由。
+
+`core/session_bridge.py` 保留原样,降级为 `agents/evox.py` 的实现细节 —— 五道安全校验不得随之降级。
+
+## 9. 组件边界速查表
 
 | 边界 | 谁不许知道谁 | 强制手段 |
 |---|---|---|
@@ -223,15 +275,27 @@ cancel         → transport.cancel(last_turn_id) + state.changed(cancelled) + t
 | 业务 ↔ 会话后端 | 插件只认 `ConversationTransport` | Protocol 接口,mock 可完全替代 |
 | 项目 ↔ VoxCord | 无 VoxCord 也能跑全部发布路径测试 | 动态 import + skipif 门控 |
 | 渲染路线 ↔ 应用协调 | 换 Canvas/WebGL 不动业务代码 | 计划中的 `Renderer` 接口(Phase 4) |
+| 业务 ↔ agent 实现 | 派发层不认识 claude/codex/opencode | `AgentAdapter` Protocol + 类型只许原语 |
+| 工具调用 ↔ 调用来源 | 工具不区别对待 voice 与 agent | 单一 `ToolPolicy.check()` 入口 |
+| 记忆 ↔ 音频 | 记忆层拿不到波形 | 契约里只有 `text` 字段 + 断言测试 |
+| 记忆 ↔ 任务注入 | 记忆不认识 `Task` 形状 | 注入是 dispatch 的职责,不是 memory 的 |
 
-## 9. 尚未实现的架构件(Phase 4 起)
+## 10. 尚未实现的架构件(Phase 4 起)
 
-| 组件 | 计划位置 | 说明 |
-|---|---|---|
-| 流式 ASR 提供器 | `core/providers.py` | 目前只有 KWS,识别文本靠外部注入 |
-| TTS 播放队列与打断 | 新增模块 | 现只发 `tts.chunk` 事件,无真实播放 |
-| Canvas 2D 生产渲染器 | `desktop/src/renderer/` | t28–t35,含质量分档选择器 |
-| `Renderer` 抽象接口 | 同上 | 让 WebGL v2 可替换 Canvas 实现 |
-| 超时/重连/错误恢复 | `core/state.py` + 传输层 | 生产化状态机 |
-| 系统托盘常驻 | `main.rs` | 发布阻塞项 #5 一部分 |
-| `wake.rejected` 事件产出 | 插件层 | 契约已定义,尚无产出点 |
+| 组件 | 计划位置 | 阶段 | 说明 |
+|---|---|---|---|
+| 声纹门与内存环形缓冲 | `core/audio/capture.py` | P1 | provider 已就绪,门与缓冲未接 |
+| `wake.rejected` 事件产出 | 插件层 | P1 | 契约早已定义,声纹门是它第一个真实触发条件 |
+| `feed()` 返回真实 score | `core/audio/kws.py` | P1 | 现在硬编码 `1.0`,真实置信度从未取到 |
+| 平台事件契约 | `contracts/agent-events.schema.json` | P2 | 与 `agents.schema.json` 一起 |
+| 记忆实现 | `core/memory/{store,write,recall}.py` | P3 | SQLite + FTS5 |
+| 工具实现 | `core/tools/{fs,web,shell,policy}.py` | P4 | `policy.py` 先于任何需要它的工具写 |
+| agent 适配器 | `core/agents/{cli,evox}.py` | P5 | 再 `acp.py`/`http.py`/`openclaw.py`(P7) |
+| 派发/路由/汇总 | `core/dispatch/*.py` | P6 | 五维打分 + 熔断器 + 三模式 |
+| 流式 ASR 提供器 | `core/audio/` | Phase 4 | 目前只有 KWS,识别文本靠外部注入 |
+| TTS 播放队列与打断 | 新增模块 | Phase 4 | 现只发 `tts.chunk` 事件,无真实播放 |
+| 唤醒球运行时显隐 | `main.rs` `show_orb`/`hide_orb` | P8 | 现在可见性由环境变量静态决定 |
+| Canvas 2D 生产渲染器 | `desktop/src/renderer/` | P8 | t28–t35,含质量分档选择器与 `Renderer` 抽象 |
+| 工具确认交互面 | `desktop/src/` | P8 | `shell.run` 的确认 UI 落在这里 |
+| 超时/重连/错误恢复 | `core/state.py` + 传输层 | Phase 4 | 生产化状态机 |
+| 系统托盘常驻 | `main.rs` | Phase 4 | 发布阻塞项 #5 一部分 |
