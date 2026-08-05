@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `evox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **300 passed, 3 skipped** |
+| `core/` `evox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **359 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -24,7 +24,7 @@
 | `core/tools/` | `pytest tests/test_tools.py tests/test_tool_security.py -q` | **123 passed, 1 skipped**（skip 是符号链接越界，本账户无权建链接） |
 | `core/memory/` | `pytest tests/test_memory.py -q` | **62 passed** |
 | 工具/记忆与语音路径接线 | `pytest tests/test_memory.py tests/test_plugin_tools.py -q` | **86 passed** |
-| `core/agents/` | `pytest tests/test_agent_contract.py tests/test_agent_cli.py -q` | 全绿（P5 起） |
+| `core/agents/` `config/agents.toml` | `pytest tests/test_agent_contract.py tests/test_agent_cli.py tests/test_agent_evox.py -q` | **59 passed**（contract 14 + cli 28 + evox 17） |
 | `core/dispatch/` | `pytest tests/test_router.py tests/test_dispatcher.py -q` | 全绿（P6 起） |
 | `core/session_bridge.py` | `pytest tests/test_session_bridge.py tests/test_plugin_tools.py -q` | 全绿 |
 | `desktop/src/` | `cd desktop && npm run build` | tsc + vite 通过 |
@@ -36,15 +36,16 @@ skip 数会随环境变化（VoxCord、模型是否存在），**passed 数下�
 
 ## 当前阶段
 
-Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事件契约、P3 记忆系统、P4 本地工具与安全门已落地，下一步 P5（agent 适配器）。十阶段划分与 10 项发布阻塞项见 `docs/project-overview.md` 第 5、6 节。
+Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事件契约、P3 记忆系统、P4 本地工具与安全门、P5 agent 适配器已落地，下一步 P6（派发/路由/汇总）。十阶段划分与 11 项发布阻塞项见 `docs/project-overview.md` 第 5、6 节。
 
 决策记录：ADR 001 语音栈 · ADR 002 声纹准入 · ADR 003 agent 接入 · ADR 004 记忆 · ADR 005 派发与工具门。
 
 **未实现，不要假设存在**：
-- 平台层的 `agents` / `dispatch` 两包 —— 现在只有 `contract.py`，`agents/` 另有 `schema.py`（配置校验，P2）
-- `config/agents.toml` 本身 —— 契约（`contracts/agents.schema.json`）已定，配置文件随适配器在 P5 落地
+- 平台层的 `dispatch` 包 —— 现在只有 `contract.py`（93 行 Protocol），`dispatcher`/`router`/`aggregator`/`intent`/`breaker` 全在 P6
+- `acp` / `http` 两种 agent kind —— 契约里有枚举，适配器在 P7；配置里 `enabled = true` 会带阶段名报错
 - 平台 12 种事件里除 `memory.*` / `tool.*` 之外的**产出点** —— `task.*`/`agent.*` 在 P6
 - **意图识别与工具的自动调用** —— 门和三个工具都在，但没有任何东西会自己决定去读文件或搜索；「读一下 X」→ 直执行是 dispatcher 的职责（P6）。当前唯一入口是 `plugin.run_tool()`
+- **agent 与语音路径的接线** —— `open_agents()` 能造出适配器，但插件还不会派发给它们，那是 P6
 - `web.search` 的**真实后端** —— 平台不自带（每个托管搜索 API 都是带 key 的云依赖），未注入时工具报 `no search backend is configured`
 - `shell.run` 的**确认 UI** —— 门会返回 `needs_confirmation`，但唤醒球上的展示与确认动作是 P8（REAL-WIN）
 - 记忆**召回的消费者** —— `MemoryRecaller` 已能查，但把结果注入任务是 dispatcher 的职责（P6）；`prune_turns()` 也还没有调用者，短期层暂不自动裁剪
@@ -54,6 +55,7 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - 声纹**反欺骗**：门不防录音回放，这是已知缺口（ADR 002 局限），不是待办
 - 声纹**真机验收**：本人通过率、他人拒绝、回放实测都需你在场（P10）
 - 记忆**跨进程持久性**：Markdown 往返在同进程内已验，重启后仍未验（P10）
+- **真实外部 agent 跑通一轮** —— `cli.py` 的全部测试用 mock 子进程，只算 SIM；真跑 `claude -p` 是 P9（REAL-AGENT）
 
 **已完成但容易记错的**：
 - 声纹门已接线：3 秒内存环形缓冲 + KWS 命中即校验 + `require_verification` 默认 `True` + `wake.rejected` 产出点
@@ -66,6 +68,12 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - **危险模式不可配置**：13 条 `DANGEROUS_PATTERNS` 在 `policy.py` 代码里，配置文件里写 `dangerous_patterns` 会报 `unknown config key`
 - **`tool.confirm_required` 是唯一带命令原文的事件** —— 唤醒球必须显示它将要运行什么（FR-6.13）；其余 `tool.*` 事件只带决定、原因、耗时
 - **FTS5 默认分词器搜不到中文**（已实测）。索引的是派生 token 列：索引侧 = 单字 + 相邻双字，查询侧 = 只用双字。改分词必须两侧同时改，见 ADR 004 的 2026-08-02 修正
+- **`config/agents.toml` 已落地**（86 行，`claude` 默认开、`codex`/`opencode`/`evox` 默认关）。它**没有放密钥的键**：schema 层面就不存在，写 `token = "..."` 直接校验失败
+- **agent 的失败是 chunk 不是异常** —— 命令不在 PATH、非零退出、超时、取消四条路径都以带 `error` 的终结 `done` chunk 到达。派发器因此不必给每条流包 `try`
+- **每条 agent 流恰好一个 `done`** —— agent 自报的 `done` 被折进终结 chunk 而不是转发。这是判断回合结束的唯一依据
+- **放弃 agent 流即杀进程** —— 生成器的 `finally` 收尸，`race` 丢弃输家时不留野进程
+- **`evox` 适配器不流式，也不可能流式** —— 桥接是一次阻塞 POST，没有增量端点；首字延迟 = 整轮延迟是端点的属性，不要给它套「看起来增量」的外壳
+- **命令不在 PATH 的 agent 条目被保留而不是丢弃** —— 可用性由 `check()` 报告，丢掉它会让「少一个 agent」与「配错一个 agent」无法区分
 
 ## 注意事项
 

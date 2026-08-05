@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "EvoX Agent Registry",
-  "description": "Shape of config/agents.toml once parsed by tomllib. The config file itself lands with the adapters in P5; this contract exists first so the adapters are written against a checked shape rather than a convention.",
+  "description": "Shape of config/agents.toml once parsed by tomllib. The config file itself lands with the adapters in P5; this contract exists first so the adapters are written against a checked shape rather than a convention. There is deliberately no key for a credential: secrets reach an agent only by naming an environment variable in env_passthrough.",
   "type": "object",
   "required": ["agents"],
   "properties": {
@@ -21,6 +21,9 @@
         "enabled": {"type": "boolean"},
         "command": {"type": "string", "minLength": 1},
         "args": {"type": "array", "items": {"type": "string"}},
+        "output": {"type": "string", "enum": ["text", "jsonl"]},
+        "cwd": {"type": "string", "minLength": 1},
+        "env_passthrough": {"type": "array", "items": {"type": "string", "minLength": 1}},
         "url": {"type": "string", "minLength": 1},
         "capabilities": {"type": "array", "items": {"type": "string", "minLength": 1}},
         "cost": {"type": "integer", "minimum": 1, "maximum": 5},

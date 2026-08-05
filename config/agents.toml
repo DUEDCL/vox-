@@ -1,0 +1,86 @@
+# agent 后端注册表(ADR 003:契约在前,后端在后)
+#
+# 可用环境变量覆盖本文件位置:EVOX_AGENTS_CONFIG
+# 形状由 contracts/agents.schema.json 校验。未知键、放错 kind 的键、重名
+# 都会**报错**而不是被忽略 —— 一个「看起来配置了但其实没接上」的 agent
+# 比一个缺失的 agent 更难查。
+#
+# **这里永远不写密钥。** 本文件没有放 token 的键(写了会校验失败);
+# 子进程默认拿到的是清洗过的环境(凭据形状的变量全部剔除),
+# 要给某个 agent 传 key 就在 env_passthrough 里写**变量名**,
+# 值仍然只从环境变量读。
+#
+# kind 四种:cli 与 evox 已实现(P5),acp 与 http 在 P7。
+# 没有适配器的 kind 若 enabled = true 会直接报错并告知落在哪个阶段;
+# 想先把配置写进来就把 enabled 设成 false。
+#
+# capabilities 目前是自由词表:路由规则在 P6 才定义,此刻它只是给
+# describe() 用的声明,不影响行为。cost 1-5,latency_ms 是自报的预期首字
+# 延迟,两者都只喂给 P6 的路由。
+
+[[agents]]
+name = "claude"
+kind = "cli"
+enabled = true
+command = "claude"
+args = ["-p"]
+capabilities = ["code", "reason", "chat"]
+cost = 4
+latency_ms = 2500
+timeout_s = 180.0
+# output = "jsonl" 配合 CLI 自己的流式输出模式使用(例如
+# args = ["-p", "--output-format", "stream-json"])。text 模式下一行一个
+# chunk,CLI 若不换行就整段吐出,那是它的行为不是适配器的缺陷。
+output = "text"
+
+[[agents]]
+name = "codex"
+kind = "cli"
+# 装了再打开。命令不在 PATH 上不会被静默丢掉:describe() 照常列出它,
+# check() 里 available = false —— 少一个 agent 和配错一个 agent 必须能分开看。
+enabled = false
+command = "codex"
+args = ["exec"]
+capabilities = ["code", "reason"]
+cost = 4
+latency_ms = 3000
+timeout_s = 180.0
+
+[[agents]]
+name = "opencode"
+kind = "cli"
+enabled = false
+command = "opencode"
+args = ["run"]
+capabilities = ["code", "chat"]
+cost = 3
+latency_ms = 2500
+timeout_s = 180.0
+
+[[agents]]
+name = "evox"
+kind = "evox"
+# 需要 EVOX_VOICE_BRIDGE_TOKEN 与一个在跑的本地会话桥,所以默认关闭。
+# 打开后 url 可在此覆盖(仍受 session_bridge 的回环校验约束:
+# 非 https 只许 loopback,URL 里带凭据一律拒绝)。
+enabled = false
+capabilities = ["chat"]
+cost = 1
+latency_ms = 1500
+timeout_s = 30.0
+# url = "http://127.0.0.1:8765"
+
+# ACP(JSON-RPC 2.0 over stdio)与 OpenAI 兼容 HTTP 在 P7。示例保留为注释,
+# 因为 enabled = true 会因「尚无适配器」报错,而注释掉的块不会伪装成已接线。
+#
+# [[agents]]
+# name = "zed-acp"
+# kind = "acp"
+# enabled = false
+# command = "some-acp-agent"
+#
+# [[agents]]
+# name = "openclaw"
+# kind = "http"
+# enabled = false
+# url = "http://127.0.0.1:18789/v1"

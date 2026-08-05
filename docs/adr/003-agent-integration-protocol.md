@@ -64,11 +64,27 @@ Reference material for the CLI difference-flattening list: `RobertTLange/headles
 - Type surface contains only primitives and immutable containers — no SDK types (by construction; a `get_type_hints`-based assertion test is P5 work).
 - Existing bridge behaviour unchanged: full suite 43 passed, 2 skipped (AUTO).
 
+## Verified (P5, as of 2026-08-05)
+
+- Type surface now asserted, not merely intended (`tests/test_agent_contract.py`, added at the end of P5 when the claim was found to be documented but untested): resolved annotations for `AgentDescriptor` / `Task` / `AgentChunk` are walked to their leaves, admitting only `str` / `int` / `float` / `bool` / `frozenset` / `tuple` / `Mapping` / `None`. The walk is recursive rather than a name whitelist — a reverse assertion proves it rejects `frozenset[FakeSdkClient]`, which an outermost-container check would pass. `Any` is permitted in exactly one field, `AgentChunk.arguments`, whose shape the invoked tool defines and `core/tools/policy.py` validates. The contract module's own imports are pinned to `__future__` / `dataclasses` / `typing` via AST, not substring search — its docstring names `subprocess` while stating the rule (AUTO).
+- Building an adapter spawns nothing: `open_agents()` over the shipped config produces adapters without a subprocess or socket (AUTO).
+- `cli.py` streaming parse, timeout, cancel, missing command, and non-zero exit — all five arrive as a terminating `done` chunk carrying `error`, never as an exception. Exactly one `done` per stream, with an agent's self-reported `done` folded in rather than forwarded (SIM, mock subprocess).
+- Abandoning a stream kills the process: the generator's `finally` reaps it, so a discarded `race` loser leaves nothing behind (SIM).
+- Subprocess environment is scrubbed of credential-shaped variables by the same `scrubbed_env()` the shell tool uses; passing a key requires naming the variable in `env_passthrough` (AUTO).
+- Windows batch shim (`claude.cmd`) runs through a command-line string, and an argument containing `"` or `%` is **refused rather than escaped** — the two parsers (C runtime vs `cmd.exe`) cannot both be satisfied by one escaping (AUTO).
+- `evox.py` wraps rather than reimplements `LocalEvoXTransport`, so all five bridge checks (bearer token required, cleartext HTTP loopback-only, credentials-in-URL rejected, `turn_id` encoded) still run per turn and cannot be weakened from the adapter side (AUTO).
+- Cancel timing modelled honestly: a cancel arriving mid-request cannot reach the server, because the bridge assigns the turn id and only reveals it when `send` returns. It is recorded and re-issued the moment the id exists; the turn ends `cancelled` and the server learns one round-trip later (AUTO).
+- A `kind` with no adapter (`acp` / `http`) errors with its phase named when enabled, instead of quietly doing nothing (AUTO).
+- An entry whose command is absent from PATH is kept, not dropped; `check()` reports availability (AUTO).
+- 59 passed (`contract` 14 + `cli` 28 + `evox` 17); full suite 359 passed, 3 skipped (AUTO).
+
+**Not verified.** Every `cli.py` test drives a mock subprocess, which is SIM. No real external agent has completed a turn — that stays open as the REAL-AGENT blocker below.
+
 ## Required before release (blockers)
 
-- REAL-AGENT: at least `claude` and `opencode` each complete one real turn end to end through `cli.py`.
-- SIM: `cli.py` streaming parse, timeout, and cancel against a mock subprocess.
-- SIM: ACP handshake / streaming / cancel against a mock JSON-RPC peer.
-- `evox.py` wrapping proves behaviourally identical to the pre-wrapping `LocalEvoXTransport` path.
-- `config/agents.toml` schema validation rejects a malformed descriptor rather than starting with it.
-- Session-bridge security posture from ADR 001 preserved verbatim once `session_bridge.py` becomes an `evox.py` implementation detail.
+- REAL-AGENT: at least `claude` and `opencode` each complete one real turn end to end through `cli.py`. **Still open** — P5's coverage is mock-subprocess SIM.
+- ~~SIM: `cli.py` streaming parse, timeout, and cancel against a mock subprocess.~~ Closed in P5.
+- SIM: ACP handshake / streaming / cancel against a mock JSON-RPC peer. **Still open** — `acp.py` lands in P7.
+- ~~`evox.py` wrapping proves behaviourally identical to the pre-wrapping `LocalEvoXTransport` path.~~ Closed in P5 (AUTO). The bridge against a *real* EvoX server remains ADR 001's REAL-EVOX blocker.
+- ~~`config/agents.toml` schema validation rejects a malformed descriptor rather than starting with it.~~ Closed in P5.
+- ~~Session-bridge security posture from ADR 001 preserved verbatim once `session_bridge.py` becomes an `evox.py` implementation detail.~~ Closed in P5 — wrapping is what preserves it.

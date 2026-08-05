@@ -68,6 +68,21 @@ class AgentChunk:
     error: str | None = None
 
 
+def render_prompt(task: Task) -> str:
+    """A ``Task`` as one string, for backends that accept nothing else.
+
+    Every adapter written so far -- a CLI argument, the bridge's ``text`` field --
+    reaches its agent through a single string, so the rendering lives here once
+    rather than once per adapter. Recalled memory goes in as plain-text context
+    lines; ``Task`` carries no other shape, so there is nothing else to render.
+    """
+    if not task.context:
+        return task.text
+    return "\n".join(
+        ["Context:", *(f"- {item}" for item in task.context), "", task.text]
+    )
+
+
 @runtime_checkable
 class AgentAdapter(Protocol):
     """The single interface every backend implements."""

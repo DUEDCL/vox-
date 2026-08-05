@@ -1,7 +1,7 @@
 # 项目总览与当前进度
 
 > 工作区:`D:\program\vioce-wake`
-> 最后更新:2026-08-02(Phase 4 平台化 P2 平台事件契约落地)
+> 最后更新:2026-08-05(Phase 4 平台化 P5 agent 适配器落地)
 > 本文件是项目的单一入口(single source of truth,唯一事实来源),其它文档由此索引。
 
 ## 1. 项目是什么
@@ -27,15 +27,16 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 
 | 维度 | 状态 |
 |---|---|
-| 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架 + P1 声纹门 + P2 平台契约 + P3 记忆 + P4 工具与安全门已落,P5 agent 适配器起 |
+| 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架 + P1 声纹门 + P2 平台契约 + P3 记忆 + P4 工具与安全门 + **P5 agent 适配器**已落,P6 派发器起 |
 | 技术选型 | **已定案**,见 [ADR 001](adr/001-voice-stack-selection.md) ~ [ADR 005](adr/005-task-dispatch-model.md) |
-| Python 测试 | **300 passed, 3 skipped**(2 个 skip 为可选 VoxCord 依赖,1 个为符号链接权限) |
+| Python 测试 | **359 passed, 3 skipped**(2 个 skip 为可选 VoxCord 依赖,1 个为符号链接权限) |
 | 前端构建 | `npm run build`(tsc + vite)通过;`cargo check` 通过 |
 | 真机麦克风唤醒 | **已验证一次**(2026-07-26,`你好问问`,7.193s;当时打印的 score 1.0 是硬编码常量,不是测量值 —— 已改正,见 §7) |
 | 声纹准入 | 门**已接线**,模型已下载(dim 512);判别力 **AUTO 已验**(簇内 0.736 / 簇间 0.370,阈值 0.5 落在间隙);校验耗时 41 ms;**真机通过率未验** |
 | 事件契约 | 语音 9 种 + 平台 12 种,**两个文件一个信封**、枚举互斥;语音契约字节不变由 SHA-256 钉死 |
-| 平台层四包 | `memory`(P3)与 `tools`(P4)**已实现**;`agents` / `dispatch` **仅契约**(176 行 Protocol + 146 行配置校验) |
+| 平台层四包 | `memory`(P3)、`tools`(P4)与 `agents`(P5)**已实现**;`dispatch` **仅契约**(94 行 Protocol) |
 | 本地工具 | 门(`policy.py`)+ `fs.read` / `web.search` / `shell.run` **已实现**,`voice` 与 `agent` 同一道门;`shell.run` 默认关、危险模式不可配置;**确认 UI 是 P8**,`web.search` 无内置后端 |
+| agent 适配器 | `cli`(headless 子进程,含 Windows 批处理 shim 处理)与 `evox`(包装会话桥接)**已实现**,`config/agents.toml` 已落;`acp` / `http` 在 P7,`enabled = true` 会带阶段名报错 |
 | 真实 EvoX 会话桥接 | **未验证** — 发布阻塞项 |
 | 真实外部 agent | **未验证** — 发布阻塞项(REAL-AGENT) |
 | 真实透明窗口验收 | **未验证** — 发布阻塞项 |
@@ -125,20 +126,35 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 - **测出来的数字** — `fs.read` 4 KB 全路径(过门 + 读 + 事件 + 审计)**0.64 ms** 中位数,拒绝路径 **0.34 ms**(NFR-1.10 目标 < 50 ms)。123 passed, 1 skipped in 0.48 s;全量 300 passed, 3 skipped in 14.31 s。
 - **照实记下的四条局限** — 符号链接越界用例在本账户 skip(无建链接权限);`web.search` 从未对接过真实后端;`shell.run` 至今只真实执行过 `git --version`;确认**流程**一行都没实现,那是 P8 且只能 REAL-WIN。
 
+### Phase 4:P5 agent 适配器(2026-08-05)
+- **失败是 chunk,不是异常** — 命令不在 PATH、非零退出、超时、取消,四条路径都以带 `error` 的终结 `done` chunk 到达。这不是风格选择:P6 的 `race` 要同时跑两个 agent,若失败以异常形式到达,派发器就得给每条流包一个 `try`,而一个坏 agent 会把整个回合带走。
+- **恰好一个 `done`** — JSONL 流里 agent 自己报的 `done` 被折进终结 chunk 而不是直接转发。「每条流恰好一个 `done`」是派发器判断回合结束的唯一依据,转发会让它数到两个。
+- **放弃流即杀进程** — 生成器的 `finally` 收尸,所以 `race` 丢弃输家时不留野进程。这条在 P6 之前就得成立,否则等到 P6 才发现时,泄漏的是用户机器上的真实子进程。
+- **子进程不继承本进程的凭据** — 复用 `scrubbed_env()`(与 shell 工具同一个按标记丢弃的实现),要给某个 agent 传 key 只能在 `env_passthrough` 里写**变量名**。于是 agent 拿到 token 是一个决定,而不是一次意外。
+- **Windows 批处理 shim 走命令行字符串** — npm 把 `claude` 装成 `claude.cmd`,CreateProcess 用 `cmd.exe /c` 跑它;Python 按 C 运行时规则引用参数,不按 cmd.exe 规则。带 `"` 或 `%` 的参数**拒绝而非转义**(BatBadBut 类问题)——一个只对两个解析器之一有效的转义比直接说不更糟。拒绝 shim 本身不是选项:Windows 上它常常是 PATH 上唯一的东西。
+- **`evox` 不流式,并且说出来** — 桥接是一次阻塞 POST 返回完整回复,没有增量端点。所以首字延迟 = 整轮延迟,这是端点的属性。给它套一个「看起来增量」的外壳会让路由的延迟数字变成虚构。
+- **包装而非移植 `session_bridge`** — 五道安全校验(bearer token 必需、明文 HTTP 仅 loopback、URL 带凭据拒绝、turn_id 编码)因此在每一轮仍然真的跑,并且无法从 `evox.py` 这一侧削弱。
+- **取消的时序被如实建模** — 桥接自己分配 turn id 且只在 `send` 返回时才吐出来,所以请求进行中到达的取消**够不着**服务端。它被记下来,在 turn id 存在的那一刻立即补发:回合以 `cancelled` 结束,服务端晚一个往返知道。
+- **命令不在 PATH 的条目被保留而不是丢弃** — 可用性是随运行变化的宿主状态。丢掉它会让「少一个 agent」和「配错一个 agent」变得无法区分;`check()` 才是报告可用性的地方。
+- **配置里没有放密钥的键** — schema 层面就没有,写 `token = "..."` 直接校验失败。EvoX 的 token 只从环境变量经 `from_env` 读。
+- **未实现的 kind 报错而不是空转** — `acp` / `http` 若 `enabled = true` 会带着「落在 P7」报错,想先把配置写进来就设 `enabled = false`。「尚未」不该读起来像「不支持」。
+
 ### 已实现的代码骨架
 
 | 模块 | 文件 | 行数 | 说明 |
 |---|---|---:|---|
 | 事件契约(语音) | `contracts/voice-events.schema.json` | 14 | 9 种事件类型,版本 `"1"`(**字节不变**,SHA-256 钉死) |
 | 事件契约(平台) | `contracts/agent-events.schema.json` | 15 | 12 种 `task.*`/`agent.*`/`tool.*`/`memory.*`,信封与语音契约同形 |
-| 配置契约 | `contracts/agents.schema.json` | 33 | `config/agents.toml` 的形状(配置文件本身在 P5) |
+| 配置契约 | `contracts/agents.schema.json` | 36 | `config/agents.toml` 的形状,**无放密钥的键** |
 | 状态机 | `core/state.py` | 53 | 6 状态 + 严格转移表(**不扩展**) |
 | 事件构造 | `core/events.py` | 138 | 信封唯一构造点 + 两契约校验 + `contract_for()` 查表 |
 | 配置校验 | `core/agents/schema.py` | 146 | 手写 JSON Schema 子集校验器,报错指到 `agents[1].kind` |
+| agent 适配器 | `core/agents/`(`contract`/`cli`/`evox`/`registry`/`schema`) | 1204 | 失败即 chunk、恰好一个 `done`、放弃即杀进程、凭据不继承 |
+| agent 配置 | `config/agents.toml` | 86 | 四个后端条目,`claude` 默认开、其余默认关 |
 | 语音提供器 | `core/audio/`(7 模块 + `__init__`) | 946 | KWS/VAD/采集/**声纹**/**环形缓冲**/VoxCord |
 | 重导出薄壳 | `core/providers.py` | 29 | 保旧导入路径不断 |
 | 会话桥接 | `core/session_bridge.py` | 92 | `ConversationTransport` 协议 + HTTP 实现 |
-| 平台层契约 | `core/{agents,dispatch}/contract.py` | 176 | **仅 Protocol,无实现** |
+| 派发契约 | `core/dispatch/contract.py` | 93 | **仅 Protocol,无实现**(五维路由、三模式、意图、熔断器) |
 | 记忆系统 | `core/memory/`(`store`/`write`/`recall`/`__init__`) | 1093 | SQLite + FTS5 单文件、中文双字索引、凭据过滤、Markdown 镜像 |
 | 记忆配置 | `config/memory.toml` | 23 | 库路径、事实目录、召回上限、短期保留数 |
 | 本地工具 | `core/tools/`(`contract`/`policy`/`fs`/`web`/`shell`/`runner`/`__init__`) | 992 | 一道门两个来源、13 条不可配置的硬拦截、审计落长期层 |
@@ -148,7 +164,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 录入 CLI | `scripts/enroll_speaker.py` | 125 | 交互式录入,音频不落盘 |
 | 前端 | `desktop/src/main.ts` + `style.css` | 35 | 唤醒球与状态标签 |
 | 窗口 | `desktop/src-tauri/src/main.rs` | 31 | 透明、置顶、不占任务栏 |
-| 测试 | `tests/*.py` + `tests/integration/` | 3214 | 303 用例,见 [测试文档](testing.md) |
+| 测试 | `tests/*.py` + `tests/integration/` | 3996 | 362 用例(359 passed + 3 skipped),见 [测试文档](testing.md) |
 
 ## 5. 进行中 / 下一步
 
@@ -161,8 +177,8 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | P2 | 平台事件契约:`agent-events.schema.json` + `agents.schema.json` | AUTO | ✅ 完成 |
 | P3 | 记忆系统 `core/memory/` | AUTO | ✅ 完成(跨进程持久性留 P10) |
 | P4 | 本地工具 `core/tools/` + `config/tools.toml` | AUTO | ✅ 完成(确认 UI 留 P8,真实搜索后端未定) |
-| P5 | agent 适配器 `cli.py` + `evox.py` | AUTO+SIM | 🔄 下一步 |
-| P6 | 派发/路由/汇总 `core/dispatch/` | AUTO+SIM | ⬜ |
+| P5 | agent 适配器 `cli.py` + `evox.py` + `registry.py` + `config/agents.toml` | AUTO+SIM | ✅ 完成(真实 CLI 留 P9) |
+| P6 | 派发/路由/汇总 `core/dispatch/` | AUTO+SIM | 🔄 下一步 |
 | P7 | `acp.py` + `http.py` / `openclaw.py` | AUTO | ⬜ |
 | P8 | 唤醒球弹出 + Canvas 2D 渲染器 + 工具确认 UI | REAL-WIN | ⬜ |
 | P9 | 真实 agent 联调(`claude` / `opencode` 各一次) | REAL-AGENT | ⬜ |

@@ -25,7 +25,7 @@ python scripts/e2e_simulated.py
 
 第一条检查单元、契约和适配器；第二条检查插件最小生命周期；第三条覆盖模拟链路：唤醒、识别文本、会话发送、回复、TTS 事件、连续对话、取消和停止。
 
-当前基线 **300 passed, 3 skipped**（2 个 skip 是可选的 VoxCord 适配器，1 个是符号链接越界用例 —— 本账户无权创建符号链接）。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
+当前基线 **359 passed, 3 skipped**（2 个 skip 是可选的 VoxCord 适配器，1 个是符号链接越界用例 —— 本账户无权创建符号链接）。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
 
 ## 契约或事件字段变更
 
@@ -197,12 +197,23 @@ python -c "from core.providers import VoxCordAdapter; print(VoxCordAdapter().loa
 适用时机：修改 `core/agents/`(`contract` / `cli` / `evox` / `acp` / `http` / `openclaw`)或 `config/agents.toml` 后。
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_agent_contract.py tests/test_agent_cli.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_agent_contract.py tests/test_agent_cli.py tests/test_agent_evox.py -q
 ```
 
-契约测试守红线 2：`AgentDescriptor` / `Task` / `AgentChunk` 的字段类型只许 `str` / `int` / `float` / `frozenset` / `tuple` / `Mapping`，**任何 agent SDK 类型出现即失败**，事件 payload 同理。`cli.py` 用 mock 子进程测流式解析、超时与取消。
+预期 **59 passed**（`contract` 14 + `cli` 28 + `evox` 17）。
 
-**mock 子进程只算 SIM。** 真实 CLI 端到端跑通一轮才是 REAL-AGENT，两者不得互相冒充。`evox.py` 包装后的行为必须与包装前的 `LocalEvoXTransport` 路径一致，`core/session_bridge.py` 的五道安全校验不得随之降级。
+`test_agent_contract.py` 是红线 2 在 agent 层的落点，它**解析注解**而不是读源码文本：`AgentDescriptor` / `Task` / `AgentChunk` 的每个字段递归走到叶子类型，只许 `str` / `int` / `float` / `bool` / `frozenset` / `tuple` / `Mapping` / `None`。递归是必须的 —— 只看最外层容器会让 `frozenset[SomeSdkClient]` 通过，所以有一条反向断言专门证明这个走法真的能拦下伪 SDK 类型。`Any` 只允许出现在 `AgentChunk.arguments`（工具调用的参数，形状由工具定义、由 `core/tools/policy.py` 校验），多一处就红。契约模块的 import 也被钉住：只许 `__future__` / `dataclasses` / `typing`，这条断言走 AST 而不是子串搜索，因为模块自己的 docstring 里就写着 `subprocess` 这个词。
+
+四条改 `cli.py` 时最容易踩的：
+
+- **失败必须是 chunk 不是异常。** 命令不存在、非零退出、超时、取消，四条路径都以带 `error` 的终结 `done` chunk 到达。派发器要能 race 两个 agent 而不用给每个包 `try`，一个坏 agent 不许把整个回合带走。
+- **恰好一个 `done`。** JSONL 流里 agent 自己报的 `done` 被折进终结 chunk 而不是直接 yield —— 「每条流恰好一个 `done`」是派发器判断回合结束的依据。
+- **放弃流必须杀掉进程。** `race` 模式（P6）会中途丢弃输家，生成器的 `finally` 负责收尸；漏了它，一次输掉的竞速就留下一个野进程。
+- **Windows 批处理 shim 走字符串命令行而不是 argv 列表。** npm 把 `claude` 装成 `claude.cmd`，CreateProcess 用 `cmd.exe /c` 跑它；Python 按 C 运行时规则引用参数，不按 cmd.exe 规则，所以带 `"` 或 `%` 的参数**拒绝而不是转义**（BatBadBut）。一个只对两个解析器之一有效的转义比直接说不更糟。
+
+**mock 子进程只算 SIM。** 真实 CLI 端到端跑通一轮才是 REAL-AGENT，两者不得互相冒充。`evox.py` 包装后的行为必须与包装前的 `LocalEvoXTransport` 路径一致，`core/session_bridge.py` 的五道安全校验不得随之降级 —— `evox.py` 是**包装**不是移植，这正是包装的理由。
+
+`evox` 适配器**不流式，也不可能流式**：桥接是一次阻塞 POST 返回完整回复，没有增量端点可读。所以首字延迟等于整轮延迟，这是端点的属性不是这里偷的懒。改动时不要给它加一个「看起来增量」的外壳 —— 那会让路由的延迟数字变成虚构。
 
 ## 派发回归
 
@@ -360,4 +371,4 @@ rg "TODO|FIXME|release blocker|not verified" core evox_plugin desktop docs tests
 - 前端修改：`npm run build`；窗口属性修改再加 `cargo check` 和 Windows 实机验收。
 - 模型或依赖变更：记录版本、来源、归档校验结果到 `THIRD_PARTY_NOTICES.md` 和 `docs/research/prototype-results.md`。
 
-每个阶段收尾一律跑全量 `python -m pytest tests -q`（当前基线 **300 passed, 3 skipped**），不用单文件绿灯代替全量。
+每个阶段收尾一律跑全量 `python -m pytest tests -q`（当前基线 **359 passed, 3 skipped**），不用单文件绿灯代替全量。
