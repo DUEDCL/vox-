@@ -14,8 +14,10 @@ from core.audio import (
     ProviderStatus,
     ProviderUnavailable,
     SherpaKeywordProvider,
+    SherpaTtsProvider,
     SherpaVadProvider,
     SounddeviceWakeCapture,
+    TtsAudio,
     VoxCordAdapter,
 )
 
@@ -23,7 +25,9 @@ __all__ = [
     "ProviderStatus",
     "ProviderUnavailable",
     "SherpaKeywordProvider",
+    "SherpaTtsProvider",
     "SherpaVadProvider",
     "SounddeviceWakeCapture",
+    "TtsAudio",
     "VoxCordAdapter",
 ]

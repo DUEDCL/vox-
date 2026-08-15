@@ -14,13 +14,14 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `evox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **576 passed, 2 skipped** |
+| `core/` `evox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **579 passed, 2 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
 | `core/audio/`(除 speaker) | `pytest tests/test_provider_adapter.py tests/test_sherpa_provider.py -q` | 全绿 |
 | `core/audio/speaker.py` `ring.py` `capture.py` | `pytest tests/test_speaker.py tests/test_speaker_privacy.py -q` | **30 passed**（**不需要声纹模型**） |
 | 声纹阈值或判别力 | `pytest tests/integration/test_speaker_model.py -q` | 5 passed（缺模型时 5 skipped） |
+| TTS 合成（需模型） | `pytest tests/integration/test_tts_model.py -q` | 3 passed（缺模型时 1 skipped） |
 | `core/tools/` | `pytest tests/test_tools.py tests/test_tool_security.py -q` | **123 passed, 1 skipped**（skip 是符号链接越界，本账户无权建链接） |
 | `core/memory/` | `pytest tests/test_memory.py -q` | **63 passed** |
 | 工具/记忆与语音路径接线 | `pytest tests/test_memory.py tests/test_plugin_tools.py -q` | **87 passed** |
@@ -42,7 +43,7 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 
 **未实现，不要假设存在**：
 - `web.search` 的**真实后端** —— 平台不自带（每个托管搜索 API 都是带 key 的云依赖），未注入时工具报 `no search backend is configured`
-- 流式 ASR（识别文本靠外部注入）、TTS 播放队列与真实打断
+- 流式 ASR（识别文本靠外部注入）、TTS 播放队列与真实打断（TTS 合成已由 `core/audio/tts.py` 落地——`tts.chunk` 的文本→44.1kHz 音频已通，真实模型实测；播放与打断仍未接）
 - Canvas 2D 生产渲染器（现在是 DOM + CSS，六态与动画都已落地）
 - 超时/重连/错误恢复、系统托盘
 - 声纹**反欺骗**：门不防录音回放，这是已知缺口（ADR 002 局限），不是待办

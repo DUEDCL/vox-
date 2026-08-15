@@ -273,7 +273,7 @@ class VoicePlugin:
 
     def diagnose(self) -> dict:
         """Report provider/bridge readiness without leaking credentials."""
-        from core.providers import SherpaKeywordProvider, VoxCordAdapter
+        from core.providers import SherpaKeywordProvider, SherpaTtsProvider, VoxCordAdapter
 
         provider = VoxCordAdapter().load()
         root = Path(__file__).resolve().parents[1]
@@ -289,6 +289,7 @@ class VoicePlugin:
                 "kws_model_ready": local_kws.available,
                 "kws_model_dir": str(kws_root),
                 "vad_model_ready": (root / "models" / "silero_vad.onnx").is_file(),
+                "tts_model_ready": SherpaTtsProvider(root / "models" / "vits-melo-tts-zh_en").available,
             },
             "speaker": self._diagnose_speaker(),
             "memory": self._diagnose_memory(),

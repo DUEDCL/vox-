@@ -20,6 +20,7 @@ from .speaker import (
     VerificationResult,
     load_speaker_config,
 )
+from .tts import SherpaTtsProvider, TtsAudio
 from .vad import SherpaVadProvider
 from .voxcord import VoxCordAdapter
 
@@ -29,10 +30,12 @@ __all__ = [
     "ProviderStatus",
     "ProviderUnavailable",
     "SherpaKeywordProvider",
+    "SherpaTtsProvider",
     "SherpaVadProvider",
     "SounddeviceWakeCapture",
     "SpeakerStore",
     "SpeakerVerificationProvider",
+    "TtsAudio",
     "VerificationResult",
     "VoxCordAdapter",
     "load_speaker_config",
