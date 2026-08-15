@@ -104,6 +104,12 @@ class VoicePlugin:
             raise RuntimeError("voice plugin is not running")
         if self.paused:
             raise RuntimeError("voice plugin is paused")
+        # Barge-in: a wake hit while the assistant is answering interrupts the
+        # turn. The capture loop keeps running through TTS playback, so this is
+        # the one path that can stop a speaking turn mid-utterance. ``cancel()``
+        # stops the TTS and the transport, then the wake proceeds as usual.
+        if self.machine.state in {VoiceState.THINKING, VoiceState.SPEAKING}:
+            self.cancel()
         state_event = self._state_event(VoiceState.LISTENING, "wake detected")
         wake_event = self._event("wake.detected", {"keyword": keyword, "score": score})
         return [wake_event, state_event]
@@ -215,6 +221,20 @@ class VoicePlugin:
         """
         self.tts = tts
         return {"tts_attached": tts is not None}
+
+    def attach_capture(self, capture: Any = None) -> dict:
+        """Wire a microphone capture in and point its wake callbacks here.
+
+        The capture's ``on_wake`` / ``on_reject`` are (re)pointed at this plugin,
+        so a wake hit during playback reaches ``wake_detected`` and barges in. The
+        caller still chooses the capture (KWS provider, verifier, device); the
+        plugin only owns the state machine the hits drive.
+        """
+        self.audio_capture = capture
+        if capture is not None:
+            capture.on_wake = self.wake_detected
+            capture.on_reject = self.wake_rejected
+        return {"capture_attached": capture is not None}
 
     def run_tool(
         self,

@@ -91,3 +91,50 @@ def test_attach_tts_is_opt_in():
     assert plugin.attach_tts(None) == {"tts_attached": False}
     assert plugin.attach_tts(FakeTts()) == {"tts_attached": True}
 
+
+def test_a_wake_hit_during_speaking_barges_in():
+    tts = FakeTts()
+    plugin = VoicePlugin()
+    plugin.attach_tts(tts)
+    plugin.start()
+    plugin.wake_detected("wake", 0.9)
+    plugin.submit_text("你好")
+    plugin.machine.transition(VoiceState.SPEAKING, "test")
+
+    events = plugin.wake_detected("wake", 0.9)
+
+    assert tts.stopped >= 1
+    assert plugin.machine.state == VoiceState.LISTENING
+    assert [e["type"] for e in events] == ["wake.detected", "state.changed"]
+    # The interrupted turn is cancelled, not silently dropped.
+    assert any(e["type"] == "turn.cancelled" for e in plugin.events)
+
+
+def test_a_wake_hit_during_thinking_barges_in():
+    plugin = VoicePlugin()
+    plugin.start()
+    plugin.wake_detected("wake", 0.9)
+    plugin.submit_text("你好")
+
+    events = plugin.wake_detected("wake", 0.9)
+
+    assert plugin.machine.state == VoiceState.LISTENING
+    assert [e["type"] for e in events] == ["wake.detected", "state.changed"]
+    assert any(e["type"] == "turn.cancelled" for e in plugin.events)
+
+
+def test_attach_capture_rewires_the_wake_callbacks():
+    class StubCapture:
+        def __init__(self) -> None:
+            self.on_wake = None
+            self.on_reject = None
+
+    capture = StubCapture()
+    plugin = VoicePlugin()
+
+    result = plugin.attach_capture(capture)
+
+    assert result == {"capture_attached": True}
+    assert capture.on_wake == plugin.wake_detected
+    assert capture.on_reject == plugin.wake_rejected
+

@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `evox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **585 passed, 2 skipped** |
+| `core/` `evox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **588 passed, 2 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -43,7 +43,7 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 
 **未实现，不要假设存在**：
 - `web.search` 的**真实后端** —— 平台不自带（每个托管搜索 API 都是带 key 的云依赖），未注入时工具报 `no search backend is configured`
-- 流式 ASR（识别文本靠外部注入）、TTS 播放队列与真实打断（合成与播放已通：`SherpaTtsProvider.speak()` = 合成 + `SounddevicePlayback` 播放、`complete_turn` 已接 `speak`、`cancel` 已接 `stop`；剩余是 capture 在 speaking 期间继续听并触发打断、以及多段排队）
+- 流式 ASR（识别文本靠外部注入）、TTS 多段排队（打断已通：`wake_detected` 在 SPEAKING/THINKING 先 `cancel()` 停 TTS + transport 再进 LISTENING，`attach_capture` 把 capture 的 `on_wake`/`on_reject` 指到插件；真机说话打断是 REAL，需麦克风+扬声器在场）
 - Canvas 2D 生产渲染器（现在是 DOM + CSS，六态与动画都已落地）
 - 超时/重连/错误恢复（系统托盘已由 `build_tray` 实现：显示/隐藏/退出，Rust 侧建、不扩 IPC 面；真机点开未验）
 - 声纹**反欺骗**：门不防录音回放，这是已知缺口（ADR 002 局限），不是待办
@@ -56,6 +56,7 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - **P7 `acp` + `http` 适配器已实现** —— `acp.py` 讲 JSON-RPC 2.0 over stdio（initialize → session/new → session/prompt，`session/update` 流式增量）；`http.py` 讲 OpenAI Chat Completions（SSE 流式 + 非流式回退）。http 的 token 只从 `EVOX_AGENT_HTTP_TOKEN` 读，url 遵循桥接同款约束（明文 HTTP 只许回环、带凭据拒绝）。都算 SIM（mock peer / mock server），真实联调是 P9 的 REAL-AGENT
 - **记忆召回已接进派发、短期层自裁剪** —— `Dispatcher._recall_context()` 只在 agent 路径上把 `facts()` + `recent_turns()` 的文本拼进 `Task.context`（工具路径不召回，快路径保持快）；召回失败静默吞掉（记忆是增强不是前提）。`write_turn()` 每次接受写入后 `prune_turns()` 自裁剪（`short_keep=200`）。runtime 把 `session_id` 传进 `open_memory`，故 `recent_turns(session_id=...)` 能按会话匹配
 - **TTS 合成+播放已接线** —— `core/audio/playback.py` 的 `SounddevicePlayback`（sounddevice 懒加载）；`SherpaTtsProvider.speak()` = `synthesize()` + 播放（`playback` 可注入 fake，测试用）；`VoicePlugin.attach_tts()` opt-in，`complete_turn` 在 SPEAKING 与 turn.done 之间 `speak(reply)`（失败吞掉，不结束回合），`cancel()` 调 `stop()`。事件序列不变（`speak` 是副作用）。真实出声是 REAL，需扬声器在场
+- **唤醒词打断已接线** —— `wake_detected` 在 THINKING/SPEAKING 时先 `cancel()`（停 TTS + 停 transport、发 `turn.cancelled`）再进 LISTENING，返回的仍是 `[wake.detected, state.changed]`；`attach_capture` 把 capture 的 `on_wake`/`on_reject` 指到插件，capture 的 InputStream 在 speaking 期间不关，所以「说唤醒词打断正在播的回复」这条链在代码级是通的。真机打断是 REAL
 - 声纹门已接线：3 秒内存环形缓冲 + KWS 命中即校验 + `require_verification` 默认 `True` + `wake.rejected` 产出点
 - 37.8 MB 声纹模型**已下载**（dim 512，SHA-256 记在 `THIRD_PARTY_NOTICES.md`）
 - `feed()` 返回 `(keyword, None)` —— sherpa-onnx 的 `KeywordResult` **根本不含置信度**，`None` 是经核实的陈述不是遗漏；`wake.detected` 的分数来自声纹相似度
