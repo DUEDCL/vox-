@@ -22,7 +22,7 @@
 | silero_vad.onnx | local copy from `D:\program\voxcord\reference\silero-vad` (upstream package data) | MIT | **adopted for prototype** | SHA-256 `1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3`; replace local provenance with pinned upstream release URL before distribution |
 | sherpa-onnx-streaming-zipformer zh-en | https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-transducer/ | per model card | candidate (streaming ASR) | |
 | SenseVoiceSmall | https://modelscope.cn/models/iic/SenseVoiceSmall | **weights license to be captured from ModelScope card** | candidate (fast ASR) | Release blocker: archive license text + screenshot |
-| vits-melo-tts-zh_en | https://k2-fsa.github.io/sherpa/onnx/tts/pretrained_models/ | MeloTTS upstream: MIT | **adopted for synthesis** (`core/audio/tts.py`, 44.1 kHz) | zh-en bilingual voice; playback queue and barge-in not wired yet |
+| vits-melo-tts-zh_en | https://k2-fsa.github.io/sherpa/onnx/tts/pretrained_models/ | MeloTTS upstream: MIT | **adopted** (`core/audio/tts.py` synthesis + `playback.py` sounddevice, 44.1 kHz) | zh-en bilingual voice; playback queue and barge-in not wired yet |
 | kokoro-multi-lang (sherpa-onnx packaging) | same index | Kokoro weights: Apache-2.0 | TTS A/B alternative | voice-pack provenance to be rechecked |
 | matcha-icefall-zh-baker | same index | baker dataset has usage restrictions | excluded from default bundle | reference only |
 

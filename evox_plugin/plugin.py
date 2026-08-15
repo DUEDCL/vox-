@@ -31,6 +31,7 @@ class VoicePlugin:
     memory_writer: Any = None
     memory_recaller: Any = None
     tools: Any = None
+    tts: Any = None
     #: Where events go besides ``self.events``. One validated envelope, one
     #: positional argument -- the same shape the tool runner, memory, the
     #: dispatcher and the breaker already take, so a desktop bridge, a logger or
@@ -151,6 +152,12 @@ class VoicePlugin:
             self._event("tts.chunk", {"index": 0, "text": reply}),
         ]
         events.append(self._state_event(VoiceState.SPEAKING, "tts playback"))
+        if self.tts is not None:
+            # Audio is the enhancement; a TTS failure must not end the turn.
+            try:
+                self.tts.speak(reply)
+            except Exception:
+                pass
         events.append(self._event("turn.done", {}))
         events.append(self._state_event(VoiceState.LISTENING, "continuous conversation"))
         self._remember(reply, role="assistant")
@@ -198,6 +205,17 @@ class VoicePlugin:
         self.tools = runner
         return {"tools_attached": runner is not None}
 
+    def attach_tts(self, tts: Any = None) -> dict:
+        """Wire a TTS engine into the speak path. Opt-in, like memory and tools.
+
+        Without one, ``complete_turn`` still emits ``tts.chunk`` (the text that
+        *would* be spoken) and the state machine still walks speaking -> done; a
+        TTS engine only adds the actual audio. A caller that wants silence builds
+        a plugin without one.
+        """
+        self.tts = tts
+        return {"tts_attached": tts is not None}
+
     def run_tool(
         self,
         tool: str,
@@ -237,6 +255,13 @@ class VoicePlugin:
         if self.transport is not None and self.last_turn_id:
             self.transport.cancel(self.last_turn_id)
             self.last_turn_id = None
+        if self.tts is not None:
+            stopper = getattr(self.tts, "stop", None)
+            if callable(stopper):
+                try:
+                    stopper()
+                except Exception:
+                    pass
         if self.machine.state in {VoiceState.LISTENING, VoiceState.THINKING, VoiceState.SPEAKING}:
             self._state_event(VoiceState.CANCELLED, "user cancel")
         return self._event("turn.cancelled", {})

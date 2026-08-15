@@ -12,6 +12,7 @@ from __future__ import annotations
 from .base import ProviderStatus, ProviderUnavailable
 from .capture import SounddeviceWakeCapture
 from .kws import SherpaKeywordProvider
+from .playback import SounddevicePlayback
 from .ring import AudioRingBuffer
 from .speaker import (
     EnrollmentResult,
@@ -32,6 +33,7 @@ __all__ = [
     "SherpaKeywordProvider",
     "SherpaTtsProvider",
     "SherpaVadProvider",
+    "SounddevicePlayback",
     "SounddeviceWakeCapture",
     "SpeakerStore",
     "SpeakerVerificationProvider",

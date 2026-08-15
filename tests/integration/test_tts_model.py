@@ -58,3 +58,23 @@ def test_synthesize_produces_float32_audio():
     assert audio.elapsed_ms >= 0
     p.close()
 
+
+@pytest.mark.skipif(not MODEL_DIR.is_dir(), reason="melo tts model not present")
+def test_speak_delegates_to_the_injected_playback():
+    class FakePlayback:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def play(self, samples, sample_rate, *, blocking=True):
+            self.calls.append((len(samples), sample_rate, blocking))
+
+    p = provider()
+    p.load()
+    playback = FakePlayback()
+    p.playback = playback
+
+    audio = p.speak("你好", blocking=False)
+
+    assert playback.calls == [(len(audio.samples), audio.sample_rate, False)]
+    p.close()
+

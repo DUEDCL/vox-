@@ -48,12 +48,16 @@ class SherpaTtsProvider:
         provider: str = "cpu",
         speaker_id: int = 0,
         speed: float = 1.0,
+        playback: Any = None,
     ) -> None:
         self.model_dir = Path(model_dir)
         self.num_threads = num_threads
         self.execution_provider = provider
         self.speaker_id = speaker_id
         self.speed = speed
+        #: Playback backend. ``None`` means sounddevice; a fake is how the turn
+        #: orchestrator is tested without a speaker.
+        self.playback = playback
         self._tts: Any = None
 
     @property
@@ -117,6 +121,21 @@ class SherpaTtsProvider:
             sample_rate=audio.sample_rate,
             elapsed_ms=int((time.perf_counter() - started) * 1000),
         )
+
+    def speak(
+        self, text: str, *, speaker_id: int | None = None, speed: float | None = None,
+        blocking: bool = True,
+    ) -> TtsAudio:
+        """Synthesize, then play. The default playback is sounddevice; a fake is
+        how the turn orchestrator is tested without a speaker."""
+        audio = self.synthesize(text, speaker_id=speaker_id, speed=speed)
+        player = self.playback
+        if player is None:
+            from .playback import SounddevicePlayback
+
+            player = SounddevicePlayback()
+        player.play(audio.samples, audio.sample_rate, blocking=blocking)
+        return audio
 
     def close(self) -> None:
         """Release native inference state; the Python wrapper has no explicit close."""
