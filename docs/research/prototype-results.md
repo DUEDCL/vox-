@@ -305,6 +305,35 @@ The check order is deliberate and asserted: command present → dangerous shape 
 
 Not established by this session: anything calls a tool automatically. `VoicePlugin.run_tool()` is the only entry point and it is opt-in; rule-based intent classification ("读一下 X" → execute directly) is P6. The plugin also supplies no verified speaker of its own, so `shell.run` through the plugin is always refused — correct until the dispatcher threads the name through.
 
+## Session 2026-08-11 (P8 wake orb shell — AUTO + SIM)
+
+Frontend `npm run build` (tsc + vite) clean; `cargo check --all-targets` clean with **zero warnings**; `cargo test` **8 passed** on the hit-region geometry.
+
+**Selective click-through is polled, not hit-tested by the OS.** Tauri 2's `set_ignore_cursor_events` is an all-or-nothing window flag — there is no Electron `forward: true` equivalent, and once it is set the webview stops receiving `mouseenter`/`mouseleave` at all, so the webview cannot detect its own hover (tauri#6164, 社区来源 — GitHub WebFetch is blocked on this host, so this may not be cited as 官方确认). A 30 ms Rust-side cursor poll compares the cursor against a region **the frontend measures and reports**, and toggles the flag only on transitions.
+
+**Geometry is owned by the frontend on purpose.** The circle's centre and radius are outputs of CSS layout; anything hardcoded in Rust drifts the moment a style changes, and the symptom of drift — "the orb won't click" or "clicks land on empty space" — is expensive to diagnose. `measureHitRegion()` walks `offsetLeft`/`offsetTop` (the **layout** box, not `getBoundingClientRect()`, which would include the per-frame float/breathe `transform` and re-fire IPC every frame) and reports logical CSS pixels; Rust converts the physical cursor into the same space via `(cursor - inner_position) / scale_factor`.
+
+SIM (12/12) — the reported region translated into logical coordinates, fed through the same predicate as `main.rs`:
+
+| case | expect |
+|---|---|
+| 折叠 orb centre / edge-inside (169.9) | hit |
+| 折叠 edge-outside (171) / above / left / bottom-right blank | pass through |
+| 展开 orb centre / panel interior / panel bottom-right corner | hit |
+| 展开 gap between circle and panel / left of panel / below panel | pass through |
+
+The gap cases are the point of the whole design: a naive bounding box would leave an invisible ~200 px square eating desktop clicks around a 148 px circle.
+
+**Failure paths deliberately fail *open* (window eats the mouse).** If the cursor read, window position, or scale factor fails, or no region has been reported yet, the region is treated as "inside". The reverse looks politer but turns the tool-confirmation card into an un-clickable picture, and a confirmation nobody can click is equivalent to no confirmation. A ~200 px square blocking the desktop is recoverable; a dead Allow button is not.
+
+Also closed this session: `.shadow(false)` (a transparent undecorated Windows window otherwise draws a rectangular grey halo that tracks the orb), window size following the reported content box clamped into `monitor.work_area()`, drag via an own `evox_start_drag` command behind a 4 px threshold (with the OS-synthesised trailing `click` swallowed only when `event.detail > 0`, so keyboard activation still fires), and runtime show/hide via `evox_set_visible` — which settles any pending confirmation as **denied** and collapses the panel before hiding.
+
+**No capabilities file, deliberately.** Tauri 2 checks the ACL only for `plugin:`-prefixed commands or when the app ships its own ACL manifest (`tauri-2.10.3` `webview/mod.rs:1802`; the generated `acl-manifests.json` has no `app` key). Shipping none is the tightest posture available: every `core:*` plugin command is unreachable from the webview and the entire IPC surface is the three `evox_*` commands. The cost is that the frontend must never `import` `@tauri-apps/api` — it calls `__TAURI_INTERNALS__.invoke` directly and degrades silently to a no-op in a browser, which is what makes the SIM tests above runnable at all.
+
+CSP widened to `default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost`. Without it IPC still works — `ipc-protocol.js` falls back from `fetch` to `window.ipc.postMessage` — but logs a warning on the first invoke.
+
+**Nothing here is REAL-WIN.** `cargo check` is AUTO and the click-through table is SIM. Whether the click-through actually feels right, whether the shadow is really gone, whether drag tracks the cursor, and whether the DPI conversion holds at 125% / 150% / 175% all need the window on screen (发布阻塞项 #5).
+
 ## Not yet verified
 
 - Speaker gate on this host's microphone: own-voice pass rate, another person's rejection, recorded-replay behaviour (the gate does **not** claim replay resistance — ADR 002 「局限」).
@@ -312,6 +341,8 @@ Not established by this session: anything calls a tool automatically. `VoicePlug
 - Live EvoX conversation bridge.
 - Real streaming first-token latency.
 - Separate always-on-top, skip-taskbar wake window (defined and compiling, not visually accepted).
+- Wake-orb click-through, shadow suppression, drag, and DPI conversion at 125% / 150% / 175% — all SIM/AUTO only, REAL-WIN pending (P10).
+- The Python→desktop event path. `main.rs` has no `emit` and the frontend listens to DOM `CustomEvent`s; nothing in Python drives the orb yet.
 
 ## Blockers
 

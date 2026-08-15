@@ -1,10 +1,8 @@
 """Agent integration layer.
 
-Two adapters exist: ``cli.py`` spawns a headless CLI, and ``evox.py`` wraps the
-existing local session bridge. ``acp.py`` (JSON-RPC 2.0 over stdio) and
-``http.py`` / ``openclaw.py`` (OpenAI-compatible endpoints, the OpenClaw Gateway)
-land in P7 -- until then a config entry naming those kinds must be disabled, and
-says so when it is not.
+Four adapters exist: ``cli.py`` spawns a headless CLI, ``evox.py`` wraps the
+existing local session bridge, ``acp.py`` speaks JSON-RPC 2.0 over stdio, and
+``http.py`` talks to an OpenAI-compatible endpoint (the OpenClaw Gateway).
 
 ``open_agents()`` is the wiring: it reads ``config/agents.toml``, checks it
 against ``contracts/agents.schema.json`` plus the cross-field rules a schema
@@ -16,6 +14,7 @@ neither must building an adapter -- both are tested.
 
 from __future__ import annotations
 
+from .acp import AcpAgentAdapter, AcpAgentError
 from .cli import (
     OUTPUT_MODES,
     PROMPT_PLACEHOLDER,
@@ -24,6 +23,7 @@ from .cli import (
     spawn_target,
     which,
 )
+from .http import HttpAgentAdapter, HttpAgentError
 from .contract import (
     AGENT_KINDS,
     CHUNK_KINDS,
@@ -53,6 +53,8 @@ __all__ = [
     "ADAPTER_KINDS",
     "AGENTS_SCHEMA_PATH",
     "AGENT_KINDS",
+    "AcpAgentAdapter",
+    "AcpAgentError",
     "CHUNK_KINDS",
     "OUTPUT_MODES",
     "PENDING_KINDS",
@@ -65,6 +67,8 @@ __all__ = [
     "CliAgentError",
     "ConfigContractError",
     "EvoXAgentAdapter",
+    "HttpAgentAdapter",
+    "HttpAgentError",
     "Task",
     "build_adapter",
     "enabled_entries",

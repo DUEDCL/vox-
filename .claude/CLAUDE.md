@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `evox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **359 passed, 3 skipped** |
+| `core/` `evox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **569 passed, 2 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -24,11 +24,11 @@
 | `core/tools/` | `pytest tests/test_tools.py tests/test_tool_security.py -q` | **123 passed, 1 skipped**（skip 是符号链接越界，本账户无权建链接） |
 | `core/memory/` | `pytest tests/test_memory.py -q` | **62 passed** |
 | 工具/记忆与语音路径接线 | `pytest tests/test_memory.py tests/test_plugin_tools.py -q` | **86 passed** |
-| `core/agents/` `config/agents.toml` | `pytest tests/test_agent_contract.py tests/test_agent_cli.py tests/test_agent_evox.py -q` | **59 passed**（contract 14 + cli 28 + evox 17） |
-| `core/dispatch/` | `pytest tests/test_router.py tests/test_dispatcher.py -q` | 全绿（P6 起） |
+| `core/agents/` `config/agents.toml` | `pytest tests/test_agent_contract.py tests/test_agent_cli.py tests/test_agent_evox.py tests/test_agent_acp.py tests/test_agent_http.py -q` | 全绿（contract 14 + cli 28 + evox 17 + acp 10 + http 9） |
+| `core/dispatch/` | `pytest tests/test_router.py tests/test_dispatcher.py tests/test_aggregator.py tests/test_intent.py tests/test_breaker.py -q` | **159 passed**（router 30 + dispatcher 37 + aggregator 20 + intent 54 + breaker 18） |
 | `core/session_bridge.py` | `pytest tests/test_session_bridge.py tests/test_plugin_tools.py -q` | 全绿 |
 | `desktop/src/` | `cd desktop && npm run build` | tsc + vite 通过 |
-| `desktop/src-tauri/` | `cd desktop/src-tauri && cargo check` | 零警告 + **须实机验收** |
+| `desktop/src-tauri/` | `cd desktop/src-tauri && cargo check && cargo test` | 零警告 + **8 passed** + **须实机验收** |
 
 必须用隔离环境的 `.venv\Scripts\python.exe`，不用系统 Python（系统环境没装 sherpa-onnx / soundfile）。
 
@@ -36,21 +36,16 @@ skip 数会随环境变化（VoxCord、模型是否存在），**passed 数下�
 
 ## 当前阶段
 
-Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事件契约、P3 记忆系统、P4 本地工具与安全门、P5 agent 适配器已落地，下一步 P6（派发/路由/汇总）。十阶段划分与 11 项发布阻塞项见 `docs/project-overview.md` 第 5、6 节。
+Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事件契约、P3 记忆系统、P4 本地工具与安全门、P5 agent 适配器、P6 派发/路由/汇总、P7 ACP/HTTP 适配器已落地（P8 唤醒球 UI 也已到 AUTO+SIM 级），下一步「Python→桌面事件通道」接线与 P9/P10 真机验收。十阶段划分与 11 项发布阻塞项见 `docs/project-overview.md` 第 5、6 节。
 
 决策记录：ADR 001 语音栈 · ADR 002 声纹准入 · ADR 003 agent 接入 · ADR 004 记忆 · ADR 005 派发与工具门。
 
 **未实现，不要假设存在**：
-- 平台层的 `dispatch` 包 —— 现在只有 `contract.py`（93 行 Protocol），`dispatcher`/`router`/`aggregator`/`intent`/`breaker` 全在 P6
-- `acp` / `http` 两种 agent kind —— 契约里有枚举，适配器在 P7；配置里 `enabled = true` 会带阶段名报错
-- 平台 12 种事件里除 `memory.*` / `tool.*` 之外的**产出点** —— `task.*`/`agent.*` 在 P6
-- **意图识别与工具的自动调用** —— 门和三个工具都在，但没有任何东西会自己决定去读文件或搜索；「读一下 X」→ 直执行是 dispatcher 的职责（P6）。当前唯一入口是 `plugin.run_tool()`
-- **agent 与语音路径的接线** —— `open_agents()` 能造出适配器，但插件还不会派发给它们，那是 P6
 - `web.search` 的**真实后端** —— 平台不自带（每个托管搜索 API 都是带 key 的云依赖），未注入时工具报 `no search backend is configured`
-- `shell.run` 的**确认 UI** —— 门会返回 `needs_confirmation`，但唤醒球上的展示与确认动作是 P8（REAL-WIN）
-- 记忆**召回的消费者** —— `MemoryRecaller` 已能查，但把结果注入任务是 dispatcher 的职责（P6）；`prune_turns()` 也还没有调用者，短期层暂不自动裁剪
+- `shell.run` 的**确认 UI** —— 门会返回 `needs_confirmation`，唤醒球上的确认卡已实现（DOM/SIM 级），但**没有任何东西把 Python 的 `tool.confirm_required` 送到它面前**：`main.rs` 没有 `emit`，前端听的是 DOM `CustomEvent`。四处断点，接线是「Python→桌面事件通道」那项
+- 记忆**召回的注入** —— `DefaultRouter` 用 `memory_recaller.success_rate()` 给 agent 打分（这条已落地），但**把召回到的历史文本拼进任务提示**没有任何实现；`prune_turns()` 也还没有调用者，短期层暂不自动裁剪
 - 流式 ASR（识别文本靠外部注入）、TTS 播放队列与真实打断
-- 唤醒球运行时显隐（可见性现由 `EVOX_WAKE_VISIBLE` 静态决定）、Canvas 2D 生产渲染器、工具确认 UI
+- Canvas 2D 生产渲染器（现在是 DOM + CSS，六态与动画都已落地）
 - 超时/重连/错误恢复、系统托盘
 - 声纹**反欺骗**：门不防录音回放，这是已知缺口（ADR 002 局限），不是待办
 - 声纹**真机验收**：本人通过率、他人拒绝、回放实测都需你在场（P10）
@@ -58,6 +53,8 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - **真实外部 agent 跑通一轮** —— `cli.py` 的全部测试用 mock 子进程，只算 SIM；真跑 `claude -p` 是 P9（REAL-AGENT）
 
 **已完成但容易记错的**：
+- **语音接进派发的是 `VoiceRuntime`，不是 `VoicePlugin`** —— `VoicePlugin.submit_text` 本身不走派发（门面只做状态机 + 记忆 + transport，不自造已验说话人）。`evox_plugin/runtime.py` 的 `VoiceRuntime.say()` 构造 `Dispatcher`，`submit_text` 之后 `dispatcher.dispatch()`，再 `complete_turn` 说回答案。「说一句 → 读文件」的链路已接上并有 `tests/test_runtime.py` 覆盖；`VoicePlugin.run_tool()` 仍是 opt-in 的手动入口。`_reach_listening()` 是实例方法、操作 `self.plugin`（此前是 `@staticmethod` 在操作一个丢弃的副本）
+- **P7 `acp` + `http` 适配器已实现** —— `acp.py` 讲 JSON-RPC 2.0 over stdio（initialize → session/new → session/prompt，`session/update` 流式增量）；`http.py` 讲 OpenAI Chat Completions（SSE 流式 + 非流式回退）。http 的 token 只从 `EVOX_AGENT_HTTP_TOKEN` 读，url 遵循桥接同款约束（明文 HTTP 只许回环、带凭据拒绝）。都算 SIM（mock peer / mock server），真实联调是 P9 的 REAL-AGENT
 - 声纹门已接线：3 秒内存环形缓冲 + KWS 命中即校验 + `require_verification` 默认 `True` + `wake.rejected` 产出点
 - 37.8 MB 声纹模型**已下载**（dim 512，SHA-256 记在 `THIRD_PARTY_NOTICES.md`）
 - `feed()` 返回 `(keyword, None)` —— sherpa-onnx 的 `KeywordResult` **根本不含置信度**，`None` 是经核实的陈述不是遗漏；`wake.detected` 的分数来自声纹相似度
@@ -74,6 +71,21 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - **放弃 agent 流即杀进程** —— 生成器的 `finally` 收尸，`race` 丢弃输家时不留野进程
 - **`evox` 适配器不流式，也不可能流式** —— 桥接是一次阻塞 POST，没有增量端点；首字延迟 = 整轮延迟是端点的属性，不要给它套「看起来增量」的外壳
 - **命令不在 PATH 的 agent 条目被保留而不是丢弃** —— 可用性由 `check()` 报告，丢掉它会让「少一个 agent」与「配错一个 agent」无法区分
+- **五个 sink 的签名统一为 `on_event(event)` 单个已验证信封** —— tool runner、记忆写、记忆召回、dispatcher、breaker 都是这一个形状。之前 breaker 是三参 `(type, agent, detail)`，测试按位置解包，改签名不会报错只会静默错位
+- **没有 `task.completed`，只有 `task.done`** —— 12 种平台事件的枚举是钉死的，拼错的类型名在 `validate_event()` 处就炸
+- **`task.progress` 报的是派发集合 `agents`（复数），不是获胜者** —— `AgentChunk` 没有 `agent` 字段，合并后的 chunk 不带来源。想报「谁答的」就得先给 chunk 加来源字段，猜不出来
+- **`race` 的获胜者在首个 chunk 时决定，不是完成时** —— 按完成判定会让**空流**赢（它最先「完成」）。带 `error` 的 `done` 也算「说话了」：不静默切给输家，否则合并流就变成了重试机制，而 dispatcher 会把失败的一轮记成成功
+- **`fanout` 只折叠 `done`，其余 chunk 原样转发** —— 合并后的 `done`：elapsed 取最慢、tokens 求和、**只有全部 agent 都失败**才带 error。tokens 全无上报时是 `None` 不是 `0`（`0` 会被读成「数过，是零」）
+- **能力（capability）是 gate 不是 weight** —— 缺 vision 的 agent 得 0.0 并被移出计划，不会被「便宜又快」抬进来。5 维评分的权重和为 1.0，未知成功率取 `UNKNOWN_SUCCESS=0.5`，越界的 cost/latency 被 clamp 而不是外推
+- **意图的动词必须带边界（`_VERB_SEP`）** —— 只锚定开头不够：「运行时报错了怎么办」以「运行」开头，会把「时报错了怎么办」当 shell 命令跑；「搜索引擎是怎么工作的」同形。代价是粘着写法（「查看README.md」）落到 agent —— 这是安全方向
+- **`needs_confirmation` 被原样带出，dispatcher 永不自动确认** —— 有测试钉死「恰好调用一次，绝不带 `confirmed=True` 重试」
+- **唤醒球的命中区由前端量、Rust 判**。`set_ignore_cursor_events` 是**整窗开关**，没有 Electron 的 `forward` 选项，所以选择性穿透只能靠 Rust 侧 30ms 轮询光标。圆心与半径**不许写进 Rust**：它们是 CSS 布局的结果，硬编码会在下次改样式时静默漂掉
+- **`measureHitRegion()` 用 `offsetLeft`/`offsetWidth`，不用 `getBoundingClientRect()`** —— 球每帧被 rAF 写 `transform`，用渲染盒会让命中区每帧抖动、IPC 每帧都发
+- **命中判定的失败路径一律倒向「窗口吃鼠标」** —— 读不到光标/窗口位置/缩放、或前端还没上报，都当命中。反方向会让确认卡变成一张点不动的图，而点不动的确认等价于没有确认
+- **没有 `capabilities/` 文件，这是故意的** —— Tauri 2 只对 `plugin:` 前缀命令或应用自带 ACL manifest 时才查权限（`tauri-2.10.3` `webview/mod.rs:1802`）。不放反而最紧：所有 `core:*` 插件命令对前端不可达，IPC 面就是三个 `evox_*`。代价是前端**永不能 import `@tauri-apps/api`**，只用 `__TAURI_INTERNALS__.invoke`
+- **`.shadow(false)` 不是可选项** —— 无边框 + 透明还留投影的话，桌面上会有一块跟着球走的方形灰影
+- **拖动是自己的 `evox_start_drag` + 4px 阈值**，不是 `data-tauri-drag-region`（那条路要 `core:window:allow-start-dragging`，等于为拖窗口暴露整个 core:window）。拖完 OS 补的 `click` 只在 `detail > 0` 时吞 —— 键盘激活的 `click` 的 `detail` 是 0，连它一起吞会让球没法用键盘按
+- **`evox_set_visible(false)` 会先把挂起的确认按拒绝落定再隐藏** —— 隐藏一张挂起的确认卡等于让调用方永久挂起，而「挂起」在安全语义上等价于「未拒绝」
 
 ## 注意事项
 

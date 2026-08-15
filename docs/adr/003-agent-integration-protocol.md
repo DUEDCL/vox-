@@ -84,7 +84,7 @@ Reference material for the CLI difference-flattening list: `RobertTLange/headles
 
 - REAL-AGENT: at least `claude` and `opencode` each complete one real turn end to end through `cli.py`. **Still open** — P5's coverage is mock-subprocess SIM.
 - ~~SIM: `cli.py` streaming parse, timeout, and cancel against a mock subprocess.~~ Closed in P5.
-- SIM: ACP handshake / streaming / cancel against a mock JSON-RPC peer. **Still open** — `acp.py` lands in P7.
+- ~~SIM: ACP handshake / streaming / cancel against a mock JSON-RPC peer.~~ Closed in P7 (`tests/test_agent_acp.py`, mock JSON-RPC peer) — real ACP/HTTP turns stay REAL-AGENT (P9).
 - ~~`evox.py` wrapping proves behaviourally identical to the pre-wrapping `LocalEvoXTransport` path.~~ Closed in P5 (AUTO). The bridge against a *real* EvoX server remains ADR 001's REAL-EVOX blocker.
 - ~~`config/agents.toml` schema validation rejects a malformed descriptor rather than starting with it.~~ Closed in P5.
 - ~~Session-bridge security posture from ADR 001 preserved verbatim once `session_bridge.py` becomes an `evox.py` implementation detail.~~ Closed in P5 — wrapping is what preserves it.

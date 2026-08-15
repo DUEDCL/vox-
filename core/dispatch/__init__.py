@@ -1,12 +1,19 @@
-"""Task dispatch, routing, and aggregation.
+"""Task dispatch and routing layer (ADR 005).
 
-Only contracts exist at this stage. ``intent.py``, ``router.py``, ``breaker.py``,
-``aggregator.py``, and ``dispatcher.py`` follow once the tool and agent layers
-are in place, because the dispatcher is the one component that needs both.
+Intent classification → agent selection → parallel execution → result aggregation.
+Three modes: ``single`` (default), ``race``, ``fanout`` (explicit only).
 """
 
 from __future__ import annotations
 
+from .aggregator import DefaultAggregator
+from .breaker import (
+    DEFAULT_COOLDOWN_S,
+    DEFAULT_THRESHOLD,
+    STATES,
+    BreakerState,
+    CircuitBreaker,
+)
 from .contract import (
     DISPATCH_MODES,
     INTENT_KINDS,
@@ -17,8 +24,19 @@ from .contract import (
     Router,
     RouteScore,
 )
+from .dispatcher import DispatchResult, Dispatcher
+from .intent import RuleBasedIntentResolver
+from .router import (
+    COST_MAX,
+    COST_MIN,
+    DEFAULT_WEIGHTS,
+    LATENCY_MAX_MS,
+    LATENCY_MIN_MS,
+    DefaultRouter,
+)
 
 __all__ = [
+    # Contract
     "DISPATCH_MODES",
     "INTENT_KINDS",
     "Aggregator",
@@ -27,4 +45,22 @@ __all__ = [
     "IntentResolver",
     "RouteScore",
     "Router",
+    # Implementations
+    "DefaultAggregator",
+    "DefaultRouter",
+    "Dispatcher",
+    "DispatchResult",
+    "RuleBasedIntentResolver",
+    # Circuit breaker
+    "CircuitBreaker",
+    "BreakerState",
+    "DEFAULT_COOLDOWN_S",
+    "DEFAULT_THRESHOLD",
+    "STATES",
+    # Router constants
+    "COST_MAX",
+    "COST_MIN",
+    "DEFAULT_WEIGHTS",
+    "LATENCY_MAX_MS",
+    "LATENCY_MIN_MS",
 ]

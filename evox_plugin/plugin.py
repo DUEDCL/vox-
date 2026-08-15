@@ -31,16 +31,31 @@ class VoicePlugin:
     memory_writer: Any = None
     memory_recaller: Any = None
     tools: Any = None
+    #: Where events go besides ``self.events``. One validated envelope, one
+    #: positional argument -- the same shape the tool runner, memory, the
+    #: dispatcher and the breaker already take, so a desktop bridge, a logger or
+    #: a test recorder all attach without an adapter.
+    #:
+    #: A sink that raises must not end a turn: the conversation is the product,
+    #: the event stream is the telemetry. Failures are counted, not propagated.
+    on_event: Any = None
+    sink_failures: int = 0
+
+    def _emit(self, event: dict) -> dict:
+        """Record, then fan out. Every event in this class goes through here."""
+        self.events.append(event)
+        if self.on_event is not None:
+            try:
+                self.on_event(event)
+            except Exception:
+                self.sink_failures += 1
+        return event
 
     def _event(self, event_type: str, payload: dict | None = None) -> dict:
-        event = build_event(event_type, payload)
-        self.events.append(event)
-        return event
+        return self._emit(build_event(event_type, payload))
 
     def _state_event(self, target: VoiceState, reason: str) -> dict:
-        event = self.machine.transition(target, reason)
-        self.events.append(event)
-        return event
+        return self._emit(self.machine.transition(target, reason))
 
     # -- lifecycle tools -----------------------------------------------------
 

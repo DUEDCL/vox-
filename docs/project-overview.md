@@ -1,7 +1,7 @@
 # 项目总览与当前进度
 
 > 工作区:`D:\program\vioce-wake`
-> 最后更新:2026-08-05(Phase 4 平台化 P5 agent 适配器落地)
+> 最后更新:2026-08-11(Phase 4 平台化 P6 派发层落地)
 > 本文件是项目的单一入口(single source of truth,唯一事实来源),其它文档由此索引。
 
 ## 1. 项目是什么
@@ -27,16 +27,18 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 
 | 维度 | 状态 |
 |---|---|
-| 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架 + P1 声纹门 + P2 平台契约 + P3 记忆 + P4 工具与安全门 + **P5 agent 适配器**已落,P6 派发器起 |
+| 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架 + P1 声纹门 + P2 平台契约 + P3 记忆 + P4 工具与安全门 + P5 agent 适配器 + **P6 派发层** + **P7 ACP/HTTP 适配器**已落,`VoiceRuntime` 已把语音接进派发,「Python→桌面事件通道」接线起 |
 | 技术选型 | **已定案**,见 [ADR 001](adr/001-voice-stack-selection.md) ~ [ADR 005](adr/005-task-dispatch-model.md) |
-| Python 测试 | **359 passed, 3 skipped**(2 个 skip 为可选 VoxCord 依赖,1 个为符号链接权限) |
+| Python 测试 | **518 passed, 3 skipped**(2 个 skip 为可选 VoxCord 依赖,1 个为符号链接权限) |
 | 前端构建 | `npm run build`(tsc + vite)通过;`cargo check` 通过 |
 | 真机麦克风唤醒 | **已验证一次**(2026-07-26,`你好问问`,7.193s;当时打印的 score 1.0 是硬编码常量,不是测量值 —— 已改正,见 §7) |
 | 声纹准入 | 门**已接线**,模型已下载(dim 512);判别力 **AUTO 已验**(簇内 0.736 / 簇间 0.370,阈值 0.5 落在间隙);校验耗时 41 ms;**真机通过率未验** |
 | 事件契约 | 语音 9 种 + 平台 12 种,**两个文件一个信封**、枚举互斥;语音契约字节不变由 SHA-256 钉死 |
-| 平台层四包 | `memory`(P3)、`tools`(P4)与 `agents`(P5)**已实现**;`dispatch` **仅契约**(94 行 Protocol) |
-| 本地工具 | 门(`policy.py`)+ `fs.read` / `web.search` / `shell.run` **已实现**,`voice` 与 `agent` 同一道门;`shell.run` 默认关、危险模式不可配置;**确认 UI 是 P8**,`web.search` 无内置后端 |
-| agent 适配器 | `cli`(headless 子进程,含 Windows 批处理 shim 处理)与 `evox`(包装会话桥接)**已实现**,`config/agents.toml` 已落;`acp` / `http` 在 P7,`enabled = true` 会带阶段名报错 |
+| 平台层四包 | `memory`(P3)、`tools`(P4)、`agents`(P5)与 **`dispatch`(P6)全部已实现** |
+| 本地工具 | 门(`policy.py`)+ `fs.read` / `web.search` / `shell.run` **已实现**,`voice` 与 `agent` 同一道门;`shell.run` 默认关、危险模式不可配置;`web.search` 无内置后端 |
+| agent 适配器 | `cli`(headless 子进程)、`evox`(包装会话桥接)、`acp`(JSON-RPC 2.0 over stdio)、`http`(OpenAI 兼容 SSE)**全部已实现**,`config/agents.toml` 已落;http token 只从环境变量读,url 遵循桥接同款回环/凭据约束 |
+| 派发层 | `intent` / `router` / `aggregator` / `breaker` / `dispatcher` **已实现并测过**(159 用例);`task.*` / `agent.*` 有了产出点。**尚未接进 `VoicePlugin`** —— 语音输入仍不走派发 |
+| 唤醒球 UI | 六态 + 展开态 + 工具确认卡 **DOM/CSS 已实现**,Rust 侧选择性穿透已实现;**Python→桌面事件通道四处断开**,真机验收未做 |
 | 真实 EvoX 会话桥接 | **未验证** — 发布阻塞项 |
 | 真实外部 agent | **未验证** — 发布阻塞项(REAL-AGENT) |
 | 真实透明窗口验收 | **未验证** — 发布阻塞项 |
@@ -139,6 +141,24 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 - **配置里没有放密钥的键** — schema 层面就没有,写 `token = "..."` 直接校验失败。EvoX 的 token 只从环境变量经 `from_env` 读。
 - **未实现的 kind 报错而不是空转** — `acp` / `http` 若 `enabled = true` 会带着「落在 P7」报错,想先把配置写进来就设 `enabled = false`。「尚未」不该读起来像「不支持」。
 
+### Phase 4:P6 派发/路由/汇总(2026-08-11)
+
+- **意图的动词必须带边界,不只是锚在开头** — 这是本阶段测试抓出的两个真实缺陷。「运行时报错了怎么办」以「运行」**开头**,所以起始锚点放它过去,capture 把「时报错了怎么办」当 shell 命令跑;「搜索引擎是怎么工作的」同形。运行时、搜索引擎是单个词,分隔符才是「运行 pytest」与「运行时」的区别。修法是 `_VERB_SEP`:动词之后必须是它带的标记(一下 / 命令)或真空白。代价是粘着写法(「查看README.md」)落到 agent —— 落到 agent 是安全方向,跑一条没人要的命令不是。
+- **规则不是模型,这是有理由的** — 分类器会给它本该加速的快路径加延迟、给依赖集加一个模型、并且没法确定性地测。规则命中是完全 AUTO 可测的,所以 54 条意图用例里**有 14 条是反向的**:只是「句中含动词」的话必须落到 agent。
+- **一次命中不等于命令会跑** — resolver 只分类,`core/tools/policy.py` 才决定。「运行 rm -rf /」照样被分成 `shell.run`,然后死在门上。这条分工在测试里也钉了一条,不只写在 docstring 里。
+- **能力是 gate,不是权重** — 声明了做不了 vision 的 agent 不能靠又便宜又快赢下一个 vision 任务,否则那条声明就是装饰。`score()` 仍把它连同各维度报出来(「claude 为什么输了」值得一个答案),`plan()` 不路由给它。四个计分维度权重和为 1.0,于是「免费 + 即时 + 从未失败 + 空闲」正好是 1.0,分数可以直接读。
+- **无观测取 0.5 而不是 0** — 一个还没试过的 agent 不该输给一个每轮都失败的 agent,那是整支队伍静默塌到「碰巧先跑的那个」上的方式。越界的 cost / latency 被 clamp 而不是外推:一个报 `cost=-5, latency_ms=1` 的条目不能凭撒谎拿到超过 1.0 的分。
+- **`race` 的获胜者在首个 chunk 时决定** — 按「先完成」判定会让**空流**赢,因为它最先完成。带 `error` 的终结 chunk 也算「说话了」:不静默切给输家,否则合并流就变成了一个隐式重试机制,而派发器会把一轮失败记成成功。
+- **输家是被停掉,不是被抽干** — 这一层能保证的是输家的 chunk 到不了消费者;真正的收尸靠适配器的 `finally`(P5 已立)。两件事分开断言,免得「没有野进程」这个结论建立在错误的层上。
+- **`fanout` 只折叠 `done`** — 每个 agent 自己的 `done` 收进一个合成终结 chunk:elapsed 取最慢、tokens 求和(这一轮两边的钱都花了)、**只有全部失败**才带 error。tokens 全无上报时是 `None` 不是 `0` —— `0` 会被读成「数过,是零」。`tool_call` 一律转发,那是派发器必须看到的内容。
+- **`task.progress` 报的是派发集合,不是获胜者** — `AgentChunk` 没有 `agent` 字段,合并后的 chunk 不带来源,所以「谁答的」这个信息在这一层**不存在**。报一个猜的名字比不报更糟,于是 payload 里是 `agents`(复数)加 `first_chunk_ms`。
+- **每轮恰好一个 progress,不是每 chunk 一个** — 首字延迟只有一个,重复发会把它变成一条噪音流。
+- **12 种事件的枚举是钉死的,没有 `task.completed`** — 本阶段最初写的是 `task.completed`,`validate_event()` 当场炸。五个 sink 的签名也在此统一为 `on_event(event)` 单个已验证信封:breaker 原先是三参 `(type, agent, detail)`,测试按位置解包,改签名不会报错只会静默错位。
+- **`needs_confirmation` 被原样带出,派发器永不自动确认** — 有一条测试钉死「恰好调用一次,绝不带 `confirmed=True` 重试」。一个会自己点确认的派发器让 P4 那四层全部失效。
+- **失败的一轮也有终结 chunk** — 工具 runner 抛异常、agent 流没有终结 chunk、计划为空(reason 从 router 原样透传),三条路径都以带 error 的 `done` 收尾。事件 payload 只带 error 与 task_id,**不带 text / utterance / reply** —— 有一条测试检查 `repr(events)` 里不出现正文。
+- **计划了但没有适配器的 agent 走 `release` 而不是 `record`** — 那是配置不匹配,记进成功率会让平台永久绕开一个其实从没失败过的后端。
+- **照实记下的局限** — 全部 159 条派发用例都是 AUTO/SIM:agent 是 fake、工具 runner 是 fake、时钟是注入的。**`VoicePlugin` 里没有任何地方构造 `Dispatcher`**,所以「说一句话 → 直接读文件」这条链在代码里齐了但没接上;记忆召回给路由打分已接,**把召回文本拼进任务提示没有实现**;`prune_turns()` 仍无调用者。
+
 ### 已实现的代码骨架
 
 | 模块 | 文件 | 行数 | 说明 |
@@ -154,7 +174,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 语音提供器 | `core/audio/`(7 模块 + `__init__`) | 946 | KWS/VAD/采集/**声纹**/**环形缓冲**/VoxCord |
 | 重导出薄壳 | `core/providers.py` | 29 | 保旧导入路径不断 |
 | 会话桥接 | `core/session_bridge.py` | 92 | `ConversationTransport` 协议 + HTTP 实现 |
-| 派发契约 | `core/dispatch/contract.py` | 93 | **仅 Protocol,无实现**(五维路由、三模式、意图、熔断器) |
+| 派发层 | `core/dispatch/`(`contract`/`intent`/`router`/`aggregator`/`breaker`/`dispatcher`/`__init__`) | 1496 | 规则意图、五维路由(能力是 gate)、三模式汇总(恰好一个 `done`)、熔断器、`task.*` 产出点 |
 | 记忆系统 | `core/memory/`(`store`/`write`/`recall`/`__init__`) | 1093 | SQLite + FTS5 单文件、中文双字索引、凭据过滤、Markdown 镜像 |
 | 记忆配置 | `config/memory.toml` | 23 | 库路径、事实目录、召回上限、短期保留数 |
 | 本地工具 | `core/tools/`(`contract`/`policy`/`fs`/`web`/`shell`/`runner`/`__init__`) | 992 | 一道门两个来源、13 条不可配置的硬拦截、审计落长期层 |
@@ -162,9 +182,9 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 插件门面 | `evox_plugin/plugin.py` | 413 | EvoX 工具面 + 回合编排 + 声纹诊断 + 记忆接线 + 工具接线 |
 | 声纹配置 | `config/speaker.toml` | 28 | 阈值与时长下限,`tomllib` 读 |
 | 录入 CLI | `scripts/enroll_speaker.py` | 125 | 交互式录入,音频不落盘 |
-| 前端 | `desktop/src/main.ts` + `style.css` | 35 | 唤醒球与状态标签 |
-| 窗口 | `desktop/src-tauri/src/main.rs` | 31 | 透明、置顶、不占任务栏 |
-| 测试 | `tests/*.py` + `tests/integration/` | 3996 | 362 用例(359 passed + 3 skipped),见 [测试文档](testing.md) |
+| 前端 | `desktop/src/main.ts` + `style.css` + `index.html` | 1076 | 六态唤醒球、展开态流式文本、工具确认卡(含命令原文)、命中区上报 |
+| 窗口 | `desktop/src-tauri/src/main.rs` | 329 | 透明、置顶、无投影、不占任务栏;三个 `evox_*` IPC + 30 ms 光标轮询的选择性穿透 |
+| 测试 | `tests/*.py` + `tests/integration/` | 5749 | 521 用例(518 passed + 3 skipped),见 [测试文档](testing.md) |
 
 ## 5. 进行中 / 下一步
 
@@ -176,15 +196,21 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | P1 | **声纹门**:环形缓冲、fail-closed 门、录入 CLI、`wake.rejected` 产出点 | AUTO | ✅ 完成(真机留 P10) |
 | P2 | 平台事件契约:`agent-events.schema.json` + `agents.schema.json` | AUTO | ✅ 完成 |
 | P3 | 记忆系统 `core/memory/` | AUTO | ✅ 完成(跨进程持久性留 P10) |
-| P4 | 本地工具 `core/tools/` + `config/tools.toml` | AUTO | ✅ 完成(确认 UI 留 P8,真实搜索后端未定) |
+| P4 | 本地工具 `core/tools/` + `config/tools.toml` | AUTO | ✅ 完成(真实搜索后端未定) |
 | P5 | agent 适配器 `cli.py` + `evox.py` + `registry.py` + `config/agents.toml` | AUTO+SIM | ✅ 完成(真实 CLI 留 P9) |
-| P6 | 派发/路由/汇总 `core/dispatch/` | AUTO+SIM | 🔄 下一步 |
-| P7 | `acp.py` + `http.py` / `openclaw.py` | AUTO | ⬜ |
-| P8 | 唤醒球弹出 + Canvas 2D 渲染器 + 工具确认 UI | REAL-WIN | ⬜ |
+| P6 | 派发/路由/汇总 `core/dispatch/` | AUTO+SIM | ✅ 完成(**接进 `VoicePlugin` 未做**,见下) |
+| P7 | `acp.py` + `http.py` / `openclaw.py` | AUTO+SIM | ✅ 完成(真实 ACP/HTTP 联调留 P9) |
+| P8 | 唤醒球弹出 + 工具确认 UI + Python→桌面事件通道 | REAL-WIN | 🔄 DOM/CSS 与 Rust 侧已实现;**事件通道未接**,真机验收留 P10 |
 | P9 | 真实 agent 联调(`claude` / `opencode` 各一次) | REAL-AGENT | ⬜ |
 | P10 | 真实语音端到端(含他人拒绝) | REAL-MIC + REAL-AGENT | ⬜ |
 
 原 Phase 4 计划里的「流式 ASR、TTS 播放队列、超时重连、状态机生产化」并入 P1–P8 各阶段,不单列。
+
+**P6 之后的接线缺口(都有代码但没有接线人)**:
+- `Dispatcher` 无人构造 —— `VoicePlugin` 的 `submit_text` 仍只走记忆,「说一句 → 读文件」的链路还差最后一针
+- Python→桌面事件通道四处断开 —— Python 侧 `_event()` 无 sink、无 transport、`main.rs` 无 emit、前端听 DOM `CustomEvent`
+- 记忆召回只给路由打分,召回文本从未拼进任务提示;`prune_turns()` 无调用者
+- `web.search` 无真实后端(每个托管 API 都是带 key 的云依赖,红线 1)
 
 ## 6. 发布阻塞项(release blockers)
 
@@ -230,7 +256,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 - **声纹不防录音回放** — 本轮不做反欺骗模型,这是**已知缺口**而非尚未测到(ADR 002 局限节)。真实人声的判别力已有 AUTO 背书(簇内 0.736 / 簇间 0.370),但**合成音频完全测不出判别力** —— 120 Hz 与 240 Hz 两组谐波栈互相通过 0.767,任何用生成音调测声纹的测试都会空过。
 - **声纹注册数据是生物特征** — `enrollment/` 已在 `.gitignore` 内,永不提交;查看注册状态只用 `describe()`。
 - **VoxCord 不在本机** — `D:\program\voxcord` 不存在,相关测试自动 skip;它是可选参考依赖,不影响发布路径。
-- **模型体积大** — `models/` 约 451 MB(含两个未清理的 `.tar.bz2` 归档共 192 MB,以及 37.8 MB 声纹模型);打包策略需在 P8 前决定。多 agent 子进程并发另有内存压力,P6 需加派发并发上限。
+- **模型体积大** — `models/` 约 451 MB(含两个未清理的 `.tar.bz2` 归档共 192 MB,以及 37.8 MB 声纹模型);打包策略需在 P8 前决定。多 agent 子进程并发另有内存压力,派发并发上限已落(`DEFAULT_MAX_CONCURRENT = 3`,`RACE_WIDTH = 2`)。
 - **开源项目判定多为「社区来源」** — `github.com` / `api.github.com` / `raw.githubusercontent.com` 的 WebFetch 在本环境全部被拦截,无法读取一手 README。除注明「官方文档确认」者外,star 数、许可证、最后提交时间均未直接核实,不得当官方结论用。
 - **SenseVoiceSmall 权重许可证未取证** — 若启用该 ASR 备选,须先归档 ModelScope 许可证文本。
 - **控制台中文乱码** — Windows 代码页显示问题,UTF-8 字节本身正确,不是数据缺陷。

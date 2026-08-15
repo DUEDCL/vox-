@@ -25,7 +25,7 @@ python scripts/e2e_simulated.py
 
 第一条检查单元、契约和适配器；第二条检查插件最小生命周期；第三条覆盖模拟链路：唤醒、识别文本、会话发送、回复、TTS 事件、连续对话、取消和停止。
 
-当前基线 **359 passed, 3 skipped**（2 个 skip 是可选的 VoxCord 适配器，1 个是符号链接越界用例 —— 本账户无权创建符号链接）。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
+当前基线 **518 passed, 3 skipped**（2 个 skip 是可选的 VoxCord 适配器，1 个是符号链接越界用例 —— 本账户无权创建符号链接）。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
 
 ## 契约或事件字段变更
 
@@ -220,12 +220,21 @@ python -c "from core.providers import VoxCordAdapter; print(VoxCordAdapter().loa
 适用时机：修改 `core/dispatch/`(`dispatcher` / `router` / `aggregator` / `intent` / `breaker`)后。
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_router.py tests/test_dispatcher.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_router.py tests/test_dispatcher.py tests/test_aggregator.py tests/test_intent.py tests/test_breaker.py -q
 ```
 
-覆盖五维打分（能力/成本/延迟/成功率/负载）、熔断器开合、`single` / `race` / `fanout` 三模式、规则意图分类。双 mock agent 必须产出行为一致的回合 —— 这是红线 2 在派发层的落点。
+期望 **159 passed**（router 30 + dispatcher 37 + aggregator 20 + intent 54 + breaker 18）。覆盖五维打分（能力/成本/延迟/成功率/负载）、熔断器开合、`single` / `race` / `fanout` 三模式、规则意图分类。双 fake agent 必须产出行为一致的回合 —— 这是红线 2 在派发层的落点。
 
 **语音路径默认必须是 `single` 或 `race`。** 若默认变成 `fanout`，首字延迟会退化为最慢 agent 的延迟；这不是性能退步而是体感破坏，改动前先看 ADR 005。
+
+改这一层时四条不许松的属性：
+
+- **合并后的流恰好一个 `done`。** 派发器只凭它判断回合结束：多一个会提前结束回合，少一个会挂住。`fanout` 因此折叠每个 agent 的 `done`，而不是转发。
+- **`race` 的获胜者在首个 chunk 时决定，不是完成时。** 按完成判定会让空流赢——它最先完成。带 `error` 的终结 chunk 也算「说话了」：静默切给输家会把合并流变成隐式重试，而派发器会把失败的一轮记成成功。
+- **动词后面必须有边界（`intent.py` 的 `_VERB_SEP`）。** 只锚在开头不够：「运行时报错了怎么办」以「运行」开头，会把「时报错了怎么办」当命令跑。改意图规则先跑 `tests/test_intent.py` 的**反向半区**，那 14 条才是这个文件的安全属性。
+- **派发器永不自动确认。** `needs_confirmation` 原样带出，绝不带 `confirmed=True` 重试。一个会自己点确认的派发器让 P4 的四层全部失效。
+
+`task.progress` 的 payload 里是 `agents`（复数）不是 `agent`：`AgentChunk` 没有来源字段，合并后的 chunk 无法归属，报一个猜的名字比不报更糟。想报「谁答的」得先给 chunk 加来源。
 
 ## 模型下载与完整性检查
 
@@ -316,6 +325,7 @@ Vite 应使用 `http://localhost:<port>`，不要把 `127.0.0.1` 作为视觉验
 ```powershell
 Push-Location desktop/src-tauri
 cargo check
+cargo test        # 命中区几何与反序列化 8 项
 Pop-Location
 ```
 
@@ -328,6 +338,16 @@ Pop-Location
 ```
 
 透明窗口、DPI、多显示器和不抢焦点行为不能只靠 `cargo check` 判定，必须在 Windows 实机启动后验收。
+
+P8 唤醒球的具体验收项（都是 REAL-WIN 级）：
+- 命中区之外鼠标**穿过**窗口，球与展开面板能吃鼠标；
+- 无边框窗口没有跟随球的方形灰影（`shadow(false)` 生效）；
+- 按住球拖 4px 以上窗口跟手，松手后不误触点击；键盘激活（`detail=0`）的点击不受拖动标志影响；
+- 展开时窗口向下长、不越出工作区下边界；球在正常展开时**不跳动**；
+- `EVOX_WAKE_VISIBLE` 未设时窗口隐藏、`evox_set_visible(true)` 后可见；
+- 125% / 150% / 175% 缩放下命中区与光标不漂移。
+
+验证等级说明：`cargo check`/`cargo test` 只算 AUTO；命中表在 `docs/research/prototype-results.md` 里是 SIM；真机手感是 P10（发布阻塞项 #5）。
 
 ## EvoX 会话桥接回归
 
@@ -371,4 +391,4 @@ rg "TODO|FIXME|release blocker|not verified" core evox_plugin desktop docs tests
 - 前端修改：`npm run build`；窗口属性修改再加 `cargo check` 和 Windows 实机验收。
 - 模型或依赖变更：记录版本、来源、归档校验结果到 `THIRD_PARTY_NOTICES.md` 和 `docs/research/prototype-results.md`。
 
-每个阶段收尾一律跑全量 `python -m pytest tests -q`（当前基线 **359 passed, 3 skipped**），不用单文件绿灯代替全量。
+每个阶段收尾一律跑全量 `python -m pytest tests -q`（当前基线 **518 passed, 3 skipped**），不用单文件绿灯代替全量。

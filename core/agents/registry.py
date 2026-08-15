@@ -10,10 +10,10 @@ module adds only what a JSON Schema cannot say:
   a config that appears to set something it cannot is worse than one that omits
   it),
 - that two agents do not share a name, since the router addresses them by name,
-- that a ``kind`` with no adapter yet is an error rather than a no-op.
+- that a ``kind`` the build does not know is an error rather than a no-op.
 
-A disabled entry is dropped before any of those checks, so an ``acp`` block can
-sit in the file waiting for P7 as long as it is switched off.
+A disabled entry is dropped before any of those checks, so an entry can sit in
+the file switched off without being inspected.
 
 An entry whose command is missing from PATH is **kept**. Availability is host
 state that changes between runs, and dropping it here would make a real
@@ -35,18 +35,21 @@ from typing import Any, Mapping, Sequence
 from core.session_bridge import LocalEvoXTransport
 from core.tools.policy import workspace_root
 
+from .acp import AcpAgentAdapter
 from .cli import CliAgentAdapter
 from .contract import AgentAdapter
 from .evox import EvoXAgentAdapter
+from .http import HttpAgentAdapter
 from .schema import ConfigContractError, validate_agents_config
 
 DEFAULT_CONFIG_NAME = "agents.toml"
 
-#: Kinds with an adapter in this build. The rest of ``AGENT_KINDS`` is declared by
-#: the contract and lands later; naming the phase in the error is what keeps
-#: "not yet" from reading as "not supported".
-ADAPTER_KINDS = frozenset({"cli", "evox"})
-PENDING_KINDS: Mapping[str, str] = {"acp": "P7", "http": "P7"}
+#: Kinds with an adapter in this build. Every kind ``AGENT_KINDS`` declares is
+#: here. ``PENDING_KINDS`` stays empty until a future kind is declared in the
+#: contract but not yet implemented; naming its phase in the error is then what
+#: keeps "not yet" from reading as "not supported".
+ADAPTER_KINDS = frozenset({"cli", "evox", "acp", "http"})
+PENDING_KINDS: Mapping[str, str] = {}
 
 #: Keys every kind accepts, and the extras each one accepts on top. The union of
 #: the two must equal the schema's property list -- a test asserts it, because a
@@ -58,7 +61,7 @@ KIND_KEYS: Mapping[str, frozenset[str]] = {
     "cli": frozenset({"command", "args", "output", "cwd", "env_passthrough"}),
     "evox": frozenset({"url"}),
     "acp": frozenset({"command", "args", "cwd", "env_passthrough"}),
-    "http": frozenset({"url"}),
+    "http": frozenset({"url", "model"}),
 }
 REQUIRED_KEYS: Mapping[str, tuple[str, ...]] = {
     "cli": ("command",),
@@ -163,6 +166,18 @@ def build_adapter(
         return EvoXAgentAdapter(
             transport if transport is not None else _bridge(entry), **common
         )
+    if kind == "acp":
+        extra = {name: entry[name] for name in ("cwd",) if name in entry}
+        return AcpAgentAdapter(
+            command=entry["command"],
+            args=tuple(entry.get("args", ())),
+            env_passthrough=tuple(entry.get("env_passthrough", ())),
+            **common,
+            **extra,
+        )
+    if kind == "http":
+        extra = {"model": entry["model"]} if "model" in entry else {}
+        return HttpAgentAdapter(url=entry["url"], **common, **extra)
     raise AgentsConfigError(f"kind {kind!r} has no adapter")
 
 
