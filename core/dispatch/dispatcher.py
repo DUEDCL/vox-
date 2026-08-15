@@ -26,7 +26,7 @@ rebuilding this object.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterator, Mapping
 
 from core.agents.contract import AgentChunk, Task
@@ -90,12 +90,14 @@ class Dispatcher:
         *,
         resolver: IntentResolver | None = None,
         tool_runner: Any = None,
+        memory_recaller: Any = None,
         on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.router = router
         self.aggregator = aggregator
         self.resolver = resolver
         self.tool_runner = tool_runner
+        self.memory_recaller = memory_recaller
         self._on_event = on_event
 
     # -- public --------------------------------------------------------------
@@ -112,7 +114,7 @@ class Dispatcher:
         intent = self.resolve(task.text)
         if intent.kind == "tool" and self.tool_runner is not None:
             return self._run_tool(task, intent, started, speaker)
-        return self._run_agents(task, adapters or {}, started)
+        return self._run_agents(self._recall_context(task), adapters or {}, started)
 
     def stream(
         self,
@@ -133,6 +135,7 @@ class Dispatcher:
             result = self._run_tool(task, intent, started, speaker)
             yield from result.chunks
             return
+        task = self._recall_context(task)
         plan = self.router.plan(task)
         available = self._collect(plan, adapters or {})
         if not available:
@@ -149,6 +152,40 @@ class Dispatcher:
         if self.resolver is None:
             return Intent(kind="agent")
         return self.resolver.resolve(text)
+
+    def _recall_context(self, task: Task) -> Task:
+        """Augment the task with recalled memory, before agent routing only.
+
+        Facts (mid-layer) and recent turns (short-layer) become plain-text
+        context lines, rendered ahead of the question by ``render_prompt``. A
+        tool intent never reaches this method: a local tool has no prompt to
+        augment, and the fast path should stay fast.
+
+        Memory is an enhancement, never a precondition, and each source is
+        guarded separately -- a locked database or a recaller that lacks one
+        method must not take the turn down, and one failing source must not
+        hide the other's results.
+        """
+        recaller = self.memory_recaller
+        if recaller is None:
+            return task
+        items: list[str] = []
+        try:
+            for record in recaller.facts(task.text):
+                if record.text.strip():
+                    items.append(record.text)
+        except Exception:  # noqa: BLE001 - memory is an enhancement
+            pass
+        try:
+            for record in recaller.recent_turns(session_id=task.session_id):
+                if record.text.strip():
+                    items.append(record.text)
+        except Exception:  # noqa: BLE001 - memory is an enhancement
+            pass
+        if not items:
+            return task
+        # Deduplicate while preserving order: a fact may also be a recent turn.
+        return replace(task, context=task.context + tuple(dict.fromkeys(items)))
 
     def run_intent(
         self, task: Task, intent: Intent, *, speaker: str | None = None

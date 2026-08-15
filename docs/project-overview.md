@@ -206,10 +206,9 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 
 原 Phase 4 计划里的「流式 ASR、TTS 播放队列、超时重连、状态机生产化」并入 P1–P8 各阶段,不单列。
 
-**P6 之后的接线缺口(都有代码但没有接线人)**:
-- `Dispatcher` 无人构造 —— `VoicePlugin` 的 `submit_text` 仍只走记忆,「说一句 → 读文件」的链路还差最后一针
-- Python→桌面事件通道四处断开 —— Python 侧 `_event()` 无 sink、无 transport、`main.rs` 无 emit、前端听 DOM `CustomEvent`
-- 记忆召回只给路由打分,召回文本从未拼进任务提示;`prune_turns()` 无调用者
+**尚余的接线缺口(有代码但没有接线人)**:
+- `Dispatcher` 已由 `VoiceRuntime.say()` 构造并接进语音路径(`submit_text` → `dispatch` → `complete_turn`);记忆召回文本也已由 `Dispatcher._recall_context()` 拼进 `Task.context`,`write_turn()` 自裁剪(`prune_turns`)
+- Python→桌面事件通道 —— Python 侧已由 `core/desktop_bridge.py` + `VoiceRuntime` 打通(管道发送 + 确认应答,sink 与 transport 两点已合上),但 Rust 侧 `main.rs` 无 emit、前端听 DOM `CustomEvent`,尚未把 Python 事件推进 WebView;真机接线是 P8/P10 的 REAL-WIN 项
 - `web.search` 无真实后端(每个托管 API 都是带 key 的云依赖,红线 1)
 
 ## 6. 发布阻塞项(release blockers)

@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `evox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **569 passed, 2 skipped** |
+| `core/` `evox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **576 passed, 2 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -22,8 +22,8 @@
 | `core/audio/speaker.py` `ring.py` `capture.py` | `pytest tests/test_speaker.py tests/test_speaker_privacy.py -q` | **30 passed**（**不需要声纹模型**） |
 | 声纹阈值或判别力 | `pytest tests/integration/test_speaker_model.py -q` | 5 passed（缺模型时 5 skipped） |
 | `core/tools/` | `pytest tests/test_tools.py tests/test_tool_security.py -q` | **123 passed, 1 skipped**（skip 是符号链接越界，本账户无权建链接） |
-| `core/memory/` | `pytest tests/test_memory.py -q` | **62 passed** |
-| 工具/记忆与语音路径接线 | `pytest tests/test_memory.py tests/test_plugin_tools.py -q` | **86 passed** |
+| `core/memory/` | `pytest tests/test_memory.py -q` | **63 passed** |
+| 工具/记忆与语音路径接线 | `pytest tests/test_memory.py tests/test_plugin_tools.py -q` | **87 passed** |
 | `core/agents/` `config/agents.toml` | `pytest tests/test_agent_contract.py tests/test_agent_cli.py tests/test_agent_evox.py tests/test_agent_acp.py tests/test_agent_http.py -q` | 全绿（contract 14 + cli 28 + evox 17 + acp 10 + http 9） |
 | `core/dispatch/` | `pytest tests/test_router.py tests/test_dispatcher.py tests/test_aggregator.py tests/test_intent.py tests/test_breaker.py -q` | **159 passed**（router 30 + dispatcher 37 + aggregator 20 + intent 54 + breaker 18） |
 | `core/session_bridge.py` | `pytest tests/test_session_bridge.py tests/test_plugin_tools.py -q` | 全绿 |
@@ -42,8 +42,7 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 
 **未实现，不要假设存在**：
 - `web.search` 的**真实后端** —— 平台不自带（每个托管搜索 API 都是带 key 的云依赖），未注入时工具报 `no search backend is configured`
-- `shell.run` 的**确认 UI** —— 门会返回 `needs_confirmation`，唤醒球上的确认卡已实现（DOM/SIM 级），但**没有任何东西把 Python 的 `tool.confirm_required` 送到它面前**：`main.rs` 没有 `emit`，前端听的是 DOM `CustomEvent`。四处断点，接线是「Python→桌面事件通道」那项
-- 记忆**召回的注入** —— `DefaultRouter` 用 `memory_recaller.success_rate()` 给 agent 打分（这条已落地），但**把召回到的历史文本拼进任务提示**没有任何实现；`prune_turns()` 也还没有调用者，短期层暂不自动裁剪
+- `shell.run` 的**确认 UI** —— 门会返回 `needs_confirmation`，唤醒球上的确认卡已实现（DOM/SIM 级），Python 侧已由 `desktop_bridge.await_confirmation` 发送并等待应答，但 **Rust 侧 `main.rs` 无 emit、前端听 DOM `CustomEvent`**，事件尚未推进 WebView；真机接线是「Python→桌面事件通道」那项（REAL-WIN）
 - 流式 ASR（识别文本靠外部注入）、TTS 播放队列与真实打断
 - Canvas 2D 生产渲染器（现在是 DOM + CSS，六态与动画都已落地）
 - 超时/重连/错误恢复、系统托盘
@@ -55,6 +54,7 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 **已完成但容易记错的**：
 - **语音接进派发的是 `VoiceRuntime`，不是 `VoicePlugin`** —— `VoicePlugin.submit_text` 本身不走派发（门面只做状态机 + 记忆 + transport，不自造已验说话人）。`evox_plugin/runtime.py` 的 `VoiceRuntime.say()` 构造 `Dispatcher`，`submit_text` 之后 `dispatcher.dispatch()`，再 `complete_turn` 说回答案。「说一句 → 读文件」的链路已接上并有 `tests/test_runtime.py` 覆盖；`VoicePlugin.run_tool()` 仍是 opt-in 的手动入口。`_reach_listening()` 是实例方法、操作 `self.plugin`（此前是 `@staticmethod` 在操作一个丢弃的副本）
 - **P7 `acp` + `http` 适配器已实现** —— `acp.py` 讲 JSON-RPC 2.0 over stdio（initialize → session/new → session/prompt，`session/update` 流式增量）；`http.py` 讲 OpenAI Chat Completions（SSE 流式 + 非流式回退）。http 的 token 只从 `EVOX_AGENT_HTTP_TOKEN` 读，url 遵循桥接同款约束（明文 HTTP 只许回环、带凭据拒绝）。都算 SIM（mock peer / mock server），真实联调是 P9 的 REAL-AGENT
+- **记忆召回已接进派发、短期层自裁剪** —— `Dispatcher._recall_context()` 只在 agent 路径上把 `facts()` + `recent_turns()` 的文本拼进 `Task.context`（工具路径不召回，快路径保持快）；召回失败静默吞掉（记忆是增强不是前提）。`write_turn()` 每次接受写入后 `prune_turns()` 自裁剪（`short_keep=200`）。runtime 把 `session_id` 传进 `open_memory`，故 `recent_turns(session_id=...)` 能按会话匹配
 - 声纹门已接线：3 秒内存环形缓冲 + KWS 命中即校验 + `require_verification` 默认 `True` + `wake.rejected` 产出点
 - 37.8 MB 声纹模型**已下载**（dim 512，SHA-256 记在 `THIRD_PARTY_NOTICES.md`）
 - `feed()` 返回 `(keyword, None)` —— sherpa-onnx 的 `KeywordResult` **根本不含置信度**，`None` 是经核实的陈述不是遗漏；`wake.detected` 的分数来自声纹相似度

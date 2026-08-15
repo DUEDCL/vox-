@@ -189,14 +189,22 @@ class MemoryWriter:
         A recognised utterance is the one piece of memory the user never chose to
         write down, which is why the credential filter sits in front of it
         (FR-12.6) rather than only in front of facts.
+
+        The short layer self-trims after every accepted write: it is a window on
+        the current conversation, not an archive, so a long session must not grow
+        it without bound. Trimming lives here rather than behind a separate
+        caller so the two cannot drift apart.
         """
-        return self._write(
+        stored = self._write(
             scope="short",
             kind="turn",
             text=text,
             session_id=session_id,
             tags=(f"role:{role}", *tags),
         )
+        if stored is not None:
+            self.prune_turns(session_id=session_id)
+        return stored
 
     def write_fact(
         self,

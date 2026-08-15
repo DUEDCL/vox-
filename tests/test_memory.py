@@ -199,6 +199,21 @@ def test_prune_keeps_only_the_newest_turns(memory):
     assert store.count(scope="short") == 2
 
 
+def test_write_turn_self_trims_the_short_layer(tmp_path):
+    """The short layer is a window, not an archive: it must not grow unbounded."""
+    store = SqliteMemoryStore(tmp_path / "m.db")
+    writer = MemoryWriter(store, short_keep=3)
+    try:
+        for index in range(5):
+            writer.write_turn(f"第 {index} 句话")
+
+        assert store.count(scope="short") == 3
+        remaining = [record.text for record in store.list_records(scope="short", kind="turn")]
+        assert remaining == ["第 4 句话", "第 3 句话", "第 2 句话"]
+    finally:
+        store.close()
+
+
 # -- de-duplication ----------------------------------------------------------
 
 

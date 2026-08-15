@@ -117,7 +117,7 @@ class VoiceRuntime:
         if self.with_memory:
             try:
                 _store, self.memory_writer, self.memory_recaller = open_memory(
-                    on_event=self.on_event
+                    on_event=self.on_event, session_id=self.session_id
                 )
             except Exception as exc:  # noqa: BLE001 - memory is an enhancement
                 warnings.append(f"memory is off: {type(exc).__name__}: {exc}")
@@ -140,6 +140,7 @@ class VoiceRuntime:
             aggregator=DefaultAggregator(),
             resolver=RuleBasedIntentResolver(),
             tool_runner=self.tool_runner,
+            memory_recaller=self.memory_recaller,
             on_event=self.on_event,
         )
 
