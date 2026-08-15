@@ -1,1 +1,540 @@
-:root{font-family:Inter,"Segoe UI",sans-serif;color-scheme:dark;--amplitude:.35;--phase:0}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}body{display:grid;place-items:center;user-select:none}main{display:grid;justify-items:center;gap:3px;padding:16px 24px 10px;filter:drop-shadow(0 14px 30px #0009)}#orb{position:relative;width:148px;height:148px;border:0;border-radius:50%;background:radial-gradient(circle at 40% 32%,#fff9 0 3%,transparent 18%),radial-gradient(circle,#714bff88 0 24%,#1379e888 44%,#07101add 69%,transparent 72%);cursor:pointer;isolation:isolate}.core{position:absolute;inset:25%;border-radius:50%;background:conic-gradient(from calc(var(--phase)*30deg),#48dfff,#7b61ff,#ff4ca9,#ffd65c,#48dfff);filter:blur(calc(7px + var(--amplitude)*6px));transform:scale(calc(.82 + var(--amplitude)*.22));box-shadow:0 0 36px #52c8ffbb}.wave{position:absolute;inset:12%;border-radius:45% 55% 48% 52%;border:2px solid #9be9ff88;mix-blend-mode:screen;transform:rotate(calc(var(--phase)*22deg)) scale(calc(.72 + var(--amplitude)*.25))}.w2{inset:20%;border-color:#c97cffaa;transform:rotate(calc(60deg + var(--phase)*-28deg)) scale(calc(.72 + var(--amplitude)*.3))}.w3{inset:28%;border-color:#ff85cbaa;transform:rotate(calc(120deg + var(--phase)*36deg)) scale(calc(.74 + var(--amplitude)*.22))}p{margin:0;color:#fff;font-size:14px;font-weight:650;text-shadow:0 2px 12px #000;letter-spacing:.08em}main[data-state=idle]{opacity:.74}main[data-state=listening] #orb{filter:hue-rotate(0deg)}main[data-state=thinking] #orb{filter:hue-rotate(55deg)}main[data-state=speaking] #orb{filter:hue-rotate(120deg)}
+/* EvoX Voice Wake — 唤醒球
+   视觉源自 kkclaw(MIT) 的流体玻璃配方，六态语义为本项目自有。
+   字体全部走 Windows 内置，零下载、零云依赖。 */
+
+:root{
+  color-scheme: dark;
+  --amplitude: .35;
+  --phase: 0;
+  --orb: 148px;
+  --ui: 'Segoe UI Variable Display', 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  --mono: 'Cascadia Mono', Consolas, 'Courier New', monospace;
+  --amber: #ffb454;
+}
+
+*{ box-sizing:border-box; }
+
+html, body{
+  margin:0; width:100%; height:100%;
+  overflow:hidden;
+  background:transparent;
+}
+body{
+  display:grid; place-items:start stretch;
+  -webkit-user-select:none; user-select:none;
+  font-family:var(--ui);
+}
+
+#app{
+  display:grid;
+  grid-template-rows:auto 1fr;
+  /* 单列且允许收缩：否则列宽被球撑成 148px，面板拿不到 max-width */
+  grid-template-columns:minmax(0,1fr);
+  justify-items:stretch;
+  width:100%; height:100%;
+  padding:14px 16px 16px;
+  gap:8px;
+}
+
+#orbzone{
+  display:grid; justify-items:center; gap:4px;
+  justify-self:center;
+  /* 折叠态把球压在窗口上部，展开态面板长在下面，球不动 */
+}
+
+#status{
+  margin:0;
+  font-size:12px; font-weight:600;
+  letter-spacing:.1em;
+  color:#fff;
+  text-shadow:0 1px 8px #000, 0 0 20px #0009;
+  opacity:.85;
+  transition:opacity .3s ease;
+}
+
+/* ============ 球体 ============ */
+#orb{
+  position:relative;
+  width:var(--orb); height:var(--orb);
+  border:0; padding:0;
+  border-radius:50%;
+  background:transparent;
+  cursor:pointer;
+  isolation:isolate;
+  will-change:transform;
+  -webkit-app-region:no-drag;
+}
+#orb:focus-visible{
+  outline:2px solid #9be9ff;
+  outline-offset:6px;
+}
+
+/* 层 1：流体内芯。overflow:hidden 是整个错觉的容器 */
+.inner-fluid{
+  position:absolute; inset:6px;
+  border-radius:50%;
+  overflow:hidden;
+  z-index:1;
+  background:linear-gradient(135deg,#ffb3b3,#fed6e3);
+  transition:filter .35s ease, background .35s ease;
+}
+.fluid-blob, .fluid-blob-2{ position:absolute; display:block; }
+.fluid-blob{
+  width:130%; height:130%; top:-15%; left:-15%;
+  background:
+    radial-gradient(circle at 30% 30%, rgba(235,87,87,.85), transparent 40%),
+    radial-gradient(circle at 70% 65%, rgba(255,154,108,.8), transparent 40%);
+  animation:fluidSpin 8s linear infinite;
+  transition:background .35s ease;
+}
+.fluid-blob-2{
+  width:110%; height:110%; top:-5%; left:-5%;
+  background:
+    radial-gradient(circle at 60% 30%, rgba(255,200,150,.4), transparent 35%),
+    radial-gradient(circle at 35% 70%, rgba(220,60,60,.3), transparent 35%);
+  animation:fluidSpinR 12s linear infinite;
+  transition:background .35s ease;
+}
+/* scale 相位刻意错开，两层亮斑永不重复相遇 */
+@keyframes fluidSpin{
+  0%{ transform:rotate(0deg) scale(1); }
+  50%{ transform:rotate(180deg) scale(1.08); }
+  100%{ transform:rotate(360deg) scale(1); }
+}
+@keyframes fluidSpinR{
+  0%{ transform:rotate(360deg) scale(1.05); }
+  50%{ transform:rotate(180deg) scale(.95); }
+  100%{ transform:rotate(0deg) scale(1.05); }
+}
+
+/* 层 2：玻璃壳。两条反向 inset 阴影亮度差 4 倍 —— 球感全部来自这里 */
+.glass-shell{
+  position:absolute; inset:0;
+  border-radius:50%;
+  z-index:2;
+  background:radial-gradient(circle at 30% 30%, rgba(255,255,255,.12), rgba(255,255,255,.03));
+  box-shadow:
+    inset -3px -3px 14px rgba(255,255,255,.08),
+    inset  3px  3px 14px rgba(255,255,255,.35),
+    0 0 40px rgba(255,107,74,.25),
+    0 0 80px rgba(255,107,74,.10);
+  border:1px solid rgba(255,255,255,.25);
+  transition:box-shadow 1s cubic-bezier(.4,0,.2,1), border 1s cubic-bezier(.4,0,.2,1);
+}
+/* 两处不对称高光：偏心、旋转反号、亮度差 2.75 倍 */
+.glass-shell::before,
+.glass-shell::after{
+  content:''; position:absolute;
+  border-radius:50%;
+  filter:blur(2px);
+  transition:opacity 1s cubic-bezier(.4,0,.2,1);
+}
+.glass-shell::before{
+  top:12%; left:18%; width:28%; height:14%;
+  background:rgba(255,255,255,.55);
+  transform:rotate(-40deg);
+}
+.glass-shell::after{
+  bottom:22%; right:20%; width:16%; height:10%;
+  background:rgba(255,255,255,.2);
+  transform:rotate(25deg);
+}
+
+/* 层 3：眼睛。宽/高/圆角三个数就是一个表情 */
+.eyes{
+  position:absolute; z-index:3;
+  top:16%; left:10%; width:80%; height:50%;
+  display:flex; align-items:center; justify-content:center;
+  gap:26px;
+  pointer-events:none;   /* 绝不能吃掉球的点击 */
+  overflow:visible;
+}
+.eye{
+  display:block;
+  width:24px; height:42px;
+  background:#fff;
+  border-radius:13px;
+  box-shadow:0 0 10px rgba(255,255,255,.9), 0 0 22px rgba(255,255,255,.4);
+  transform-origin:center center;
+  transition:
+    width .18s cubic-bezier(.25,1,.5,1),
+    height .18s cubic-bezier(.25,1,.5,1),
+    border-radius .18s cubic-bezier(.25,1,.5,1),
+    transform .18s cubic-bezier(.25,1,.5,1),
+    background .3s ease;
+}
+
+/* 腮红 */
+.blush{
+  position:absolute; z-index:3;
+  width:31px; height:18px; border-radius:50%;
+  background:rgba(255,130,130,.25);
+  filter:blur(5px);
+  pointer-events:none;
+  opacity:.8;
+  transition:background .8s cubic-bezier(.33,0,.2,1), opacity .6s ease;
+}
+.blush-l{ top:58%; left:8%; }
+.blush-r{ top:58%; right:8%; }
+
+/* listening 的三道环 */
+.rings{
+  position:absolute; inset:-14px; z-index:0;
+  opacity:0; pointer-events:none;
+  transition:opacity .45s ease;
+}
+.ring{
+  position:absolute; inset:0; border-radius:50%;
+  border:1px solid rgba(150,240,255,.32);
+}
+.ring:nth-child(1){ inset:2%;  animation:ringSpin 9s linear infinite; }
+.ring:nth-child(2){ inset:8%;  animation:ringSpin 13s linear infinite reverse; border-color:rgba(150,240,255,.22); }
+.ring:nth-child(3){ inset:14%; animation:ringSpin 17s linear infinite; border-color:rgba(150,240,255,.14); }
+@keyframes ringSpin{
+  0%{ transform:rotate(0deg) scale(1); }
+  50%{ transform:rotate(180deg) scale(1.03); }
+  100%{ transform:rotate(360deg) scale(1); }
+}
+#app[data-state=listening] .rings{ opacity:1; }
+
+/* 粒子 */
+.particles{ position:absolute; inset:0; pointer-events:none; z-index:10; }
+.particle{
+  position:absolute; top:50%; left:50%;
+  border-radius:50%; background:#fff;
+  animation:particleFly .45s cubic-bezier(.2,.8,.4,1) forwards;
+}
+@keyframes particleFly{
+  0%{ opacity:.9; transform:translate(-50%,-50%) translate(0,0) scale(1); }
+  100%{ opacity:0; transform:translate(-50%,-50%) translate(var(--px),var(--py)) scale(.3); }
+}
+
+/* 点击挤压 —— overshoot 曲线 */
+@keyframes squish{
+  0%{ transform:scale(1,1); }
+  25%{ transform:scale(1.15,.85); }
+  50%{ transform:scale(.9,1.1); }
+  75%{ transform:scale(1.05,.95); }
+  100%{ transform:scale(1,1); }
+}
+#orb.squishing{ animation:squish .35s cubic-bezier(.34,1.56,.64,1); }
+
+#orb:hover .inner-fluid{ filter:brightness(1.05); }
+#orb:hover .eye{ transform:scale(1.08); }
+
+/* ============ 六态 ============ */
+/* 与 core/state.py 的 VoiceState 一一对应，六个值不多不少 */
+
+/* --- idle --- */
+#app[data-state=idle] .inner-fluid{ background:linear-gradient(135deg,#ffb3b3,#fed6e3); }
+#app[data-state=idle] .fluid-blob{ animation-duration:8s; }
+#app[data-state=idle] .fluid-blob-2{ animation-duration:12s; }
+#app[data-state=idle] .eye{ width:24px; height:42px; border-radius:13px; }
+#app[data-state=idle] .blush{ background:rgba(255,120,120,.22); opacity:.5; }
+#app[data-state=idle] #status{ opacity:.6; }
+
+/* --- listening：青蓝，音量驱动 glow --- */
+#app[data-state=listening] .inner-fluid{ background:linear-gradient(135deg,#7fd8e0,#c9f0f5); }
+#app[data-state=listening] .fluid-blob{
+  background:
+    radial-gradient(circle at 30% 30%, rgba(0,151,167,.85), transparent 40%),
+    radial-gradient(circle at 70% 65%, rgba(38,166,154,.8), transparent 40%);
+  animation-duration:6s;
+}
+#app[data-state=listening] .fluid-blob-2{
+  background:
+    radial-gradient(circle at 60% 30%, rgba(178,235,242,.4), transparent 35%),
+    radial-gradient(circle at 35% 70%, rgba(0,105,120,.3), transparent 35%);
+  animation-duration:9s;
+}
+#app[data-state=listening] .glass-shell{
+  box-shadow:
+    inset -3px -3px 14px rgba(255,255,255,.08),
+    inset  3px  3px 14px rgba(255,255,255,.4),
+    0 0 calc(44px + var(--amplitude) * 26px) rgba(0,151,167,.34),
+    0 0 calc(88px + var(--amplitude) * 40px) rgba(38,166,154,.16);
+  border-color:rgba(150,240,255,.42);
+}
+#app[data-state=listening] .eye{ width:28px; height:46px; border-radius:15px; }
+#app[data-state=listening] .blush{ opacity:0; }
+
+/* --- thinking：紫。blob2 反常提速到 6s 制造内部搅动 --- */
+#app[data-state=thinking] .inner-fluid{
+  background:linear-gradient(135deg,#d1c4e9,#ede7f6);
+  animation:thinkHue 2.2s ease-in-out infinite;
+}
+@keyframes thinkHue{
+  0%,100%{ filter:hue-rotate(0deg); }
+  50%{ filter:hue-rotate(24deg); }
+}
+#app[data-state=thinking] .fluid-blob{
+  background:
+    radial-gradient(circle at 30% 30%, rgba(103,58,183,.85), transparent 40%),
+    radial-gradient(circle at 70% 65%, rgba(123,104,238,.8), transparent 40%);
+  animation-duration:12s;
+}
+#app[data-state=thinking] .fluid-blob-2{
+  background:
+    radial-gradient(circle at 60% 30%, rgba(179,157,219,.45), transparent 35%),
+    radial-gradient(circle at 35% 70%, rgba(94,53,177,.35), transparent 35%);
+  animation-duration:6s;
+}
+#app[data-state=thinking] .glass-shell{
+  box-shadow:
+    inset -3px -3px 14px rgba(255,255,255,.08),
+    inset  3px  3px 14px rgba(255,255,255,.32),
+    0 0 40px rgba(123,104,238,.3),
+    0 0 80px rgba(103,58,183,.15);
+  border-color:rgba(196,166,255,.36);
+}
+#app[data-state=thinking] .eye{
+  width:22px; height:37px; border-radius:11px;
+  transform:translateY(-6px);
+}
+#app[data-state=thinking] .blush{ opacity:0; }
+
+/* --- speaking：品红，眼高随音量 --- */
+#app[data-state=speaking] .inner-fluid{ background:linear-gradient(135deg,#f8bbd0,#fce4ec); }
+#app[data-state=speaking] .fluid-blob{
+  background:
+    radial-gradient(circle at 30% 30%, rgba(233,30,99,.85), transparent 40%),
+    radial-gradient(circle at 70% 65%, rgba(255,105,180,.8), transparent 40%);
+  animation-duration:4s;
+}
+#app[data-state=speaking] .fluid-blob-2{
+  background:
+    radial-gradient(circle at 60% 30%, rgba(255,182,193,.4), transparent 35%),
+    radial-gradient(circle at 35% 70%, rgba(219,68,85,.3), transparent 35%);
+  animation-duration:7s;
+}
+#app[data-state=speaking] .glass-shell{
+  box-shadow:
+    inset -3px -3px 14px rgba(255,255,255,.08),
+    inset  3px  3px 14px rgba(255,255,255,.35),
+    0 0 40px rgba(255,105,180,.3),
+    0 0 80px rgba(233,30,99,.15);
+  border-color:rgba(255,190,220,.38);
+}
+#app[data-state=speaking] .eye{
+  width:22px;
+  height:calc(37px + var(--amplitude) * 12px);
+  border-radius:11px;
+}
+#app[data-state=speaking] .blush{ background:rgba(255,120,120,.4); opacity:.8; }
+
+/* --- cancelled：中性灰，仍在慢转(20s)，眼睛钝钝地半闭 --- */
+#app[data-state=cancelled] .inner-fluid{ background:linear-gradient(135deg,#c8c8c8,#dcdcdc); }
+#app[data-state=cancelled] .fluid-blob{
+  background:
+    radial-gradient(circle at 30% 30%, rgba(160,160,160,.85), transparent 40%),
+    radial-gradient(circle at 70% 65%, rgba(180,180,180,.8), transparent 40%);
+  animation-duration:20s;
+}
+#app[data-state=cancelled] .fluid-blob-2{
+  background:
+    radial-gradient(circle at 60% 30%, rgba(200,200,200,.4), transparent 35%),
+    radial-gradient(circle at 35% 70%, rgba(140,140,140,.3), transparent 35%);
+  animation-duration:26s;
+}
+#app[data-state=cancelled] .glass-shell{
+  box-shadow:
+    inset -3px -3px 14px rgba(255,255,255,.06),
+    inset  3px  3px 14px rgba(255,255,255,.2),
+    0 0 20px rgba(160,160,160,.15),
+    0 0 40px rgba(160,160,160,.05);
+  border-color:rgba(255,255,255,.14);
+}
+#app[data-state=cancelled] .glass-shell::before{ opacity:.35; }
+#app[data-state=cancelled] .glass-shell::after{ opacity:.2; }
+#app[data-state=cancelled] .eye{ width:24px; height:22px; border-radius:11px; }
+#app[data-state=cancelled] .blush{ opacity:0; }
+@keyframes cancelCollapse{
+  0%{ transform:scale(1); filter:saturate(1); }
+  45%{ transform:scale(.88); filter:saturate(.18); }
+  100%{ transform:scale(.93); filter:saturate(.18); }
+}
+#orb.collapsing .inner-fluid{ animation:cancelCollapse .34s ease-out forwards; }
+
+/* --- error：饱和红，唯一完全停转的状态，眼睛交叉 --- */
+#app[data-state=error] .inner-fluid{ background:linear-gradient(135deg,#ef5350,#e53935); }
+#app[data-state=error] .fluid-blob{
+  background:
+    radial-gradient(circle at 30% 30%, rgba(211,47,47,.9), transparent 40%),
+    radial-gradient(circle at 70% 65%, rgba(244,67,54,.85), transparent 40%);
+  animation-play-state:paused;
+}
+#app[data-state=error] .fluid-blob-2{
+  background:
+    radial-gradient(circle at 60% 30%, rgba(255,138,128,.45), transparent 35%),
+    radial-gradient(circle at 35% 70%, rgba(183,28,28,.4), transparent 35%);
+  animation-play-state:paused;
+}
+#app[data-state=error] .glass-shell{
+  box-shadow:
+    inset -3px -3px 14px rgba(255,255,255,.08),
+    inset  3px  3px 14px rgba(255,255,255,.3),
+    0 0 50px rgba(244,67,54,.4),
+    0 0 100px rgba(211,47,47,.2);
+  border:2px solid rgba(255,110,92,.72);
+}
+#app[data-state=error] .eye{
+  width:26px; height:7px; border-radius:4px;
+  background:#ffd9d4;
+}
+#app[data-state=error] #eyeL{ transform:rotate(30deg); }
+#app[data-state=error] #eyeR{ transform:rotate(-30deg); }
+#app[data-state=error] .blush{ opacity:0; }
+@keyframes errShake{
+  10%,90%{ transform:translateX(-2.5px); }
+  30%,70%{ transform:translateX(3.5px); }
+  50%{ transform:translateX(-1.5px); }
+}
+#orb.shaking{ animation:errShake .46s cubic-bezier(.36,.07,.19,.97); }
+
+/* ============ 展开面板 ============ */
+#panel{
+  width:100%;
+  max-width:340px;
+  display:none;
+  grid-template-rows:auto auto;
+  gap:10px;
+  align-content:start;
+  opacity:0;
+  transform:translateY(-6px);
+  transition:opacity .28s ease, transform .28s cubic-bezier(.25,1,.5,1);
+  min-height:0;
+}
+#app[data-expanded=true] #panel{ display:grid; }
+#app[data-expanded=true][data-panel-in=true] #panel{ opacity:1; transform:translateY(0); }
+
+#reply{
+  font-size:13px; line-height:1.65;
+  color:#eef2f5;
+  background:rgba(12,14,18,.72);
+  -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);
+  border:1px solid rgba(255,255,255,.10);
+  border-radius:10px;
+  padding:11px 13px;
+  max-height:150px;
+  overflow-y:auto;
+  overflow-wrap:anywhere;
+  white-space:pre-wrap;
+  text-shadow:0 1px 6px #000a;
+  scrollbar-width:thin;
+  scrollbar-color:rgba(255,255,255,.22) transparent;
+}
+#reply:empty{ display:none; }
+#reply::-webkit-scrollbar{ width:6px; }
+#reply::-webkit-scrollbar-thumb{ background:rgba(255,255,255,.22); border-radius:3px; }
+
+.caret{
+  display:inline-block;
+  width:7px; height:1.05em;
+  vertical-align:-2px;
+  margin-left:2px;
+  background:#7fd8e0;
+  animation:caretBlink 1.05s steps(1) infinite;
+}
+@keyframes caretBlink{ 0%,49%{opacity:1} 50%,100%{opacity:0} }
+
+/* ---- 工具确认卡(FR-6.13) ----
+   琥珀色而非红色：「需要你确认」不是「出错了」，必须与 error 态可分辨 */
+#confirm{
+  background:rgba(28,20,8,.86);
+  -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);
+  border:1px solid rgba(255,180,84,.44);
+  border-left:3px solid var(--amber);
+  border-radius:10px;
+  padding:10px 12px 11px;
+  display:grid; gap:7px;
+  box-shadow:0 6px 22px #000a;
+}
+#confirm[hidden]{ display:none; }
+
+.confirm-head{
+  margin:0;
+  display:flex; align-items:center; gap:7px;
+  font-size:12px; font-weight:650;
+  color:#ffd9a8; letter-spacing:.03em;
+}
+.confirm-icon{
+  width:13px; height:13px; flex:none;
+  border-radius:50%;
+  border:1.5px solid var(--amber);
+  position:relative;
+}
+.confirm-icon::after{
+  content:''; position:absolute;
+  left:50%; top:2px; width:1.5px; height:5px;
+  margin-left:-.75px;
+  background:var(--amber); border-radius:1px;
+  box-shadow:0 6.5px 0 0 var(--amber);
+}
+
+/* 命令原文：完整显示，不截断、不省略号、不 line-clamp。
+   长命令靠换行与滚动，全文始终在 DOM 里。 */
+#confirm-cmd{
+  margin:0;
+  font-family:var(--mono);
+  font-size:11.5px; line-height:1.55;
+  color:#ffe8c8;
+  background:rgba(0,0,0,.42);
+  border:1px solid rgba(255,180,84,.2);
+  border-radius:6px;
+  padding:7px 9px;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  word-break:break-word;
+  max-height:120px;
+  overflow-y:auto;
+  scrollbar-width:thin;
+  scrollbar-color:rgba(255,180,84,.35) transparent;
+}
+#confirm-cmd:focus-visible{ outline:2px solid var(--amber); outline-offset:1px; }
+#confirm-cmd::-webkit-scrollbar{ width:6px; }
+#confirm-cmd::-webkit-scrollbar-thumb{ background:rgba(255,180,84,.35); border-radius:3px; }
+
+#confirm-reason{
+  margin:0;
+  font-size:11px; line-height:1.5;
+  color:rgba(255,217,168,.72);
+}
+#confirm-reason:empty{ display:none; }
+
+.confirm-actions{
+  display:flex; gap:7px; justify-content:flex-end;
+}
+.confirm-actions button{
+  font-family:inherit; font-size:11.5px; font-weight:600;
+  padding:5px 14px;
+  border-radius:6px;
+  cursor:pointer;
+  transition:background .16s, border-color .16s, transform .1s;
+}
+.confirm-actions button:active{ transform:scale(.96); }
+.confirm-actions button:focus-visible{
+  outline:2px solid #fff;
+  outline-offset:2px;
+}
+#confirm-deny{
+  background:rgba(255,255,255,.07);
+  border:1px solid rgba(255,255,255,.2);
+  color:#e6e6e6;
+}
+#confirm-deny:hover{ background:rgba(255,255,255,.14); }
+#confirm-allow{
+  background:rgba(255,180,84,.18);
+  border:1px solid rgba(255,180,84,.62);
+  color:#ffd9a8;
+}
+#confirm-allow:hover{ background:rgba(255,180,84,.3); }
+
+/* ============ 降级(FR-6.6)：静态帧仍要能分出六态 ============ */
+@media (prefers-reduced-motion: reduce){
+  .fluid-blob, .fluid-blob-2, .ring, .inner-fluid, .caret{
+    animation-play-state:paused !important;
+  }
+  #orb.squishing, #orb.shaking{ animation:none !important; }
+  #panel{ transition:none; }
+}
+

@@ -27,7 +27,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 
 | 维度 | 状态 |
 |---|---|
-| 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架 + P1 声纹门 + P2 平台契约 + P3 记忆 + P4 工具与安全门 + P5 agent 适配器 + **P6 派发层** + **P7 ACP/HTTP 适配器**已落,`VoiceRuntime` 已把语音接进派发,「Python→桌面事件通道」接线起 |
+| 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架 + P1 声纹门 + P2 平台契约 + P3 记忆 + P4 工具与安全门 + P5 agent 适配器 + **P6 派发层** + **P7 ACP/HTTP 适配器**已落,`VoiceRuntime` 已把语音接进派发,「Python→桌面事件通道」已接线(代码级) |
 | 技术选型 | **已定案**,见 [ADR 001](adr/001-voice-stack-selection.md) ~ [ADR 005](adr/005-task-dispatch-model.md) |
 | Python 测试 | **518 passed, 3 skipped**(2 个 skip 为可选 VoxCord 依赖,1 个为符号链接权限) |
 | 前端构建 | `npm run build`(tsc + vite)通过;`cargo check` 通过 |
@@ -200,7 +200,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | P5 | agent 适配器 `cli.py` + `evox.py` + `registry.py` + `config/agents.toml` | AUTO+SIM | ✅ 完成(真实 CLI 留 P9) |
 | P6 | 派发/路由/汇总 `core/dispatch/` | AUTO+SIM | ✅ 完成(**接进 `VoicePlugin` 未做**,见下) |
 | P7 | `acp.py` + `http.py` / `openclaw.py` | AUTO+SIM | ✅ 完成(真实 ACP/HTTP 联调留 P9) |
-| P8 | 唤醒球弹出 + 工具确认 UI + Python→桌面事件通道 | REAL-WIN | 🔄 DOM/CSS 与 Rust 侧已实现;**事件通道未接**,真机验收留 P10 |
+| P8 | 唤醒球弹出 + 工具确认 UI + Python→桌面事件通道 | REAL-WIN | 🔄 DOM/CSS、Rust 侧与事件通道**均已接线**(cargo test 15 passed);真机验收留 P10 |
 | P9 | 真实 agent 联调(`claude` / `opencode` 各一次) | REAL-AGENT | ⬜ |
 | P10 | 真实语音端到端(含他人拒绝) | REAL-MIC + REAL-AGENT | ⬜ |
 
@@ -208,7 +208,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 
 **尚余的接线缺口(有代码但没有接线人)**:
 - `Dispatcher` 已由 `VoiceRuntime.say()` 构造并接进语音路径(`submit_text` → `dispatch` → `complete_turn`);记忆召回文本也已由 `Dispatcher._recall_context()` 拼进 `Task.context`,`write_turn()` 自裁剪(`prune_turns`)
-- Python→桌面事件通道 —— Python 侧已由 `core/desktop_bridge.py` + `VoiceRuntime` 打通(管道发送 + 确认应答,sink 与 transport 两点已合上),但 Rust 侧 `main.rs` 无 emit、前端听 DOM `CustomEvent`,尚未把 Python 事件推进 WebView;真机接线是 P8/P10 的 REAL-WIN 项
+- Python→桌面事件通道 —— 三层已接上:Python `desktop_bridge`(管道) → Rust `spawn_event_reader`(stdin→`evox-bridge`) → 前端 `applyEnvelope`/`askConfirm`;确认应答走 `evox_confirm_reply` 回 stdout。**编译+单测已过(npm build、cargo test 15 passed),真机窗口上的点击/焦点/Esc 仍待 P10 REAL-WIN**
 - `web.search` 无真实后端(每个托管 API 都是带 key 的云依赖,红线 1)
 
 ## 6. 发布阻塞项(release blockers)

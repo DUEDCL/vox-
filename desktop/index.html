@@ -1,1 +1,50 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EvoX Voice Wake</title></head><body><main id="app" data-state="idle"><button id="orb" aria-label="EvoX 语音状态"><span class="core"></span><span class="wave w1"></span><span class="wave w2"></span><span class="wave w3"></span></button><p id="status" role="status">待机</p></main><script type="module" src="/src/main.ts"></script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EvoX Voice Wake</title>
+</head>
+<body>
+<main id="app" data-state="idle" data-expanded="false">
+
+  <div id="orbzone">
+    <button id="orb" aria-label="EvoX 语音状态" aria-live="off">
+      <span class="rings" aria-hidden="true"><i class="ring"></i><i class="ring"></i><i class="ring"></i></span>
+      <span class="inner-fluid" aria-hidden="true">
+        <i class="fluid-blob"></i>
+        <i class="fluid-blob-2"></i>
+      </span>
+      <span class="glass-shell" aria-hidden="true"></span>
+      <span class="eyes" aria-hidden="true">
+        <i class="eye" id="eyeL"></i>
+        <i class="eye" id="eyeR"></i>
+      </span>
+      <span class="blush blush-l" aria-hidden="true"></span>
+      <span class="blush blush-r" aria-hidden="true"></span>
+      <span class="particles" id="particles" aria-hidden="true"></span>
+    </button>
+    <p id="status" role="status">待机</p>
+  </div>
+
+  <section id="panel" aria-hidden="true">
+    <div id="reply" role="log" aria-live="polite"></div>
+
+    <div id="confirm" hidden>
+      <p class="confirm-head">
+        <span class="confirm-icon" aria-hidden="true"></span>
+        <span id="confirm-title">需要确认才能执行</span>
+      </p>
+      <pre id="confirm-cmd" tabindex="0" aria-label="待执行的命令原文"></pre>
+      <p id="confirm-reason"></p>
+      <div class="confirm-actions">
+        <button id="confirm-deny" type="button">拒绝</button>
+        <button id="confirm-allow" type="button">执行</button>
+      </div>
+    </div>
+  </section>
+
+</main>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

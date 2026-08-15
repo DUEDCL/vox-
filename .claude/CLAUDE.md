@@ -28,7 +28,7 @@
 | `core/dispatch/` | `pytest tests/test_router.py tests/test_dispatcher.py tests/test_aggregator.py tests/test_intent.py tests/test_breaker.py -q` | **159 passed**（router 30 + dispatcher 37 + aggregator 20 + intent 54 + breaker 18） |
 | `core/session_bridge.py` | `pytest tests/test_session_bridge.py tests/test_plugin_tools.py -q` | 全绿 |
 | `desktop/src/` | `cd desktop && npm run build` | tsc + vite 通过 |
-| `desktop/src-tauri/` | `cd desktop/src-tauri && cargo check && cargo test` | 零警告 + **8 passed** + **须实机验收** |
+| `desktop/src-tauri/` | `cd desktop/src-tauri && cargo check && cargo test` | 零警告 + **15 passed** + **须实机验收** |
 
 必须用隔离环境的 `.venv\Scripts\python.exe`，不用系统 Python（系统环境没装 sherpa-onnx / soundfile）。
 
@@ -36,13 +36,12 @@ skip 数会随环境变化（VoxCord、模型是否存在），**passed 数下�
 
 ## 当前阶段
 
-Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事件契约、P3 记忆系统、P4 本地工具与安全门、P5 agent 适配器、P6 派发/路由/汇总、P7 ACP/HTTP 适配器已落地（P8 唤醒球 UI 也已到 AUTO+SIM 级），下一步「Python→桌面事件通道」接线与 P9/P10 真机验收。十阶段划分与 11 项发布阻塞项见 `docs/project-overview.md` 第 5、6 节。
+Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事件契约、P3 记忆系统、P4 本地工具与安全门、P5 agent 适配器、P6 派发/路由/汇总、P7 ACP/HTTP 适配器已落地（P8 唤醒球 UI 也已到 AUTO+SIM 级），「Python→桌面事件通道」已接线到代码级（cargo test 15 passed、npm build 通过），下一步 P9/P10 真机验收。十阶段划分与 11 项发布阻塞项见 `docs/project-overview.md` 第 5、6 节。
 
 决策记录：ADR 001 语音栈 · ADR 002 声纹准入 · ADR 003 agent 接入 · ADR 004 记忆 · ADR 005 派发与工具门。
 
 **未实现，不要假设存在**：
 - `web.search` 的**真实后端** —— 平台不自带（每个托管搜索 API 都是带 key 的云依赖），未注入时工具报 `no search backend is configured`
-- `shell.run` 的**确认 UI** —— 门会返回 `needs_confirmation`，唤醒球上的确认卡已实现（DOM/SIM 级），Python 侧已由 `desktop_bridge.await_confirmation` 发送并等待应答，但 **Rust 侧 `main.rs` 无 emit、前端听 DOM `CustomEvent`**，事件尚未推进 WebView；真机接线是「Python→桌面事件通道」那项（REAL-WIN）
 - 流式 ASR（识别文本靠外部注入）、TTS 播放队列与真实打断
 - Canvas 2D 生产渲染器（现在是 DOM + CSS，六态与动画都已落地）
 - 超时/重连/错误恢复、系统托盘
@@ -82,7 +81,8 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - **唤醒球的命中区由前端量、Rust 判**。`set_ignore_cursor_events` 是**整窗开关**，没有 Electron 的 `forward` 选项，所以选择性穿透只能靠 Rust 侧 30ms 轮询光标。圆心与半径**不许写进 Rust**：它们是 CSS 布局的结果，硬编码会在下次改样式时静默漂掉
 - **`measureHitRegion()` 用 `offsetLeft`/`offsetWidth`，不用 `getBoundingClientRect()`** —— 球每帧被 rAF 写 `transform`，用渲染盒会让命中区每帧抖动、IPC 每帧都发
 - **命中判定的失败路径一律倒向「窗口吃鼠标」** —— 读不到光标/窗口位置/缩放、或前端还没上报，都当命中。反方向会让确认卡变成一张点不动的图，而点不动的确认等价于没有确认
-- **没有 `capabilities/` 文件，这是故意的** —— Tauri 2 只对 `plugin:` 前缀命令或应用自带 ACL manifest 时才查权限（`tauri-2.10.3` `webview/mod.rs:1802`）。不放反而最紧：所有 `core:*` 插件命令对前端不可达，IPC 面就是三个 `evox_*`。代价是前端**永不能 import `@tauri-apps/api`**，只用 `__TAURI_INTERNALS__.invoke`
+- **没有 `capabilities/` 文件，这是故意的** —— Tauri 2 只对 `plugin:` 前缀命令或应用自带 ACL manifest 时才查权限（`tauri-2.10.3` `webview/mod.rs:1802`）。不放反而最紧：所有 `core:*` 插件命令对前端不可达，IPC 面就是四个 `evox_*`（report_layout / start_drag / set_visible / confirm_reply）。代价是前端**永不能 import `@tauri-apps/api`**，只用 `__TAURI_INTERNALS__.invoke`
+- **Python→桌面事件通道已接线（代码级）** —— `core/desktop_bridge.py` 走父进程管道发 `{"kind":"event"|"visible"}`、收 `{"kind":"ready"|"confirm"}`；Rust 侧 `spawn_event_reader` 读 stdin 把整行原样投成 `evox-bridge` CustomEvent（`js_string_literal` 转义防注入，有测试），`evox_confirm_reply` 把确认写回 stdout；前端 `applyEnvelope` 分派 `state.changed`/`turn.*`/`llm.delta`/`task.failed`/`tool.*`，`askConfirm`→`evox_confirm_reply`。cargo test **15 passed**、npm build 通过；**真机窗口上的点击/焦点/Esc 仍未验（P10 REAL-WIN）**
 - **`.shadow(false)` 不是可选项** —— 无边框 + 透明还留投影的话，桌面上会有一块跟着球走的方形灰影
 - **拖动是自己的 `evox_start_drag` + 4px 阈值**，不是 `data-tauri-drag-region`（那条路要 `core:window:allow-start-dragging`，等于为拖窗口暴露整个 core:window）。拖完 OS 补的 `click` 只在 `detail > 0` 时吞 —— 键盘激活的 `click` 的 `detail` 是 0，连它一起吞会让球没法用键盘按
 - **`evox_set_visible(false)` 会先把挂起的确认按拒绝落定再隐藏** —— 隐藏一张挂起的确认卡等于让调用方永久挂起，而「挂起」在安全语义上等价于「未拒绝」

@@ -4,6 +4,6 @@
   "version": "0.1.0",
   "identifier": "ai.evomap.evox.voicewake",
   "build": {"beforeDevCommand":"npm run dev","beforeBuildCommand":"npm run build","devUrl":"http://localhost:5173","frontendDist":"../dist"},
-  "app": {"windows":[],"security":{"csp":"default-src 'self'; style-src 'self' 'unsafe-inline'"}},
+  "app": {"windows":[],"security":{"csp":"default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"}},
   "bundle": {"active":true,"targets":["nsis","msi"]}
 }
