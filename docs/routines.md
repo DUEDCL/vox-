@@ -280,6 +280,20 @@ release tag 里 `recongition` 的拼写是**官方笔误**，照抄即可，改�
 (Get-FileHash models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx -Algorithm SHA256).Hash
 ```
 
+流式 ASR 模型（约 74 MB 归档，解压约 110 MB，16 kHz streaming zipformer-zh-14M）：
+
+```powershell
+curl.exe -C - -L -o models/asr.tar.bz2 `
+  https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23.tar.bz2
+tar -xjf models/asr.tar.bz2 -C models
+```
+
+下载后用 provider 自检，看返回值而不是「没报错」：
+
+```powershell
+.\\.venv\Scripts\python.exe -c "from core.audio import SherpaStreamingAsrProvider; print(SherpaStreamingAsrProvider('models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23').load())"
+```
+
 ## 声纹录入
 
 适用时机：首次录入本人声纹、追加样本提高通过率，或换麦克风后重录。**必须本人在场**。

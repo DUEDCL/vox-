@@ -9,6 +9,7 @@ or uploaded) enforceable at a single boundary.
 
 from __future__ import annotations
 
+from .asr import AsrResult, SherpaStreamingAsrProvider
 from .base import ProviderStatus, ProviderUnavailable
 from .capture import SounddeviceWakeCapture
 from .kws import SherpaKeywordProvider
@@ -26,11 +27,13 @@ from .vad import SherpaVadProvider
 from .voxcord import VoxCordAdapter
 
 __all__ = [
+    "AsrResult",
     "AudioRingBuffer",
     "EnrollmentResult",
     "ProviderStatus",
     "ProviderUnavailable",
     "SherpaKeywordProvider",
+    "SherpaStreamingAsrProvider",
     "SherpaTtsProvider",
     "SherpaVadProvider",
     "SounddevicePlayback",

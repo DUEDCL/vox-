@@ -51,6 +51,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 语音运行时 | **sherpa-onnx 1.13.4**(单一依赖边界,覆盖 KWS/VAD/ASR/TTS) | openWakeWord(唤醒)、faster-whisper / SenseVoiceSmall(ASR)、Kokoro-82M(TTS) |
 | 唤醒(KWS) | sherpa-onnx-kws-zipformer-wenetspeech-3.3M | — |
 | 端点检测(VAD) | Silero VAD(经 sherpa-onnx 执行) | — |
+| 语音识别(ASR) | sherpa-onnx-streaming-zipformer-zh-14M(流式 transducer,带端点检测) | faster-whisper / SenseVoiceSmall |
 | 语音合成(TTS) | vits-melo-tts-zh_en(MeloTTS) | Kokoro-82M |
 | EvoX 桥接 | `LocalEvoXTransport`(带认证的 localhost HTTP) | 任何实现 `ConversationTransport` 协议的传输层 |
 | 声纹准入 | **3D-Speaker ERes2Net**(经 sherpa-onnx 执行,零新依赖) | 同系列 200k 通用模型 |

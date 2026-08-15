@@ -11,9 +11,11 @@ different abstraction levels. Existing imports keep working:
 from __future__ import annotations
 
 from core.audio import (
+    AsrResult,
     ProviderStatus,
     ProviderUnavailable,
     SherpaKeywordProvider,
+    SherpaStreamingAsrProvider,
     SherpaTtsProvider,
     SherpaVadProvider,
     SounddevicePlayback,
@@ -23,9 +25,11 @@ from core.audio import (
 )
 
 __all__ = [
+    "AsrResult",
     "ProviderStatus",
     "ProviderUnavailable",
     "SherpaKeywordProvider",
+    "SherpaStreamingAsrProvider",
     "SherpaTtsProvider",
     "SherpaVadProvider",
     "SounddevicePlayback",
