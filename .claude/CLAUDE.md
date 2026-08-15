@@ -45,7 +45,7 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - `web.search` 的**真实后端** —— 平台不自带（每个托管搜索 API 都是带 key 的云依赖），未注入时工具报 `no search backend is configured`
 - 流式 ASR（识别文本靠外部注入）、TTS 播放队列与真实打断（TTS 合成已由 `core/audio/tts.py` 落地——`tts.chunk` 的文本→44.1kHz 音频已通，真实模型实测；播放与打断仍未接）
 - Canvas 2D 生产渲染器（现在是 DOM + CSS，六态与动画都已落地）
-- 超时/重连/错误恢复、系统托盘
+- 超时/重连/错误恢复（系统托盘已由 `build_tray` 实现：显示/隐藏/退出，Rust 侧建、不扩 IPC 面；真机点开未验）
 - 声纹**反欺骗**：门不防录音回放，这是已知缺口（ADR 002 局限），不是待办
 - 声纹**真机验收**：本人通过率、他人拒绝、回放实测都需你在场（P10）
 - 记忆**跨进程持久性**：Markdown 往返在同进程内已验，重启后仍未验（P10）
@@ -84,6 +84,7 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - **命中判定的失败路径一律倒向「窗口吃鼠标」** —— 读不到光标/窗口位置/缩放、或前端还没上报，都当命中。反方向会让确认卡变成一张点不动的图，而点不动的确认等价于没有确认
 - **没有 `capabilities/` 文件，这是故意的** —— Tauri 2 只对 `plugin:` 前缀命令或应用自带 ACL manifest 时才查权限（`tauri-2.10.3` `webview/mod.rs:1802`）。不放反而最紧：所有 `core:*` 插件命令对前端不可达，IPC 面就是四个 `evox_*`（report_layout / start_drag / set_visible / confirm_reply）。代价是前端**永不能 import `@tauri-apps/api`**，只用 `__TAURI_INTERNALS__.invoke`
 - **Python→桌面事件通道已接线（代码级）** —— `core/desktop_bridge.py` 走父进程管道发 `{"kind":"event"|"visible"}`、收 `{"kind":"ready"|"confirm"}`；Rust 侧 `spawn_event_reader` 读 stdin 把整行原样投成 `evox-bridge` CustomEvent（`js_string_literal` 转义防注入，有测试），`evox_confirm_reply` 把确认写回 stdout；前端 `applyEnvelope` 分派 `state.changed`/`turn.*`/`llm.delta`/`task.failed`/`tool.*`，`askConfirm`→`evox_confirm_reply`。cargo test **15 passed**、npm build 通过；**真机窗口上的点击/焦点/Esc 仍未验（P10 REAL-WIN）**
+- **系统托盘已实现（`build_tray`）** —— 球是无边框 + skip_taskbar + 置顶，桌面上没有别的入口能关它，托盘是用户唯一的「显示/隐藏/退出」路径。托盘是 Rust 侧直接建的（`Menu` + `TrayIconBuilder` + `on_menu_event`），和四个 `evox_*` 命令无关，**不扩大 IPC 面**。隐藏时若挂着确认卡，Python 侧 `await_confirmation` 60s 超时落定为拒绝（fail-closed）。真机点开托盘菜单未验（REAL-WIN）
 - **`.shadow(false)` 不是可选项** —— 无边框 + 透明还留投影的话，桌面上会有一块跟着球走的方形灰影
 - **拖动是自己的 `evox_start_drag` + 4px 阈值**，不是 `data-tauri-drag-region`（那条路要 `core:window:allow-start-dragging`，等于为拖窗口暴露整个 core:window）。拖完 OS 补的 `click` 只在 `detail > 0` 时吞 —— 键盘激活的 `click` 的 `detail` 是 0，连它一起吞会让球没法用键盘按
 - **`evox_set_visible(false)` 会先把挂起的确认按拒绝落定再隐藏** —— 隐藏一张挂起的确认卡等于让调用方永久挂起，而「挂起」在安全语义上等价于「未拒绝」

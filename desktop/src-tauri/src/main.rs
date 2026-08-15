@@ -28,6 +28,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Deserialize;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
 use tauri::{
     LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
@@ -305,6 +307,38 @@ fn spawn_hit_test(app: tauri::AppHandle) {
     });
 }
 
+/* ============ 系统托盘 ============ */
+
+/// 球是无边框 + skip_taskbar + 置顶，桌面上没有别的入口能关它。托盘是用户唯一的
+/// 「显示/隐藏/退出」路径：没有它，退出这个进程只能去任务管理器。
+///
+/// 托盘菜单是 Rust 侧直接建的，和四个 `evox_*` 命令无关，因此**不扩大 IPC 面**：
+/// 前端仍然够不到托盘。
+fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let toggle = MenuItem::with_id(app, "toggle", "显示 / 隐藏", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&toggle, &quit])?;
+    TrayIconBuilder::with_id("wake-tray")
+        .icon(app.default_window_icon().cloned().expect("app icon must be bundled"))
+        .tooltip("EvoX Voice Wake")
+        .menu(&menu)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "toggle" => {
+                if let Some(window) = app.get_webview_window(WAKE_LABEL) {
+                    if window.is_visible().unwrap_or(false) {
+                        let _ = window.hide();
+                    } else {
+                        let _ = window.show();
+                    }
+                }
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .build(app)?;
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(Layout::default())
@@ -333,6 +367,7 @@ fn main() {
             place_initially(&wake);
             spawn_hit_test(app.handle().clone());
             spawn_event_reader(app.handle().clone());
+            build_tray(app.handle())?;
             // 父进程凭这一行知道管道通了，而不是靠猜一个启动延时
             write_line("{\"kind\":\"ready\"}");
             Ok(())
