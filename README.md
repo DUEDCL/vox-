@@ -104,6 +104,7 @@ tmp_proto/       原型验证脚本与 UI 技术验证页
 
 ## 文档入口
 
+- **[交接文档（接手先读这份）](docs/handoff.md)**
 - [项目总览与当前进度](docs/project-overview.md)
 - [技术架构与组件边界](docs/architecture.md)
 - [需求文档](docs/requirements.md)
@@ -115,6 +116,6 @@ tmp_proto/       原型验证脚本与 UI 技术验证页
 
 ## 重要说明
 
-- 当前工作区不是 Git 仓库；进入生产实现前建议初始化版本控制。
+- 已是 Git 仓库（基线 `9f7d923`，平台化进展见 `git log`）。
 - `models/` 中包含较大的模型目录和下载归档，发布前需要确定模型分发及归档清理策略。
 - 本项目是 EvoX 生态中的原型项目，真实 EvoX 会话端点尚未完成联调。

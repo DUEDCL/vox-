@@ -234,6 +234,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 
 | 文档 | 用途 |
 |---|---|
+| [handoff.md](handoff.md) | **交接文档**:接手者第一份材料、真机验收顺序、已知缺口 |
 | **本文件** | 项目总览、进度、阻塞项(入口) |
 | [architecture.md](architecture.md) | 技术架构、组件边界、事件契约、数据流 |
 | [requirements.md](requirements.md) | 功能/非功能需求、验收标准、阶段范围 |
