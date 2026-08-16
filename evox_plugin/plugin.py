@@ -222,18 +222,26 @@ class VoicePlugin:
         self.tts = tts
         return {"tts_attached": tts is not None}
 
-    def attach_capture(self, capture: Any = None) -> dict:
-        """Wire a microphone capture in and point its wake callbacks here.
+    def attach_capture(self, capture: Any = None, *, on_recognized: Any = None) -> dict:
+        """Wire a microphone capture in and point its callbacks here.
 
         The capture's ``on_wake`` / ``on_reject`` are (re)pointed at this plugin,
         so a wake hit during playback reaches ``wake_detected`` and barges in. The
         caller still chooses the capture (KWS provider, verifier, device); the
         plugin only owns the state machine the hits drive.
+
+        ``on_recognized`` is where transcribed speech lands. It defaults to
+        ``submit_text``, which walks the state machine and the memory write but
+        does **not** dispatch -- a caller that wants the whole turn (dispatch,
+        answer, TTS) passes its own, which is what ``VoiceRuntime`` does with
+        ``say``. Defaulting to the dispatching path instead would make the
+        plugin depend on a dispatcher it deliberately does not own.
         """
         self.audio_capture = capture
         if capture is not None:
             capture.on_wake = self.wake_detected
             capture.on_reject = self.wake_rejected
+            capture.on_recognized = on_recognized or self.submit_text
         return {"capture_attached": capture is not None}
 
     def run_tool(

@@ -44,6 +44,8 @@ class SounddeviceWakeCapture:
         require_verification: bool = True,
         buffer_seconds: float = 3.0,
         verify_seconds: float = 1.5,
+        asr_provider: Any = None,
+        on_recognized: Any = None,
     ) -> None:
         self.keyword_provider = keyword_provider
         self.on_wake = on_wake
@@ -55,6 +57,13 @@ class SounddeviceWakeCapture:
         self.on_reject = on_reject
         self.require_verification = require_verification
         self.verify_seconds = verify_seconds
+        #: Optional streaming ASR for the listening phase after a wake. With
+        #: neither ``asr_provider`` nor ``on_recognized`` the capture stays in
+        #: wake-only mode, exactly as before.
+        self.asr_provider = asr_provider
+        self.on_recognized = on_recognized
+        self._listening = False
+        self._asr_stream: Any = None
         self._ring = AudioRingBuffer(sample_rate=sample_rate, seconds=buffer_seconds)
         self._stream: Any = None
         self._inference_stream: Any = None
@@ -96,6 +105,7 @@ class SounddeviceWakeCapture:
         if not self.gate_active:
             # Escape hatch only: diagnose() reports this as a warning.
             self.on_wake(keyword, None)
+            self._start_listening()
             return
         window = self._ring.snapshot(self.verify_seconds)
         try:
@@ -110,8 +120,33 @@ class SounddeviceWakeCapture:
             self._ring.clear()
         if result.accepted:
             self.on_wake(keyword, result.score)
+            self._start_listening()
         elif self.on_reject is not None:
             self.on_reject(keyword, result.reason, result.score)
+
+    def _start_listening(self) -> None:
+        """Enter ASR mode after an accepted wake, so the follow-up speech is
+        transcribed rather than fed to KWS."""
+        if self.asr_provider is None or self.on_recognized is None:
+            return
+        self._asr_stream = self.asr_provider.create_stream()
+        self._listening = True
+
+    def _recognize(self, samples: Any) -> None:
+        """Feed the recognizer; on an endpoint, deliver the final text and
+        return to KWS mode."""
+        if self._asr_stream is None:
+            self._listening = False
+            return
+        result = self.asr_provider.feed(self._asr_stream, samples, self.sample_rate)
+        if not result.is_endpoint:
+            return
+        text = self.asr_provider.finalize(self._asr_stream)
+        self._listening = False
+        self.asr_provider.reset(self._asr_stream)
+        self._asr_stream = None
+        if text.strip():
+            self.on_recognized(text.strip())
 
     # -- capture -------------------------------------------------------------
 
@@ -121,6 +156,9 @@ class SounddeviceWakeCapture:
             # Capture status is intentionally left to the caller's logger.
             return
         samples = indata[:, 0]
+        if self._listening:
+            self._recognize(samples)
+            return
         self._ring.write(samples)
         if self.speech_gate is not None and not self.speech_gate(samples):
             return
@@ -142,6 +180,10 @@ class SounddeviceWakeCapture:
         if not status.available:
             raise ProviderUnavailable(status.details["reason"])
         self._inference_stream = self.keyword_provider.create_stream()
+        if self.asr_provider is not None:
+            asr_status = self.asr_provider.load()
+            if not asr_status.available:
+                raise ProviderUnavailable(asr_status.details["reason"])
         self._ring.clear()
         self._stream = sounddevice.InputStream(
             samplerate=self.sample_rate,
@@ -159,5 +201,9 @@ class SounddeviceWakeCapture:
             self._stream.close()
         self._stream = None
         self._inference_stream = None
+        self._listening = False
+        self._asr_stream = None
         self._ring.clear()
         self.keyword_provider.close()
+        if self.asr_provider is not None:
+            self.asr_provider.close()

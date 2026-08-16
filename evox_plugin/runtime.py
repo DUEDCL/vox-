@@ -27,6 +27,7 @@ explicitly, so a caller that wants neither builds a plugin instead of this.
 
 from __future__ import annotations
 
+import queue
 import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
@@ -81,6 +82,11 @@ class VoiceRuntime:
     memory_writer: Any = None
     memory_recaller: Any = None
     adapters: dict[str, Any] = field(default_factory=dict)
+    #: Recognised utterances waiting for a turn. The microphone callback only
+    #: ever *enqueues*: running a turn there would block the audio device for
+    #: the whole dispatch plus TTS playback, and a blocked audio callback drops
+    #: frames -- which shows up as a recognizer that mishears, not as a hang.
+    utterances: "queue.Queue[str]" = field(default_factory=queue.Queue)
     report: RuntimeReport = field(default_factory=RuntimeReport)
     #: Envelopes seen by the sink, newest last. Bounded so a long session does
     #: not grow without limit; the orb and the memory layer are the durable ones.
@@ -239,6 +245,30 @@ class VoiceRuntime:
             result = self._confirm_and_retry(task, result)
         self.plugin.complete_turn(self._spoken(result))
         return result
+
+    def attach_microphone(self, capture: Any) -> dict[str, Any]:
+        """Point a capture at this runtime so spoken requests drive real turns.
+
+        The capture callback runs on the audio device thread, so it only puts the
+        recognised text on ``utterances``. ``pump()`` is what actually runs the
+        turn, on the caller thread. Doing the turn inline would hold the audio
+        callback for the whole dispatch plus TTS playback -- and a held callback
+        drops frames, which is indistinguishable from a bad recognizer.
+        """
+        report = self.plugin.attach_capture(capture, on_recognized=self.utterances.put)
+        return report
+
+    def pump(self, *, timeout: float | None = None) -> DispatchResult | None:
+        """Run one queued utterance as a full turn. ``None`` when none arrived.
+
+        Blocking belongs here rather than in the callback, so a long answer
+        delays only the next turn and never the microphone.
+        """
+        try:
+            text = self.utterances.get(timeout=timeout) if timeout else self.utterances.get_nowait()
+        except queue.Empty:
+            return None
+        return self.say(text)
 
     def _confirm_and_retry(self, task: Task, result: DispatchResult) -> DispatchResult:
         """Show the command on the orb, and re-submit only on a real approval.

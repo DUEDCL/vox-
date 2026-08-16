@@ -70,6 +70,57 @@ def test_say_routes_a_turn_and_returns_to_listening():
     assert runtime.turns == 1
 
 
+def test_attach_microphone_only_enqueues_on_the_audio_thread():
+    """The callback must not run a turn: it would block the audio device."""
+
+    class StubCapture:
+        def __init__(self) -> None:
+            self.on_wake = None
+            self.on_reject = None
+            self.on_recognized = None
+
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+    runtime._started = True
+    dispatcher = FakeDispatcher([AgentChunk(kind="text", text="ok"), AgentChunk(kind="done")])
+    runtime.dispatcher = dispatcher
+    runtime.adapters = {}
+    capture = StubCapture()
+
+    runtime.attach_microphone(capture)
+    capture.on_recognized("读一下 README")
+
+    # Enqueued, not dispatched: no turn ran on the callback thread.
+    assert dispatcher.calls == []
+    assert runtime.utterances.qsize() == 1
+    # The wake callbacks are pointed at the plugin too, so barge-in still works.
+    assert capture.on_wake == runtime.plugin.wake_detected
+
+
+def test_pump_runs_one_queued_utterance_as_a_turn():
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+    runtime._started = True
+    dispatcher = FakeDispatcher([AgentChunk(kind="text", text="答案"), AgentChunk(kind="done")])
+    runtime.dispatcher = dispatcher
+    runtime.adapters = {}
+    runtime.utterances.put("现在几点")
+
+    result = runtime.pump()
+
+    assert result is not None
+    assert result.text == "答案"
+    assert dispatcher.calls[0][0] == "现在几点"
+    assert runtime.plugin.machine.state == VoiceState.LISTENING
+
+
+def test_pump_with_an_empty_queue_returns_none():
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+    runtime._started = True
+    runtime.dispatcher = FakeDispatcher([])
+    runtime.adapters = {}
+
+    assert runtime.pump() is None
+
+
 def test_say_with_no_dispatcher_is_not_a_silent_noop():
     runtime = VoiceRuntime(with_desktop=False, with_memory=False)
     runtime._started = True
