@@ -1,8 +1,8 @@
 # 交接文档 —— Vox
 
-> 交接时间：本会话结束时  ·  基线提交：`0cacde4`
-> 验证基线：Python **600 passed, 3 skipped**（603 collected）· Rust **15 passed** · `npm run build` 通过
-> 基线在**干净 shell**（`env | grep PYTHON` 为空）下复现过两次；数字取决于环境变量的话就不是基线。
+> 交接时间：2026-08-23  ·  最近代码提交：`f223008`（DesktopBridge 生命周期加固）
+> 验证基线：Python **625 passed, 3 skipped**（628 collected）· DesktopBridge 专项 **33 passed** · Rust **15 passed** · `npm run build` 通过
+> 基线在**干净 shell**（未设置 `PYTHONUTF8` / `PYTHONIOENCODING`）下复现；数字取决于环境变量的话就不是基线。
 > 本文件是**接手者的第一份材料**。项目全貌看 [`docs/project-overview.md`](project-overview.md)，
 > 干活的规矩看 [`.claude/CLAUDE.md`](../.claude/CLAUDE.md)（那份是硬约束，本文件只做导航）。
 
@@ -35,7 +35,7 @@ Windows 上的**开放式语音唤醒对话平台**。目标链路：
 | 派发 / 路由 / 汇总 | `core/dispatch/` | AUTO+SIM 159 用例 | 真实 agent 跑一轮（见下） |
 | TTS 合成 + 播放 | `core/audio/tts.py` `playback.py` | 真实模型合成 44.1kHz / 236ms | 扬声器出声 |
 | 打断（barge-in） | `plugin.wake_detected` + `cancel` | AUTO（fake TTS） | 真机说话打断 |
-| 唤醒球 / 托盘 / 事件通道 | `desktop/` + `core/desktop_bridge.py` | cargo test 15 + npm build | 透明窗口 / DPI / 点击 |
+| 唤醒球 / 托盘 / 事件通道 | `desktop/` + `core/desktop_bridge.py` | DesktopBridge 专项 33 + cargo test 15 + npm build | 透明窗口 / DPI / 点击 |
 
 **REAL-AGENT 为什么还欠着（2026-08-16 实测）**：`claude` CLI 在 PATH（2.1.223），但**从子进程调起时返回 `Not logged in · Please run /login`（exit 1）** —— 嵌套调用拿不到当前会话的凭据。所以这条不是「还没试」，是**试过且被登录状态挡住**。要拿到 REAL-AGENT 证据，得先让 `claude` 在一个独立的、已登录的非嵌套环境里可用（或改用 `codex` / `opencode` / `evox` 任一已登录的后端）。
 
@@ -70,9 +70,9 @@ scripts/        run_desktop.py 命令行 · acceptance/ 真机验收脚本 · en
 按这个顺序跑，每一步都**看返回值而不是「没报错」**：
 
 ```powershell
-# 0) 环境自检（应当 600 passed, 3 skipped）
-#    先确认 env 里没有 PYTHONUTF8 / PYTHONIOENCODING —— 基线只在干净 shell 里成立
-.\.venv\Scripts\python.exe -m pytest tests -q
+# 0) 环境自检（应当 625 passed, 3 skipped；DesktopBridge 专项应当 33 passed）
+#    先确认环境里没有 PYTHONUTF8 / PYTHONIOENCODING —— 基线只在干净 shell 里成立
+.\.venv\Scripts\python.exe -m pytest tests -q --basetemp .pytest-run
 
 # 1) 录入你的声纹（必须本人，读 3~5 句）
 .\.venv\Scripts\python.exe scripts/enroll_speaker.py --name <你的名字>

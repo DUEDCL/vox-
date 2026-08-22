@@ -18,14 +18,16 @@ python -m venv .venv
 适用时机：修改 `core/`、`vox_plugin/`、`contracts/` 或 Python 测试后。
 
 ```powershell
-python -m pytest tests -q
+.\.venv\Scripts\python.exe -m pytest tests -q --basetemp .pytest-run
 python scripts/smoke_voice.py
 python scripts/e2e_simulated.py
 ```
 
 第一条检查单元、契约和适配器；第二条检查插件最小生命周期；第三条覆盖模拟链路：唤醒、识别文本、会话发送、回复、TTS 事件、连续对话、取消和停止。
 
-当前基线 **518 passed, 3 skipped**（2 个 skip 是可选的 VoxCord 适配器，1 个是符号链接越界用例 —— 本账户无权创建符号链接）。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
+`--basetemp .pytest-run` 用仓库内临时根目录规避部分 Windows 主机默认临时目录的权限清理问题；验证结束后删除该临时目录，避免把测试产物留在工作区。
+
+当前全量基线 **625 passed, 3 skipped**（2 个 skip 是可选的 VoxCord 适配器，1 个是符号链接越界用例 —— 本账户无权创建符号链接）。DesktopBridge 专项当前为 **33 passed**；采集专项基线为 **36 passed**。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
 
 ## 契约或事件字段变更
 
@@ -405,4 +407,4 @@ rg "TODO|FIXME|release blocker|not verified" core vox_plugin desktop docs tests 
 - 前端修改：`npm run build`；窗口属性修改再加 `cargo check` 和 Windows 实机验收。
 - 模型或依赖变更：记录版本、来源、归档校验结果到 `THIRD_PARTY_NOTICES.md` 和 `docs/research/prototype-results.md`。
 
-每个阶段收尾一律跑全量 `python -m pytest tests -q`（当前基线 **518 passed, 3 skipped**），不用单文件绿灯代替全量。
+每个阶段收尾一律跑全量 `.\.venv\Scripts\python.exe -m pytest tests -q --basetemp .pytest-run`（当前基线 **625 passed, 3 skipped**），不用单文件绿灯代替全量。

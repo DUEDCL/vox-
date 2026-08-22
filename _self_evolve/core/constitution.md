@@ -1,7 +1,7 @@
 # Vox 项目认知核心
 
-更新时间：2026-08-22
-来源：首次接手扫描与 Vox 改名迁移任务
+更新时间：2026-08-23
+来源：首次接手扫描、Vox 改名迁移与后续生命周期加固任务
 
 ## 项目目标
 
@@ -33,11 +33,12 @@ Vox 是 Windows 本地优先的语音唤醒对话原型：中文唤醒 → 本�
 
 ## 当前进度快照
 
-- Vox 改名迁移已在 `codex/vox-migration` 完成一次提交，待独立审查和推送。
-- Python：`600 passed, 3 skipped`；前端构建和 Rust `cargo check --locked` 已通过，均为 AUTO。
-- REAL-AGENT、REAL-EVOX、REAL-WIN 仍是后续发布风险。
+- Vox 改名迁移已完成；当前开发分支已推送到用户仓库。
+- Python：`625 passed, 3 skipped`；DesktopBridge 专项 `33 passed`；前端构建和 Rust `cargo check` 已通过，均为 AUTO/SIM。
+- VoiceRuntime、麦克风采集和 DesktopBridge 生命周期已加固；REAL-AGENT、REAL-EVOX、REAL-WIN、REAL-MIC 仍是后续发布风险。
 - 物理目录仍为 `D:\program\vioce-wake`，暂未改名以避免中断当前工作区。
 
 ## 变更记录
 
 - 2026-08-22：建立 Vox 项目认知核心；项目专属规则优先于通用规则。
+- 2026-08-23：同步当前测试基线与生命周期加固进度；保留真实设备/Agent/窗口证据边界。

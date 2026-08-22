@@ -1,7 +1,7 @@
 # 项目总览与当前进度
 
 > 工作区:`D:\program\vioce-wake`
-> 最后更新:2026-08-22（VoiceRuntime 与麦克风采集生命周期加固）
+> 最后更新:2026-08-23（VoiceRuntime、麦克风采集与 DesktopBridge 生命周期加固）
 > 本文件是项目的单一入口(single source of truth,唯一事实来源),其它文档由此索引。
 
 ## 1. 项目是什么
@@ -29,7 +29,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 |---|---|
 | 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架 + P1 声纹门 + P2 平台契约 + P3 记忆 + P4 工具与安全门 + P5 agent 适配器 + **P6 派发层** + **P7 ACP/HTTP 适配器**已落,`VoiceRuntime` 已把语音接进派发,「Python→桌面事件通道」已接线(代码级) |
 | 技术选型 | **已定案**,见 [ADR 001](adr/001-voice-stack-selection.md) ~ [ADR 005](adr/005-task-dispatch-model.md) |
-| Python 测试 | **619 passed, 3 skipped**（全量 AUTO；采集专项 **36 passed**，无真实设备） |
+| Python 测试 | **625 passed, 3 skipped**（全量 AUTO；DesktopBridge 专项 **33 passed**、采集专项 **36 passed**；无真实设备） |
 | 前端构建 | `npm run build`(tsc + vite)通过;`cargo check` 通过 |
 | 真机麦克风唤醒 | **已验证一次**(2026-07-26,`你好问问`,7.193s;当时打印的 score 1.0 是硬编码常量,不是测量值 —— 已改正,见 §7) |
 | 声纹准入 | 门**已接线**,模型已下载(dim 512);判别力 **AUTO 已验**(簇内 0.736 / 簇间 0.370,阈值 0.5 落在间隙);校验耗时 41 ms;**真机通过率未验** |
@@ -42,7 +42,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 真实 EvoX 会话桥接 | **未验证** — 发布阻塞项 |
 | 真实外部 agent | **未验证** — 发布阻塞项(REAL-AGENT) |
 | 真实透明窗口验收 | **未验证** — 发布阻塞项 |
-| 版本控制 | **已 git init**,基线 `9f7d923`(Phase 3 原型固化);P0 `02c6304`+`c02eb59`,P1 `dcbc827`+`d590497`,P2 `1438475`+`2908224`,P3 `e428c5b`+`547c6a4` |
+| 版本控制 | 已推送到 `https://github.com/DUEDCL/vox-.git`;最近完成 `f223008`（DesktopBridge 生命周期加固），当前文档同步在独立分支进行；合并前仍需独立审查 |
 
 ## 3. 已定案的技术选型
 
@@ -158,7 +158,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 - **`needs_confirmation` 被原样带出,派发器永不自动确认** — 有一条测试钉死「恰好调用一次,绝不带 `confirmed=True` 重试」。一个会自己点确认的派发器让 P4 那四层全部失效。
 - **失败的一轮也有终结 chunk** — 工具 runner 抛异常、agent 流没有终结 chunk、计划为空(reason 从 router 原样透传),三条路径都以带 error 的 `done` 收尾。事件 payload 只带 error 与 task_id,**不带 text / utterance / reply** —— 有一条测试检查 `repr(events)` 里不出现正文。
 - **计划了但没有适配器的 agent 走 `release` 而不是 `record`** — 那是配置不匹配,记进成功率会让平台永久绕开一个其实从没失败过的后端。
-- **照实记下的局限** — 全部 159 条派发用例都是 AUTO/SIM:agent 是 fake、工具 runner 是 fake、时钟是注入的。**`VoicePlugin` 里没有任何地方构造 `Dispatcher`**,所以「说一句话 → 直接读文件」这条链在代码里齐了但没接上;记忆召回给路由打分已接,**把召回文本拼进任务提示没有实现**;`prune_turns()` 仍无调用者。
+- **历史接线缺口已关闭** — 全部 159 条派发用例仍是 AUTO/SIM:agent 是 fake、工具 runner 是 fake、时钟是注入的；但 `VoiceRuntime` 已构造并接入 `Dispatcher`，记忆召回文本已拼入 `Task.context`，`write_turn()` 负责短期层裁剪。当前缺口转为真实 Agent/真实设备验收，不再把旧的「未接 Dispatcher」描述当作现状。
 
 ### 已实现的代码骨架
 
@@ -185,7 +185,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 录入 CLI | `scripts/enroll_speaker.py` | 125 | 交互式录入,音频不落盘 |
 | 前端 | `desktop/src/main.ts` + `style.css` + `index.html` | 1076 | 六态唤醒球、展开态流式文本、工具确认卡(含命令原文)、命中区上报 |
 | 窗口 | `desktop/src-tauri/src/main.rs` | 329 | 透明、置顶、无投影、不占任务栏;三个 `vox_*` IPC + 30 ms 光标轮询的选择性穿透 |
-| 测试 | `tests/*.py` + `tests/integration/` | — | 622 用例（619 passed + 3 skipped）；采集专项覆盖启动回滚、回调隔离、ASR/KWS 恢复与幂等停止,见 [测试文档](testing.md) |
+| 测试 | `tests/*.py` + `tests/integration/` | — | 628 collected（625 passed + 3 skipped）；DesktopBridge 专项 33 passed，采集专项覆盖启动回滚、回调隔离、ASR/KWS 恢复与幂等停止，见 [测试文档](testing.md) |
 
 ## 5. 进行中 / 下一步
 
@@ -201,7 +201,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | P5 | agent 适配器 `cli.py` + `evox.py` + `registry.py` + `config/agents.toml` | AUTO+SIM | ✅ 完成(真实 CLI 留 P9) |
 | P6 | 派发/路由/汇总 `core/dispatch/` | AUTO+SIM | ✅ 完成（已由 `VoiceRuntime` 接入语音路径） |
 | P7 | `acp.py` + `http.py` / `openclaw.py` | AUTO+SIM | ✅ 完成(真实 ACP/HTTP 联调留 P9) |
-| P8 | 唤醒球弹出 + 工具确认 UI + Python→桌面事件通道 | REAL-WIN | 🔄 DOM/CSS、Rust 侧与事件通道**均已接线**(cargo test 15 passed);真机验收留 P10 |
+| P8 | 唤醒球弹出 + 工具确认 UI + Python→桌面事件通道 | REAL-WIN | 🔄 DOM/CSS、Rust 侧与事件通道**均已接线**（DesktopBridge 专项 33 passed、cargo test 15 passed）；透明窗口真机验收留 P10 |
 | P9 | 真实 agent 联调(`claude` / `opencode` 各一次) | REAL-AGENT | ⬜ |
 | P10 | 真实语音端到端(含他人拒绝) | REAL-MIC + REAL-AGENT | ⬜ |
 
@@ -209,7 +209,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 
 **尚余的接线缺口（有代码但尚未完成真实验收）**:
 - `Dispatcher` 已由 `VoiceRuntime.say()` 构造并接进语音路径（`submit_text` → `dispatch` → `complete_turn`）；`VoiceRuntime` 现对启动失败执行资源回滚，对 `close()` 执行幂等清理，并在派发/回合完成异常后恢复到 `LISTENING`。记忆召回文本也已由 `Dispatcher._recall_context()` 拼进 `Task.context`，`write_turn()` 自裁剪（`prune_turns`）
-- Python→桌面事件通道 —— 三层已接上:Python `desktop_bridge`(管道) → Rust `spawn_event_reader`(stdin→`vox-bridge`) → 前端 `applyEnvelope`/`askConfirm`;确认应答走 `vox_confirm_reply` 回 stdout。**编译+单测已过(npm build、cargo test 15 passed),真机窗口上的点击/焦点/Esc 仍待 P10 REAL-WIN**
+- Python→桌面事件通道 —— 三层已接上：Python `desktop_bridge`（管道） → Rust `spawn_event_reader`（stdin→`vox-bridge`） → 前端 `applyEnvelope`/`askConfirm`；确认应答走 `vox_confirm_reply` 回 stdout。DesktopBridge 已补充重启、EOF、启动回滚和并发关闭保护；**npm build、cargo test 15 passed，真机窗口上的点击/焦点/Esc 仍待 P10 REAL-WIN**
 - `web.search` 无真实后端(每个托管 API 都是带 key 的云依赖,红线 1)
 
 ## 6. 发布阻塞项(release blockers)

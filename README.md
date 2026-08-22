@@ -1,13 +1,13 @@
 # Vox
 
-Windows 平台上的 EvoX 本地语音唤醒对话原型。
+Windows 平台上的 Vox 本地优先语音唤醒对话平台。
 
-> 当前阶段：Phase 3（原型与技术决策）已完成；Phase 4（生产实现）尚未开始。项目尚未达到发布标准。
+> 当前阶段：Phase 3（原型与技术决策）已完成；Phase 4（平台化生产实现）进行中。项目尚未达到发布标准。
 
 ## 项目目标
 
 ```text
-中文唤醒 → 本地语音识别 → EvoX 会话 → 本地 TTS 回复 → 连续对话 → 随时打断
+中文唤醒 → 本地语音识别 → 可替换 Agent 会话 → 本地 TTS 回复 → 连续对话 → 随时打断
 ```
 
 核心原则：
@@ -19,9 +19,10 @@ Windows 平台上的 EvoX 本地语音唤醒对话原型。
 ## 当前实现
 
 - `core/state.py`：严格语音状态机（idle/listening/thinking/speaking/cancelled/error）。
-- `core/providers.py`：sherpa-onnx KWS、Silero VAD、sounddevice 麦克风采集及可选 VoxCord 适配器。
+- `core/audio/`：sherpa-onnx KWS/VAD/ASR/TTS、sounddevice 麦克风采集及可选 VoxCord 适配器；`core/providers.py` 保留兼容重导出。
 - `core/session_bridge.py`：带 Bearer Token（承载令牌）认证的 EvoX localhost HTTP 桥接。
-- `vox_plugin/plugin.py`：EvoX 插件门面，包含 start/stop/pause/resume/status/devices/diagnose/wake_test/cancel 等工具。
+- `vox_plugin/plugin.py` / `vox_plugin/runtime.py`：插件门面与 VoiceRuntime，负责语音回合、派发、工具、记忆、TTS、采集和桌面事件接线。
+- `core/desktop_bridge.py`：Python 与 Tauri 唤醒球之间的 JSONL 管道，具备 EOF、重启、关闭和确认 fail-closed 处理。
 - `contracts/voice-events.schema.json`：版本 `1` 的语音事件契约。
 - `desktop/`：Tauri 2 + TypeScript + Vite 的透明置顶唤醒窗口原型。
 
@@ -57,7 +58,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe tmp_proto/t10_voice_stack_validation.py
 ```
 
-当前已记录基线：`600 passed, 3 skipped`（2026-08-16，干净 shell 下复现两次）。3 个 skipped（跳过）用例：2 个依赖本机不存在的可选 VoxCord checkout（检出目录），1 个需要创建符号链接的权限（本账户没有）。记基线前先确认 `env | grep PYTHON` 为空 —— 设了 `PYTHONUTF8` 会改变结果。
+当前可复现基线：`625 passed, 3 skipped`（2026-08-23，使用仓库 `.venv` 与仓库隔离的 `--basetemp`；全量 AUTO）。DesktopBridge 专项为 `33 passed`（SIM 子进程替身）。3 个 skipped 用例：2 个依赖本机不存在的可选 VoxCord checkout（检出目录），1 个需要创建符号链接的权限（本账户没有）；skip 数会随环境变化，passed 数下降才是回归。记基线前先确认没有设置 `PYTHONUTF8` / `PYTHONIOENCODING`。
 
 ### 桌面构建
 
@@ -116,6 +117,6 @@ tmp_proto/       原型验证脚本与 UI 技术验证页
 
 ## 重要说明
 
-- 已是 Git 仓库（基线 `9f7d923`，平台化进展见 `git log`）。
+- 已是 Git 仓库；平台化进展与当前分支提交见 `git log`，最近完成了 VoiceRuntime、采集生命周期和 DesktopBridge 生命周期加固。
 - `models/` 中包含较大的模型目录和下载归档，发布前需要确定模型分发及归档清理策略。
 - 本项目是 EvoX 生态中的原型项目，真实 EvoX 会话端点尚未完成联调。
