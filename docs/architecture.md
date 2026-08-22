@@ -178,7 +178,10 @@ idle ──→ listening ──→ thinking ──→ speaking
 - 唯一接触音频设备的类,包装 `sounddevice.InputStream`。
 - 16 kHz、blocksize 1600(100 ms)、单声道、float32。
 - 支持注入 `speech_gate` 回调,可在送入 KWS 前先过 VAD 闸门,省算力。
-- `stop()` 依次 stop/close 流并调用 provider 的 `close()`,**保证设备与原生状态都释放**。
+- `start()` 是事务化初始化：KWS/ASR provider、推理流和 `InputStream` 任一步失败，都会尽力 stop/close 已创建资源并清空内部字段；下一次 `start()` 可从干净边界重试。
+- `stop()` 是幂等的 best-effort 清理：即使底层 stream 的 `stop()`/`close()` 或 provider 的 `close()` 抛错，也会继续清理其它资源；资源字段先摘除，因此第二次 `stop()` 不重复执行底层清理。
+- sounddevice 回调包住采样、VAD、KWS、声纹、ASR 和业务回调。异常不会冒出音频线程；只记录异常类型计数，不保留音频、文本或异常消息。ASR 失败会丢弃当前流并重建 KWS 流，重建失败则进入安全停处理状态，等待显式 `stop()`。
+- 这些自动化用例是 **AUTO**（stub provider、无真实设备），不能替代 **REAL-MIC** 的设备开合、回调线程和声纹实测。
 
 ### 4.4 `VoxCordAdapter` — 可选外部参考(本机不存在)
 
