@@ -34,11 +34,12 @@ Vox 是 Windows 本地优先的语音唤醒对话原型：中文唤醒 → 本�
 ## 当前进度快照
 
 - Vox 改名迁移已完成；当前开发分支已推送到用户仓库。
-- Python：`628 passed, 3 skipped`；DesktopBridge 专项 `33 passed`；前端构建和 Rust `cargo check` 已通过，均为 AUTO/SIM。
-- VoiceRuntime、麦克风采集和 DesktopBridge 生命周期已加固；REAL-AGENT、REAL-EVOX、REAL-WIN、REAL-MIC 仍是后续发布风险。
+- Python：`630 passed, 3 skipped`；DesktopBridge 专项 `33 passed`；前端构建和 Rust `cargo check` 已通过，均为 AUTO/SIM。
+- VoiceRuntime、麦克风采集、DesktopBridge 生命周期和工具/Agent 事件隐私边界已加固；REAL-AGENT、REAL-EVOX、REAL-WIN、REAL-MIC 仍是后续发布风险。
 - 物理目录仍为 `D:\program\vioce-wake`，暂未改名以避免中断当前工作区。
 
 ## 变更记录
 
 - 2026-08-22：建立 Vox 项目认知核心；项目专属规则优先于通用规则。
 - 2026-08-23：同步当前测试基线与生命周期加固进度；保留真实设备/Agent/窗口证据边界。
+- 2026-08-23：补强工具事件的固定原因过滤与 sink 隔离；内部诊断和公开事件继续分层。

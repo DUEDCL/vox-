@@ -375,6 +375,47 @@ def test_a_tool_that_raises_is_reported_not_propagated(config):
     assert result.error == "ValueError: boom"
 
 
+def test_a_tool_exception_message_does_not_reach_the_event(config):
+    class Broken:
+        name = "fs.read"
+
+        def describe(self):
+            return {"name": self.name}
+
+        def run(self, request):
+            raise ValueError("secret output and C:/private/file.txt")
+
+    events: list[dict] = []
+    tools = ToolRunner(policy=DefaultToolPolicy(config), on_event=events.append)
+    tools.register(Broken())
+
+    result = tools.run(ToolRequest(tool="fs.read", arguments={"path": "x.md"}))
+
+    assert result.error == "ValueError: secret output and C:/private/file.txt"
+    refused = events[-1]
+    assert refused["type"] == "tool.refused"
+    assert refused["payload"]["reason"] == "tool failed"
+    serialised = json.dumps(events, ensure_ascii=False)
+    assert "secret output" not in serialised
+    assert "C:/private/file.txt" not in serialised
+
+
+def test_event_sink_failure_does_not_change_the_tool_result(config, tmp_path):
+    class SinkFailure:
+        def __call__(self, _event):
+            raise RuntimeError("bridge is gone")
+
+    tools = ToolRunner(policy=DefaultToolPolicy(config), on_event=SinkFailure())
+    tools.register(FsReadTool(config))
+    (tmp_path / "a.md").write_text("hi", encoding="utf-8")
+
+    result = tools.run(ToolRequest(tool="fs.read", arguments={"path": "a.md"}))
+
+    assert result.ok is True
+    assert result.output == "hi"
+    assert tools.sink_failures == 2
+
+
 def test_every_decision_lands_in_the_long_layer(config, tmp_path):
     store = SqliteMemoryStore(":memory:")
     writer = MemoryWriter(store)

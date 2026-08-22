@@ -1,7 +1,7 @@
 # 交接文档 —— Vox
 
-> 交接时间：2026-08-23  ·  最近完成：Agent 失败路径与事件隐私加固（提交历史见 `git log`）
-> 验证基线：Python **628 passed, 3 skipped**（631 collected）· DesktopBridge 专项 **33 passed** · Rust **15 passed** · `npm run build` 通过
+> 交接时间：2026-08-23  ·  最近完成：Agent 与工具事件隐私加固（提交历史见 `git log`）
+> 验证基线：Python **630 passed, 3 skipped**（633 collected）· DesktopBridge 专项 **33 passed** · Rust **15 passed** · `npm run build` 通过
 > 基线在**干净 shell**（未设置 `PYTHONUTF8` / `PYTHONIOENCODING`）下复现；数字取决于环境变量的话就不是基线。
 > 本文件是**接手者的第一份材料**。项目全貌看 [`docs/project-overview.md`](project-overview.md)，
 > 干活的规矩看 [`.claude/CLAUDE.md`](../.claude/CLAUDE.md)（那份是硬约束，本文件只做导航）。
@@ -70,7 +70,7 @@ scripts/        run_desktop.py 命令行 · acceptance/ 真机验收脚本 · en
 按这个顺序跑，每一步都**看返回值而不是「没报错」**：
 
 ```powershell
-# 0) 环境自检（应当 628 passed, 3 skipped；DesktopBridge 专项应当 33 passed）
+# 0) 环境自检（应当 630 passed, 3 skipped；DesktopBridge 专项应当 33 passed）
 #    先确认环境里没有 PYTHONUTF8 / PYTHONIOENCODING —— 基线只在干净 shell 里成立
 .\.venv\Scripts\python.exe -m pytest tests -q --basetemp .pytest-run
 
