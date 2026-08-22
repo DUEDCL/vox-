@@ -39,6 +39,7 @@ from core.dispatch import DefaultAggregator, DefaultRouter, Dispatcher, Dispatch
 from core.dispatch.breaker import CircuitBreaker
 from core.dispatch.contract import Intent
 from core.dispatch.intent import RuleBasedIntentResolver
+from core.events import AGENT_SCHEMA_PATH, build_event, validate_event
 from core.memory import open_memory
 from core.state import VoiceState
 from core.tools import open_tools
@@ -79,6 +80,7 @@ class VoiceRuntime:
     bridge: DesktopBridge | None = None
     dispatcher: Dispatcher | None = None
     tool_runner: Any = None
+    memory_store: Any = None
     memory_writer: Any = None
     memory_recaller: Any = None
     adapters: dict[str, Any] = field(default_factory=dict)
@@ -97,6 +99,8 @@ class VoiceRuntime:
     turns: int = field(default=0, init=False)
     _pending_confirm: dict[str, Any] | None = field(default=None, init=False, repr=False)
     _started: bool = field(default=False, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
+    _active_task_id: str | None = field(default=None, init=False, repr=False)
 
     # ------------------------------------------------------------------- wiring
 
@@ -111,61 +115,80 @@ class VoiceRuntime:
             self._pending_confirm = envelope
             return
         if self.bridge is not None:
-            self.bridge.send(envelope)
+            try:
+                self.bridge.send(envelope)
+            except Exception:
+                # The bridge is a display/confirmation enhancement. A broken
+                # display must not abort the producer currently emitting.
+                self.plugin.sink_failures += 1
 
     def start(self) -> RuntimeReport:
-        """Build everything and spawn the orb. Idempotent."""
+        """Build everything and spawn the orb, rolling back a partial start.
+
+        ``start`` is a transaction: callers either get a fully running runtime or
+        an exception with every resource created so far closed. This matters for
+        desktop and microphone use because a failed agent/configuration step must
+        not leave a child process, SQLite handle, or adapter alive for the retry.
+        """
         if self._started:
             return self.report
-        self._started = True
+        self._closed = False
         warnings: list[str] = []
+        try:
+            if self.with_memory:
+                try:
+                    (
+                        self.memory_store,
+                        self.memory_writer,
+                        self.memory_recaller,
+                    ) = open_memory(on_event=self.on_event, session_id=self.session_id)
+                except Exception as exc:  # noqa: BLE001 - memory is an enhancement
+                    warnings.append(f"memory is off: {type(exc).__name__}: {exc}")
+                    self.memory_store = self.memory_writer = self.memory_recaller = None
 
-        if self.with_memory:
-            try:
-                _store, self.memory_writer, self.memory_recaller = open_memory(
-                    on_event=self.on_event, session_id=self.session_id
-                )
-            except Exception as exc:  # noqa: BLE001 - memory is an enhancement
-                warnings.append(f"memory is off: {type(exc).__name__}: {exc}")
-                self.memory_writer = self.memory_recaller = None
+            self.tool_runner = open_tools(
+                on_event=self.on_event, memory_writer=self.memory_writer
+            )
 
-        self.tool_runner = open_tools(
-            on_event=self.on_event, memory_writer=self.memory_writer
-        )
+            descriptors, self.adapters, agent_warnings = self._open_agents()
+            warnings.extend(agent_warnings)
 
-        descriptors, self.adapters, agent_warnings = self._open_agents()
-        warnings.extend(agent_warnings)
-
-        self.dispatcher = Dispatcher(
-            router=DefaultRouter(
-                descriptors,
-                breaker=CircuitBreaker(on_event=self.on_event),
+            self.dispatcher = Dispatcher(
+                router=DefaultRouter(
+                    descriptors,
+                    breaker=CircuitBreaker(on_event=self.on_event),
+                    memory_recaller=self.memory_recaller,
+                    memory_writer=self.memory_writer,
+                ),
+                aggregator=DefaultAggregator(),
+                resolver=RuleBasedIntentResolver(),
+                tool_runner=self.tool_runner,
                 memory_recaller=self.memory_recaller,
-                memory_writer=self.memory_writer,
-            ),
-            aggregator=DefaultAggregator(),
-            resolver=RuleBasedIntentResolver(),
-            tool_runner=self.tool_runner,
-            memory_recaller=self.memory_recaller,
-            on_event=self.on_event,
-        )
+                on_event=self.on_event,
+            )
 
-        self.plugin.on_event = self.on_event
-        self.plugin.attach_tools(self.tool_runner)
-        self.plugin.attach_memory(self.memory_writer, self.memory_recaller)
+            self.plugin.on_event = self.on_event
+            self.plugin.attach_tools(self.tool_runner)
+            self.plugin.attach_memory(self.memory_writer, self.memory_recaller)
 
-        if self.with_desktop:
-            warnings.extend(self._open_desktop())
+            if self.with_desktop:
+                warnings.extend(self._open_desktop())
 
-        self.report = RuntimeReport(
-            desktop=self.bridge is not None and self.bridge.alive,
-            tools=tuple(sorted(self.tool_runner.tools)),
-            agents=tuple(sorted(self.adapters)),
-            memory=self.memory_writer is not None,
-            warnings=tuple(warnings),
-        )
-        self.plugin.start()
-        return self.report
+            self.report = RuntimeReport(
+                desktop=self.bridge is not None and self.bridge.alive,
+                tools=tuple(sorted(self.tool_runner.tools)),
+                agents=tuple(sorted(self.adapters)),
+                memory=self.memory_writer is not None,
+                warnings=tuple(warnings),
+            )
+            self.plugin.start()
+            self._started = True
+            return self.report
+        except Exception:
+            self._cleanup_resources()
+            self._started = False
+            self._closed = True
+            raise
 
     def _open_agents(self) -> tuple[tuple[AgentDescriptor, ...], dict[str, Any], list[str]]:
         """Adapters from config. A bad config is a warning, not a dead start.
@@ -182,13 +205,21 @@ class VoiceRuntime:
         opened: dict[str, Any] = {}
         descriptors: list[AgentDescriptor] = []
         warnings: list[str] = []
-        for adapter in adapters:
-            descriptor = adapter.describe()
-            descriptors.append(descriptor)
-            opened[descriptor.name] = adapter
-            status = self._availability(adapter)
-            if status is not None:
-                warnings.append(status)
+        try:
+            for adapter in adapters:
+                descriptor = adapter.describe()
+                descriptors.append(descriptor)
+                opened[descriptor.name] = adapter
+                status = self._availability(adapter)
+                if status is not None:
+                    warnings.append(status)
+        except Exception:
+            # ``open_agents`` may have already created subprocess-backed
+            # adapters before a later descriptor/check fails. Do not lose those
+            # handles just because the registry is being treated as optional.
+            for adapter in adapters:
+                self._close_resource(adapter)
+            raise
         return tuple(descriptors), opened, warnings
 
     @staticmethod
@@ -214,36 +245,70 @@ class VoiceRuntime:
         bridge = DesktopBridge(visible=self.visible)
         try:
             bridge.start()
+            # Waiting for ``ready`` rather than sleeping: the first line the orb
+            # prints is the proof its pipe is open.
+            if not bridge.ready.wait(10.0):
+                self._call_safely(bridge, "close")
+                return ["the orb started but never reported ready; running headless"]
         except DesktopBridgeError as exc:
+            self._call_safely(bridge, "close")
             return [f"the orb did not start: {exc}"]
-        # Waiting for ``ready`` rather than sleeping: the first line the orb
-        # prints is the proof its pipe is open.
-        if not bridge.ready.wait(10.0):
-            bridge.close()
-            return ["the orb started but never reported ready; running headless"]
+        except Exception as exc:  # noqa: BLE001 - desktop is an enhancement
+            self._call_safely(bridge, "close")
+            return [f"the orb failed during startup: {type(exc).__name__}"]
         self.bridge = bridge
         return []
 
     # -------------------------------------------------------------------- turns
 
     def say(self, text: str) -> DispatchResult:
-        """One full turn: recognised text in, dispatched answer out, orb updated.
+        """Run one turn and recover to ``LISTENING`` on unexpected failures.
 
-        This is the line that was missing. ``submit_text`` moves the state
-        machine and remembers the user's turn; the dispatcher decides tool or
-        agent; ``complete_turn`` speaks the answer and returns to listening.
+        The audio callback only queues text; nevertheless this method is also
+        callable by a worker or UI thread, so dispatcher and confirmation errors
+        are contained here rather than escaping into the capture loop.
         """
         if not self._started:
             self.start()
-        assert self.dispatcher is not None
+        if self.dispatcher is None:
+            raise RuntimeError("voice runtime dispatcher is not available")
         self._reach_listening()
         self.plugin.submit_text(text)
         self.turns += 1
         task = Task(id=f"t-{self.turns}", text=text, session_id=self.session_id)
-        result = self.dispatcher.dispatch(task, self.adapters, speaker=self.speaker)
-        if result.needs_confirmation:
-            result = self._confirm_and_retry(task, result)
-        self.plugin.complete_turn(self._spoken(result))
+        self._active_task_id = task.id
+        try:
+            try:
+                result = self.dispatcher.dispatch(task, self.adapters, speaker=self.speaker)
+                if result.needs_confirmation:
+                    result = self._confirm_and_retry(task, result)
+            except Exception as exc:  # noqa: BLE001 - the turn must be recoverable
+                result = DispatchResult(
+                    route="none",
+                    reason=f"dispatch failed: {type(exc).__name__}",
+                    ok=False,
+                )
+                self._emit_failure(task, exc)
+                self._recover_turn()
+                return result
+        finally:
+            self._active_task_id = None
+
+        try:
+            self.plugin.complete_turn(self._spoken(result))
+        except Exception as exc:  # noqa: BLE001 - preserve a usable runtime
+            self._emit_failure(task, exc)
+            self._recover_turn()
+            return DispatchResult(
+                route=result.route,
+                chunks=result.chunks,
+                agents=result.agents,
+                tool=result.tool,
+                elapsed_ms=result.elapsed_ms,
+                reason=f"turn completion failed: {type(exc).__name__}",
+                ok=False,
+                needs_confirmation=result.needs_confirmation,
+            )
         return result
 
     def attach_microphone(self, capture: Any) -> dict[str, Any]:
@@ -282,7 +347,11 @@ class VoiceRuntime:
         self._pending_confirm = None
         if request is None or self.bridge is None:
             return result
-        if not self.bridge.await_confirmation(request):
+        try:
+            approved = self.bridge.await_confirmation(request)
+        except Exception:
+            return result
+        if approved is not True:
             return result
         assert self.dispatcher is not None
         payload = request.get("payload") or {}
@@ -330,19 +399,113 @@ class VoiceRuntime:
 
     # ------------------------------------------------------------------ shutdown
 
-    def close(self) -> None:
-        """Cancel adapters, then close the orb. Idempotent."""
-        for adapter in self.adapters.values():
-            cancel = getattr(adapter, "cancel", None)
-            if callable(cancel):
-                try:
-                    cancel()
-                except Exception:  # noqa: BLE001 - shutting down anyway
-                    pass
+    def _emit_failure(self, task: Task, exc: Exception) -> None:
+        """Record a safe failure event without including user text or secrets."""
+        try:
+            self.on_event(
+                validate_event(
+                    build_event(
+                        "task.failed",
+                        {"task_id": task.id, "error": type(exc).__name__},
+                    ),
+                    AGENT_SCHEMA_PATH,
+                )
+            )
+        except Exception:
+            # Event delivery is telemetry; it must not prevent recovery.
+            pass
+
+    def _recover_turn(self) -> None:
+        """Leave an interrupted turn in a state where the next one can run."""
+        try:
+            if self.plugin.machine.state in {VoiceState.THINKING, VoiceState.SPEAKING}:
+                self.plugin._state_event(VoiceState.ERROR, "runtime turn failed")
+            if self.plugin.machine.state in {VoiceState.ERROR, VoiceState.CANCELLED}:
+                self.plugin._state_event(VoiceState.LISTENING, "runtime recovered")
+        except Exception:
+            # A malformed injected plugin should not make the capture callback
+            # fail; the next explicit start/close still has a chance to recover it.
+            pass
+
+    @staticmethod
+    def _call_safely(obj: Any, method: str, *args: Any) -> None:
+        callback = getattr(obj, method, None)
+        if callable(callback):
+            try:
+                callback(*args)
+            except Exception:
+                pass
+
+    @classmethod
+    def _close_resource(cls, obj: Any) -> None:
+        """Invoke one supported teardown hook without duplicating side effects."""
+        if obj is None:
+            return
+        for method in ("stop", "close", "shutdown"):
+            callback = getattr(obj, method, None)
+            if callable(callback):
+                cls._call_safely(obj, method)
+                return
+
+    def _cleanup_resources(self) -> None:
+        """Best-effort cleanup for failed start and explicit close.
+
+        The microphone and TTS objects are injected by the caller, so cleanup
+        stops/closes them but keeps the attachments. A later ``start()`` can
+        therefore restart the same configured runtime instead of silently losing
+        its microphone after the first ``close()``.
+        """
+        active_id = self._active_task_id
+        for adapter in tuple(self.adapters.values()):
+            if active_id:
+                self._call_safely(adapter, "cancel", active_id)
+            self._close_resource(adapter)
+
+        self._close_resource(self.dispatcher)
+        self._close_resource(self.tool_runner)
+        self._close_resource(self.memory_writer)
+        self._close_resource(self.memory_recaller)
+        self._close_resource(self.plugin.audio_capture)
+        self._close_resource(self.plugin.tts)
+        if self.plugin.last_turn_id:
+            self._call_safely(
+                self.plugin.transport, "cancel", self.plugin.last_turn_id
+            )
+
         if self.bridge is not None:
-            self.bridge.close()
+            self._call_safely(self.bridge, "close")
             self.bridge = None
+        if self.memory_store is not None:
+            self._call_safely(self.memory_store, "close")
+
+        self.dispatcher = None
+        self.tool_runner = None
+        self.memory_store = None
+        self.memory_writer = None
+        self.memory_recaller = None
+        self.adapters = {}
+        self.plugin.attach_tools(None)
+        self.plugin.attach_memory(None, None)
+        self.plugin.running = False
+        self.plugin.paused = False
+        self.plugin.last_turn_id = None
+        self.plugin.last_reply = None
+        self.plugin.machine.state = VoiceState.IDLE
+        self._pending_confirm = None
+        self._active_task_id = None
+        while True:
+            try:
+                self.utterances.get_nowait()
+            except queue.Empty:
+                break
+
+    def close(self) -> None:
+        """Stop all owned resources and settle the runtime exactly once."""
+        if self._closed:
+            return
+        self._cleanup_resources()
         self._started = False
+        self._closed = True
 
     def __enter__(self) -> VoiceRuntime:
         self.start()

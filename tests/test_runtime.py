@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+import vox_plugin.runtime as runtime_module
 from core.agents.contract import AgentChunk
 from core.dispatch.dispatcher import DispatchResult
 from core.state import VoiceState
@@ -127,6 +128,256 @@ def test_say_with_no_dispatcher_is_not_a_silent_noop():
     runtime.dispatcher = None
     runtime.adapters = {}
 
-    with pytest.raises(AssertionError):
+    with pytest.raises(RuntimeError, match="dispatcher"):
         runtime.say("hello")
 
+
+
+class SequencedDispatcher:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = []
+        self.confirmed = []
+
+    def dispatch(self, task, adapters, *, speaker=None):
+        self.calls.append(task.id)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def run_intent(self, task, intent, *, speaker=None):
+        self.confirmed.append((task.id, intent.arguments))
+        return DispatchResult(route="tool", ok=True)
+
+
+class CounterResource:
+    def __init__(self):
+        self.starts = 0
+        self.stops = 0
+        self.closes = 0
+        self.cancels = []
+        self.fail_start = False
+
+    def start(self):
+        self.starts += 1
+        if self.fail_start:
+            raise RuntimeError("cannot start")
+
+    def stop(self):
+        self.stops += 1
+
+    def close(self):
+        self.closes += 1
+
+    def shutdown(self):
+        return None
+
+    def cancel(self, turn_id):
+        self.cancels.append(turn_id)
+
+
+class FakeToolRunner:
+    tools = {}
+
+
+class FakeBridge(CounterResource):
+    alive = True
+    approval = False
+    error = None
+
+    def await_confirmation(self, event):
+        if self.error is not None:
+            raise self.error
+        return self.approval
+
+    def send(self, event):
+        return True
+
+    def describe(self):
+        return {"alive": self.alive}
+
+
+def test_start_failure_rolls_back_resources_and_allows_retry(monkeypatch):
+    capture = CounterResource()
+    capture.fail_start = True
+    store = CounterResource()
+    runtime = VoiceRuntime(with_desktop=False, with_memory=True)
+    runtime.plugin.attach_capture(capture)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "open_memory",
+        lambda **_kwargs: (store, object(), object()),
+    )
+    monkeypatch.setattr(runtime_module, "open_tools", lambda **_kwargs: FakeToolRunner())
+    monkeypatch.setattr(runtime, "_open_agents", lambda: ((), {}, []))
+
+    with pytest.raises(RuntimeError, match="cannot start"):
+        runtime.start()
+
+    assert runtime._started is False
+    assert runtime.dispatcher is None
+    assert runtime.memory_store is None
+    assert store.closes == 1
+    assert capture.stops == 1
+
+    capture.fail_start = False
+    report = runtime.start()
+
+    assert report.memory is True
+    assert runtime._started is True
+    assert capture.starts == 2
+
+    runtime.close()
+    assert capture.stops == 2
+
+
+def test_close_then_start_reuses_attached_capture_and_tts(monkeypatch):
+    capture = CounterResource()
+    tts = CounterResource()
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+    runtime.plugin.attach_capture(capture)
+    runtime.plugin.attach_tts(tts)
+    monkeypatch.setattr(runtime, "_open_agents", lambda: ((), {}, []))
+
+    runtime.start()
+    runtime.close()
+    runtime.start()
+
+    assert capture.starts == 2
+    assert runtime._started is True
+    runtime.close()
+
+
+def test_close_releases_owned_resources_once_and_resets_state():
+    capture = CounterResource()
+    tts = CounterResource()
+    adapter = CounterResource()
+    bridge = FakeBridge()
+    store = CounterResource()
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+    runtime.plugin.attach_capture(capture)
+    runtime.plugin.attach_tts(tts)
+    runtime.plugin.running = True
+    runtime.plugin.machine.state = VoiceState.THINKING
+    runtime.adapters = {"fake": adapter}
+    runtime.bridge = bridge
+    runtime.memory_store = store
+    runtime.dispatcher = object()
+    runtime._active_task_id = "t-active"
+    runtime._started = True
+
+    runtime.close()
+    runtime.close()
+
+    assert capture.stops == 1
+    assert tts.stops == 1
+    assert adapter.cancels == ["t-active"]
+    assert bridge.closes == 1
+    assert store.closes == 1
+    assert runtime.plugin.audio_capture is capture
+    assert runtime.plugin.machine.state == VoiceState.IDLE
+    assert runtime._started is False
+
+
+def test_dispatch_failure_returns_failed_result_and_next_turn_still_runs():
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+    runtime._started = True
+    runtime.adapters = {}
+    runtime.dispatcher = SequencedDispatcher(
+        [
+            RuntimeError("agent crashed"),
+            DispatchResult(
+                route="agent",
+                chunks=(AgentChunk(kind="text", text="recovered"), AgentChunk(kind="done")),
+                ok=True,
+            ),
+        ]
+    )
+
+    failed = runtime.say("first")
+    recovered = runtime.say("second")
+
+    assert failed.ok is False
+    assert failed.reason == "dispatch failed: RuntimeError"
+    assert recovered.text == "recovered"
+    assert runtime.plugin.machine.state == VoiceState.LISTENING
+    assert any(event["type"] == "task.failed" for event in runtime.seen)
+
+
+def test_tts_and_memory_failures_do_not_break_a_successful_turn():
+    class FailingTts:
+        def speak(self, _text):
+            raise RuntimeError("speaker unavailable")
+
+    class FailingMemory:
+        def write_turn(self, _text, *, role):
+            raise RuntimeError(f"memory unavailable for {role}")
+
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+    runtime._started = True
+    runtime.plugin.attach_tts(FailingTts())
+    runtime.plugin.attach_memory(FailingMemory(), None)
+    runtime.adapters = {}
+    runtime.dispatcher = FakeDispatcher(
+        [AgentChunk(kind="text", text="answer"), AgentChunk(kind="done")]
+    )
+
+    result = runtime.say("question")
+
+    assert result.ok is True
+    assert result.text == "answer"
+    assert runtime.plugin.machine.state == VoiceState.LISTENING
+
+
+def test_confirmation_without_explicit_approval_stays_refused():
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+    runtime._started = True
+    runtime.bridge = FakeBridge()
+    runtime.adapters = {}
+    result = DispatchResult(
+        route="tool",
+        tool="shell.run",
+        reason="confirmation required",
+        needs_confirmation=True,
+        ok=False,
+    )
+    dispatcher = SequencedDispatcher([result])
+    runtime.dispatcher = dispatcher
+    runtime._pending_confirm = {
+        "version": "1",
+        "type": "tool.confirm_required",
+        "id": "confirm-1",
+        "timestamp": "2026-08-22T00:00:00+00:00",
+        "payload": {"command": "echo safe"},
+    }
+
+    returned = runtime.say("run echo safe")
+
+    assert returned is result
+    assert returned.needs_confirmation is True
+    assert dispatcher.confirmed == []
+    assert runtime.plugin.machine.state == VoiceState.LISTENING
+
+
+
+def test_completion_failure_recovers_from_speaking_state():
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+    runtime._started = True
+    runtime.adapters = {}
+    runtime.dispatcher = FakeDispatcher(
+        [AgentChunk(kind="text", text="answer"), AgentChunk(kind="done")]
+    )
+
+    def fail_completion(_reply):
+        runtime.plugin._state_event(VoiceState.SPEAKING, "test playback")
+        raise RuntimeError("completion failed")
+
+    runtime.plugin.complete_turn = fail_completion
+
+    result = runtime.say("question")
+
+    assert result.ok is False
+    assert result.reason == "turn completion failed: RuntimeError"
+    assert runtime.plugin.machine.state == VoiceState.LISTENING

@@ -1,9 +1,9 @@
 # 技术架构与组件边界
 
 > 工作区:`D:\program\vioce-wake`
-> 最后更新:2026-08-02
+> 最后更新:2026-08-22（VoiceRuntime 生命周期加固）
 > 本文描述磁盘上**已实现**的架构。计划中但未落地的部分明确标注「未实现」。
-> 平台层(第 9 节)目前**只有契约,没有实现** —— 这是有意的:契约先落地并锁死类型边界,实现按 P1～P8 分阶段填。
+> 平台层（第 9 节）已按 P3～P7 分阶段落地；本文仍明确标注尚未实现或仅有 AUTO/SIM 证据的部分。
 
 ## 1. 分层总览
 
@@ -17,7 +17,8 @@
                          │  contracts/voice-events.schema.json
 ┌────────────────────────┴─────────────────────────────────┐
 │  插件门面层 Plugin Facade                                 │
-│  vox_plugin/plugin.py   VoicePlugin:EvoX 工具面 + 回合编排│
+│  vox_plugin/plugin.py   VoicePlugin:状态机/音频门面               │
+│  vox_plugin/runtime.py  VoiceRuntime:派发、TTS、桌面桥接与生命周期 │
 └──────┬──────────────────────────────┬────────────────────┘
        │                              │
 ┌──────┴───────────────┐   ┌──────────┴────────────────────┐
@@ -36,9 +37,28 @@
 │ 声纹 speaker(P1)     │   └───────────────────────────────┘
 └──────────────────────┘
 
-平台层 Platform(`memory` 已实现,其余仅契约,实现 P4～P7):
+平台层 Platform（`memory`、`tools`、`agents`、`dispatch` 已实现，P3～P7）：
 core/agents/ 适配器 · core/dispatch/ 派发 · core/tools/ 工具 · **core/memory/ 记忆**
 ```
+
+### 1.1 运行时装配与生命周期
+
+`vox_plugin/runtime.py` 是生产运行时的组合根，负责把 `VoicePlugin`、本地工具、记忆、Agent registry、`Dispatcher` 和可选 `DesktopBridge` 装配成一条回合链：
+
+```text
+recognized text → VoiceRuntime.say()
+  → plugin.submit_text() [LISTENING → THINKING]
+  → dispatcher.dispatch() / confirmation retry
+  → plugin.complete_turn() [TTS → LISTENING]
+```
+
+生命周期采用以下约束：
+
+- `start()` 是可回滚的初始化事务。任一步骤抛错，已创建的 adapter、capture、TTS、bridge 和 SQLite store 都会被尽力释放，`_started` 保持 `False`，调用方可重试。
+- `close()` 是幂等的 best-effort 清理。它停止 capture/TTS，取消并关闭 adapter，关闭桌面桥和 memory store，清空待处理语音队列；第二次调用不重复释放资源。
+- 派发或回合完成异常不会冒出音频回调；运行时发出不含用户文本的 `task.failed`，并把状态恢复到 `LISTENING`。确认卡没有明确 `approved == true` 时保持拒绝。
+
+这些是 AUTO 级行为测试，不等同于 REAL-MIC、REAL-AGENT 或 REAL-WIN 验收。
 
 **依赖方向铁律**:核心层不认识插件层,插件层不认识桌面层。所有跨层通信走事件契约或协议接口,任何 sherpa-onnx / sounddevice / VoxCord 的类型都不得出现在公开事件结构里。
 
@@ -265,7 +285,7 @@ cancel         → transport.cancel(last_turn_id) + state.changed(cancelled) + t
 
 ## 8. 平台层(`core/{agents,dispatch,tools,memory}/`,契约 + 契约校验)
 
-Phase 4 新增的四个包。`agents` / `dispatch` 两包**只有契约与契约校验**:两个 `contract.py` 共 176 行 Protocol(协议)与冻结 dataclass,加 `core/agents/schema.py` 的配置校验(P2),没有任何 adapter 实现。`memory`(P3,1093 行)与 `tools`(P4,992 行)已落地实现。导入这四个包**不得**启动子进程或打开套接字,这条写在各自的模块 docstring 里,并有测试。
+Phase 4 新增的四个包已按 P3～P7 分阶段实现：`agents` 提供 CLI/EvoX/ACP/HTTP 适配器与 registry，`dispatch` 提供 intent/router/aggregator/breaker/dispatcher，`memory` 与 `tools` 负责本地记忆和安全工具门。导入这四个包**不得**启动子进程或打开套接字；真正的外部进程/网络动作只发生在显式打开适配器并执行回合时，这条边界由测试固定。
 
 六个新边界:
 
@@ -346,5 +366,5 @@ Phase 4 新增的四个包。`agents` / `dispatch` 两包**只有契约与契约
 | 唤醒球运行时显隐 | `main.rs` `show_orb`/`hide_orb` | P8 | 现在可见性由环境变量静态决定 |
 | Canvas 2D 生产渲染器 | `desktop/src/renderer/` | P8 | t28–t35,含质量分档选择器与 `Renderer` 抽象 |
 | 工具确认交互面 | `desktop/src/` | P8 | `shell.run` 的确认 UI 落在这里 |
-| 超时/重连/错误恢复 | `core/state.py` + 传输层 | Phase 4 | 生产化状态机 |
+| 超时/重连/错误恢复 | `vox_plugin/runtime.py` + `core/state.py` + 传输层 | Phase 4 | VoiceRuntime 生命周期与回合失败恢复已实现；真实重连策略仍待联调 |
 | 系统托盘常驻 | `main.rs` | Phase 4 | 发布阻塞项 #5 一部分 |
