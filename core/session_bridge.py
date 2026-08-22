@@ -35,13 +35,13 @@ class LocalEvoXTransport:
     @classmethod
     def from_env(cls) -> "LocalEvoXTransport":
         return cls(
-            os.getenv("EVOX_VOICE_BRIDGE_URL", "http://localhost:8765"),
-            os.getenv("EVOX_VOICE_BRIDGE_TOKEN", ""),
+            os.getenv("VOX_VOICE_BRIDGE_URL", "http://localhost:8765"),
+            os.getenv("VOX_VOICE_BRIDGE_TOKEN", ""),
         )
 
     def _validate(self) -> None:
         if not self.token:
-            raise BridgeError("EVOX_VOICE_BRIDGE_TOKEN is required")
+            raise BridgeError("VOX_VOICE_BRIDGE_TOKEN is required")
         parsed = urlparse(self.base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise BridgeError("bridge URL must be an absolute HTTP(S) URL")

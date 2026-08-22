@@ -33,7 +33,7 @@ sys.path.insert(0, str(ROOT))
 
 from core.providers import SherpaKeywordProvider, SherpaVadProvider  # noqa: E402
 from core.state import VoiceState  # noqa: E402
-from evox_plugin.plugin import VoicePlugin  # noqa: E402
+from vox_plugin.plugin import VoicePlugin  # noqa: E402
 from tmp_proto.tts_kws_vad import resample, synthesize  # noqa: E402
 
 KWS_DIR = ROOT / "models" / "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"

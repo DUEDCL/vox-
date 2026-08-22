@@ -1,7 +1,7 @@
 [package]
-name = "evox_voice_wake"
+name = "vox"
 version = "0.1.0"
-description = "Independent EvoX voice wake window"
+description = "Independent Vox voice wake window"
 authors = ["EvoX"]
 edition = "2021"
 

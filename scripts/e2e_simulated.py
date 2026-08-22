@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.state import VoiceState
-from evox_plugin import VoicePlugin
+from vox_plugin import VoicePlugin
 
 
 class MockTransport:

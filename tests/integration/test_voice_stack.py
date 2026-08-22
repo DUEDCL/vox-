@@ -18,7 +18,7 @@ import pytest
 
 from core.events import validate_event
 from core.state import VoiceState
-from evox_plugin import VoicePlugin
+from vox_plugin import VoicePlugin
 
 ROOT = Path(__file__).resolve().parents[2]
 KWS_DIR = ROOT / "models" / "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"

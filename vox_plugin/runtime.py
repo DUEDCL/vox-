@@ -42,7 +42,7 @@ from core.dispatch.intent import RuleBasedIntentResolver
 from core.memory import open_memory
 from core.state import VoiceState
 from core.tools import open_tools
-from evox_plugin.plugin import VoicePlugin
+from vox_plugin.plugin import VoicePlugin
 
 #: Event types the orb answers rather than merely displays.
 _ANSWERED = frozenset({"tool.confirm_required"})

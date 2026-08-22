@@ -1,4 +1,4 @@
-# EvoX Voice Wake
+# Vox
 
 Windows 平台上的 EvoX 本地语音唤醒对话原型。
 
@@ -21,7 +21,7 @@ Windows 平台上的 EvoX 本地语音唤醒对话原型。
 - `core/state.py`：严格语音状态机（idle/listening/thinking/speaking/cancelled/error）。
 - `core/providers.py`：sherpa-onnx KWS、Silero VAD、sounddevice 麦克风采集及可选 VoxCord 适配器。
 - `core/session_bridge.py`：带 Bearer Token（承载令牌）认证的 EvoX localhost HTTP 桥接。
-- `evox_plugin/plugin.py`：EvoX 插件门面，包含 start/stop/pause/resume/status/devices/diagnose/wake_test/cancel 等工具。
+- `vox_plugin/plugin.py`：EvoX 插件门面，包含 start/stop/pause/resume/status/devices/diagnose/wake_test/cancel 等工具。
 - `contracts/voice-events.schema.json`：版本 `1` 的语音事件契约。
 - `desktop/`：Tauri 2 + TypeScript + Vite 的透明置顶唤醒窗口原型。
 
@@ -57,7 +57,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe tmp_proto/t10_voice_stack_validation.py
 ```
 
-当前已记录基线：`19 passed, 2 skipped`。两个 skipped（跳过）用例依赖本机不存在的可选 VoxCord checkout（检出目录）。
+当前已记录基线：`600 passed, 3 skipped`（2026-08-16，干净 shell 下复现两次）。3 个 skipped（跳过）用例：2 个依赖本机不存在的可选 VoxCord checkout（检出目录），1 个需要创建符号链接的权限（本账户没有）。记基线前先确认 `env | grep PYTHON` 为空 —— 设了 `PYTHONUTF8` 会改变结果。
 
 ### 桌面构建
 
@@ -95,7 +95,7 @@ contracts/       版本化事件契约
 core/            状态机、语音提供器、会话桥接
 desktop/         Tauri/TypeScript 桌面窗口
 docs/            项目、架构、需求、测试、ADR 与调研文档
-evox_plugin/     EvoX 插件门面
+vox_plugin/     EvoX 插件门面
 models/          本地 KWS/VAD/TTS 模型及归档
 scripts/         冒烟与模拟端到端脚本
 tests/           Python 自动化测试

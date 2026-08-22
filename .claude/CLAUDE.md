@@ -1,4 +1,4 @@
-# EvoX Voice Wake — 项目规则
+# Vox — 项目规则
 
 全局准则见 `~/.claude/CLAUDE.md`。本文件只写本项目特有的约束。
 
@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `evox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **599 passed, 2 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **600 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -25,7 +25,7 @@
 | `core/tools/` | `pytest tests/test_tools.py tests/test_tool_security.py -q` | **123 passed, 1 skipped**（skip 是符号链接越界，本账户无权建链接） |
 | `core/memory/` | `pytest tests/test_memory.py -q` | **63 passed** |
 | 工具/记忆与语音路径接线 | `pytest tests/test_memory.py tests/test_plugin_tools.py -q` | **87 passed** |
-| `core/agents/` `config/agents.toml` | `pytest tests/test_agent_contract.py tests/test_agent_cli.py tests/test_agent_evox.py tests/test_agent_acp.py tests/test_agent_http.py -q` | 全绿（contract 14 + cli 28 + evox 17 + acp 10 + http 9） |
+| `core/agents/` `config/agents.toml` | `pytest tests/test_agent_contract.py tests/test_agent_cli.py tests/test_agent_evox.py tests/test_agent_acp.py tests/test_agent_http.py -q` | 全绿（contract 14 + cli 28 + evox 17 + acp 12 + http 9） |
 | `core/dispatch/` | `pytest tests/test_router.py tests/test_dispatcher.py tests/test_aggregator.py tests/test_intent.py tests/test_breaker.py -q` | **159 passed**（router 30 + dispatcher 37 + aggregator 20 + intent 54 + breaker 18） |
 | `core/session_bridge.py` | `pytest tests/test_session_bridge.py tests/test_plugin_tools.py -q` | 全绿 |
 | `desktop/src/` | `cd desktop && npm run build` | tsc + vite 通过 |
@@ -33,7 +33,9 @@
 
 必须用隔离环境的 `.venv\Scripts\python.exe`，不用系统 Python（系统环境没装 sherpa-onnx / soundfile）。
 
-skip 数会随环境变化（VoxCord、模型是否存在），**passed 数下降才是回归**。
+全量的 3 个 skip 构成固定：**2 个 VoxCord**（`test_provider_adapter.py`，同一个 marker，只会同时跳）+ **1 个符号链接**（`test_tool_security.py`，本账户无权建链接）。skip 数会随环境变化（VoxCord、模型是否存在），**passed 数下降才是回归**。
+
+**基线必须在干净 shell 里记。** 2026-08-16 查出 `599 passed, 2 skipped` 这个数字记错了：它是在设了 `PYTHONUTF8`（或 `PYTHONIOENCODING`）的 shell 里跑出来的，干净 shell 下当时是 `1 failed, 597 passed`。一个结果取决于环境变量的测试等于没有基线 —— 详见 `core/agents/acp.py` 的 `_UTF8_ENV`。记基线前先 `env | grep PYTHON` 确认是空的。
 
 ## 当前阶段
 
@@ -52,8 +54,10 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - **真实外部 agent 跑通一轮** —— `cli.py` 的全部测试用 mock 子进程，只算 SIM；真跑 `claude -p` 是 P9（REAL-AGENT）
 
 **已完成但容易记错的**：
-- **语音接进派发的是 `VoiceRuntime`，不是 `VoicePlugin`** —— `VoicePlugin.submit_text` 本身不走派发（门面只做状态机 + 记忆 + transport，不自造已验说话人）。`evox_plugin/runtime.py` 的 `VoiceRuntime.say()` 构造 `Dispatcher`，`submit_text` 之后 `dispatcher.dispatch()`，再 `complete_turn` 说回答案。「说一句 → 读文件」的链路已接上并有 `tests/test_runtime.py` 覆盖；`VoicePlugin.run_tool()` 仍是 opt-in 的手动入口。`_reach_listening()` 是实例方法、操作 `self.plugin`（此前是 `@staticmethod` 在操作一个丢弃的副本）
-- **P7 `acp` + `http` 适配器已实现** —— `acp.py` 讲 JSON-RPC 2.0 over stdio（initialize → session/new → session/prompt，`session/update` 流式增量）；`http.py` 讲 OpenAI Chat Completions（SSE 流式 + 非流式回退）。http 的 token 只从 `EVOX_AGENT_HTTP_TOKEN` 读，url 遵循桥接同款约束（明文 HTTP 只许回环、带凭据拒绝）。都算 SIM（mock peer / mock server），真实联调是 P9 的 REAL-AGENT
+- **语音接进派发的是 `VoiceRuntime`，不是 `VoicePlugin`** —— `VoicePlugin.submit_text` 本身不走派发（门面只做状态机 + 记忆 + transport，不自造已验说话人）。`vox_plugin/runtime.py` 的 `VoiceRuntime.say()` 构造 `Dispatcher`，`submit_text` 之后 `dispatcher.dispatch()`，再 `complete_turn` 说回答案。「说一句 → 读文件」的链路已接上并有 `tests/test_runtime.py` 覆盖；`VoicePlugin.run_tool()` 仍是 opt-in 的手动入口。`_reach_listening()` 是实例方法、操作 `self.plugin`（此前是 `@staticmethod` 在操作一个丢弃的副本）
+- **P7 `acp` + `http` 适配器已实现** —— `acp.py` 讲 JSON-RPC 2.0 over stdio（initialize → session/new → session/prompt，`session/update` 流式增量）；`http.py` 讲 OpenAI Chat Completions（SSE 流式 + 非流式回退）。http 的 token 只从 `VOX_AGENT_HTTP_TOKEN` 读，url 遵循桥接同款约束（明文 HTTP 只许回环、带凭据拒绝）。都算 SIM（mock peer / mock server），真实联调是 P9 的 REAL-AGENT
+- **ACP 子进程被强制 UTF-8，`cli.py` 故意不强制** —— 差别不是疏漏：ACP 帧**由协议规定**是 UTF-8，裸 CLI 的 stdout 没有声明编码。`acp.py` 的 `_child_env()` 注入 `_UTF8_ENV`（`PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8`），因为 Windows 上 Python 子进程默认按 ANSI 代码页（本机 cp936）编 stdout，而读侧的 `errors="replace"` 会把乱码变成夹在正常回复里的 U+FFFD —— **静默错，不是失败**。`env_passthrough` 排在注入之后，用户点名的变量仍然赢。**只对 Python 子进程有效**：非 Python 的 agent 写本地代码页照样烂，这是已记录的残留缺口。`cli.py` 的中文测试断言长度而非文本，正是这个立场的体现，不要「统一」掉
+- **`claude` 不受代码页影响，别把它当反例** —— 实测 `claude -p` 的 stdout 字节是 UTF-8（`\xc2\xb7`），Node 在 cp936 的 Windows 上照样写 UTF-8。所以默认 agent 的中文回复是好的；中招的是 Python 系子进程与原生 Windows 控制台工具（`shell.run` 读 `git`/`dir` 的中文输出同样会烂，当前 `enabled=false` + 空白名单所以够不到）
 - **记忆召回已接进派发、短期层自裁剪** —— `Dispatcher._recall_context()` 只在 agent 路径上把 `facts()` + `recent_turns()` 的文本拼进 `Task.context`（工具路径不召回，快路径保持快）；召回失败静默吞掉（记忆是增强不是前提）。`write_turn()` 每次接受写入后 `prune_turns()` 自裁剪（`short_keep=200`）。runtime 把 `session_id` 传进 `open_memory`，故 `recent_turns(session_id=...)` 能按会话匹配
 - **TTS 合成+播放已接线** —— `core/audio/playback.py` 的 `SounddevicePlayback`（sounddevice 懒加载）；`SherpaTtsProvider.speak()` = `synthesize()` + 播放（`playback` 可注入 fake，测试用）；`VoicePlugin.attach_tts()` opt-in，`complete_turn` 在 SPEAKING 与 turn.done 之间 `speak(reply)`（失败吞掉，不结束回合），`cancel()` 调 `stop()`。事件序列不变（`speak` 是副作用）。真实出声是 REAL，需扬声器在场
 - **唤醒词打断已接线** —— `wake_detected` 在 THINKING/SPEAKING 时先 `cancel()`（停 TTS + 停 transport、发 `turn.cancelled`）再进 LISTENING，返回的仍是 `[wake.detected, state.changed]`；`attach_capture` 把 capture 的 `on_wake`/`on_reject` 指到插件，capture 的 InputStream 在 speaking 期间不关，所以「说唤醒词打断正在播的回复」这条链在代码级是通的。真机打断是 REAL
@@ -86,12 +90,12 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - **唤醒球的命中区由前端量、Rust 判**。`set_ignore_cursor_events` 是**整窗开关**，没有 Electron 的 `forward` 选项，所以选择性穿透只能靠 Rust 侧 30ms 轮询光标。圆心与半径**不许写进 Rust**：它们是 CSS 布局的结果，硬编码会在下次改样式时静默漂掉
 - **`measureHitRegion()` 用 `offsetLeft`/`offsetWidth`，不用 `getBoundingClientRect()`** —— 球每帧被 rAF 写 `transform`，用渲染盒会让命中区每帧抖动、IPC 每帧都发
 - **命中判定的失败路径一律倒向「窗口吃鼠标」** —— 读不到光标/窗口位置/缩放、或前端还没上报，都当命中。反方向会让确认卡变成一张点不动的图，而点不动的确认等价于没有确认
-- **没有 `capabilities/` 文件，这是故意的** —— Tauri 2 只对 `plugin:` 前缀命令或应用自带 ACL manifest 时才查权限（`tauri-2.10.3` `webview/mod.rs:1802`）。不放反而最紧：所有 `core:*` 插件命令对前端不可达，IPC 面就是四个 `evox_*`（report_layout / start_drag / set_visible / confirm_reply）。代价是前端**永不能 import `@tauri-apps/api`**，只用 `__TAURI_INTERNALS__.invoke`
-- **Python→桌面事件通道已接线（代码级）** —— `core/desktop_bridge.py` 走父进程管道发 `{"kind":"event"|"visible"}`、收 `{"kind":"ready"|"confirm"}`；Rust 侧 `spawn_event_reader` 读 stdin 把整行原样投成 `evox-bridge` CustomEvent（`js_string_literal` 转义防注入，有测试），`evox_confirm_reply` 把确认写回 stdout；前端 `applyEnvelope` 分派 `state.changed`/`turn.*`/`llm.delta`/`task.failed`/`tool.*`，`askConfirm`→`evox_confirm_reply`。cargo test **15 passed**、npm build 通过；**真机窗口上的点击/焦点/Esc 仍未验（P10 REAL-WIN）**
-- **系统托盘已实现（`build_tray`）** —— 球是无边框 + skip_taskbar + 置顶，桌面上没有别的入口能关它，托盘是用户唯一的「显示/隐藏/退出」路径。托盘是 Rust 侧直接建的（`Menu` + `TrayIconBuilder` + `on_menu_event`），和四个 `evox_*` 命令无关，**不扩大 IPC 面**。隐藏时若挂着确认卡，Python 侧 `await_confirmation` 60s 超时落定为拒绝（fail-closed）。真机点开托盘菜单未验（REAL-WIN）
+- **没有 `capabilities/` 文件，这是故意的** —— Tauri 2 只对 `plugin:` 前缀命令或应用自带 ACL manifest 时才查权限（`tauri-2.10.3` `webview/mod.rs:1802`）。不放反而最紧：所有 `core:*` 插件命令对前端不可达，IPC 面就是四个 `vox_*`（report_layout / start_drag / set_visible / confirm_reply）。代价是前端**永不能 import `@tauri-apps/api`**，只用 `__TAURI_INTERNALS__.invoke`
+- **Python→桌面事件通道已接线（代码级）** —— `core/desktop_bridge.py` 走父进程管道发 `{"kind":"event"|"visible"}`、收 `{"kind":"ready"|"confirm"}`；Rust 侧 `spawn_event_reader` 读 stdin 把整行原样投成 `vox-bridge` CustomEvent（`js_string_literal` 转义防注入，有测试），`vox_confirm_reply` 把确认写回 stdout；前端 `applyEnvelope` 分派 `state.changed`/`turn.*`/`llm.delta`/`task.failed`/`tool.*`，`askConfirm`→`vox_confirm_reply`。cargo test **15 passed**、npm build 通过；**真机窗口上的点击/焦点/Esc 仍未验（P10 REAL-WIN）**
+- **系统托盘已实现（`build_tray`）** —— 球是无边框 + skip_taskbar + 置顶，桌面上没有别的入口能关它，托盘是用户唯一的「显示/隐藏/退出」路径。托盘是 Rust 侧直接建的（`Menu` + `TrayIconBuilder` + `on_menu_event`），和四个 `vox_*` 命令无关，**不扩大 IPC 面**。隐藏时若挂着确认卡，Python 侧 `await_confirmation` 60s 超时落定为拒绝（fail-closed）。真机点开托盘菜单未验（REAL-WIN）
 - **`.shadow(false)` 不是可选项** —— 无边框 + 透明还留投影的话，桌面上会有一块跟着球走的方形灰影
-- **拖动是自己的 `evox_start_drag` + 4px 阈值**，不是 `data-tauri-drag-region`（那条路要 `core:window:allow-start-dragging`，等于为拖窗口暴露整个 core:window）。拖完 OS 补的 `click` 只在 `detail > 0` 时吞 —— 键盘激活的 `click` 的 `detail` 是 0，连它一起吞会让球没法用键盘按
-- **`evox_set_visible(false)` 会先把挂起的确认按拒绝落定再隐藏** —— 隐藏一张挂起的确认卡等于让调用方永久挂起，而「挂起」在安全语义上等价于「未拒绝」
+- **拖动是自己的 `vox_start_drag` + 4px 阈值**，不是 `data-tauri-drag-region`（那条路要 `core:window:allow-start-dragging`，等于为拖窗口暴露整个 core:window）。拖完 OS 补的 `click` 只在 `detail > 0` 时吞 —— 键盘激活的 `click` 的 `detail` 是 0，连它一起吞会让球没法用键盘按
+- **`vox_set_visible(false)` 会先把挂起的确认按拒绝落定再隐藏** —— 隐藏一张挂起的确认卡等于让调用方永久挂起，而「挂起」在安全语义上等价于「未拒绝」
 
 ## 注意事项
 

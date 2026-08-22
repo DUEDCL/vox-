@@ -258,7 +258,7 @@ class TestPluginSink:
     """``VoicePlugin`` 的产出端。之前 `_event()` 只 append，没有第二个出口。"""
 
     def _plugin(self):
-        from evox_plugin import VoicePlugin
+        from vox_plugin import VoicePlugin
 
         seen: list[dict] = []
         return VoicePlugin(on_event=seen.append), seen
@@ -303,7 +303,7 @@ class TestPluginSink:
 
     def test_a_raising_sink_cannot_break_a_turn(self) -> None:
         # 事件流是遥测，对话才是产品。桥断了不该让说话这件事失败。
-        from evox_plugin import VoicePlugin
+        from vox_plugin import VoicePlugin
 
         def explode(_event: dict) -> None:
             raise RuntimeError("bridge is gone")
@@ -317,7 +317,7 @@ class TestPluginSink:
         assert plugin.events  # 本地记录不受影响
 
     def test_no_sink_is_still_the_default(self) -> None:
-        from evox_plugin import VoicePlugin
+        from vox_plugin import VoicePlugin
 
         plugin = VoicePlugin()
         plugin.start()

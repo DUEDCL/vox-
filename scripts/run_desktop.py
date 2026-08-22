@@ -1,6 +1,6 @@
 """Command line for ``VoiceRuntime``: one turn in, one answer out, orb watching.
 
-This is the entry point ``evox_plugin/runtime.py`` names as its command line. It
+This is the entry point ``vox_plugin/runtime.py`` names as its command line. It
 assembles the plugin, dispatcher, tools, memory and the wake orb, then drives
 turns. With no arguments it reads lines from stdin interactively; with arguments
 it runs one turn and exits. Headless is a supported mode: when the orb is not
@@ -20,13 +20,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from evox_plugin.runtime import VoiceRuntime
+from vox_plugin.runtime import VoiceRuntime
 
 
 def main() -> int:
     runtime = VoiceRuntime()
     report = runtime.start()
-    print("EvoX Voice Wake runtime")
+    print("Vox runtime")
     print(f"  desktop: {report.desktop}")
     print(f"  tools:   {', '.join(report.tools) or '(none)'}")
     print(f"  agents:  {', '.join(report.agents) or '(none)'}")

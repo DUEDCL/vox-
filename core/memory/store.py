@@ -104,7 +104,7 @@ def load_memory_config(path: str | Path | None = None) -> dict[str, Any]:
     """
     root = Path(__file__).resolve().parents[2]
     config_path = Path(
-        path or os.getenv("EVOX_MEMORY_CONFIG", root / "config" / DEFAULT_CONFIG_NAME)
+        path or os.getenv("VOX_MEMORY_CONFIG", root / "config" / DEFAULT_CONFIG_NAME)
     )
     defaults: dict[str, Any] = {
         "db_path": "memory/memory.db",
@@ -120,7 +120,7 @@ def load_memory_config(path: str | Path | None = None) -> dict[str, Any]:
         for key, value in (raw.get("memory") or {}).items():
             if key in defaults:
                 defaults[key] = value
-    for key, env in (("db_path", "EVOX_MEMORY_DB"), ("facts_dir", "EVOX_MEMORY_FACTS")):
+    for key, env in (("db_path", "VOX_MEMORY_DB"), ("facts_dir", "VOX_MEMORY_FACTS")):
         override = os.getenv(env)
         if override:
             defaults[key] = override

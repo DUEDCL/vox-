@@ -17,7 +17,7 @@
                          │  contracts/voice-events.schema.json
 ┌────────────────────────┴─────────────────────────────────┐
 │  插件门面层 Plugin Facade                                 │
-│  evox_plugin/plugin.py   VoicePlugin:EvoX 工具面 + 回合编排│
+│  vox_plugin/plugin.py   VoicePlugin:EvoX 工具面 + 回合编排│
 └──────┬──────────────────────────────┬────────────────────┘
        │                              │
 ┌──────┴───────────────┐   ┌──────────┴────────────────────┐
@@ -162,7 +162,7 @@ idle ──→ listening ──→ thinking ──→ speaking
 
 ### 4.4 `VoxCordAdapter` — 可选外部参考(本机不存在)
 
-- 动态从 `D:\program\voxcord`(可用 `EVOX_VOXCORD_ROOT` 覆盖)导入唤醒与 VAD 实现。
+- 动态从 `D:\program\voxcord`(可用 `VOX_VOXCORD_ROOT` 覆盖)导入唤醒与 VAD 实现。
 - 本机无此目录,`load()` 返回 `available: False, reason: "voxcord core not found"`。
 - 相关测试已用 `pytest.mark.skipif` 优雅跳过,**不影响发布路径**。
 
@@ -206,7 +206,7 @@ cancel(turn_id: str) -> dict
 
 响应缺 `turn_id` 视为失败;HTTPS 则不受 loopback 限制,可指向远端。
 
-## 6. 插件门面层(`evox_plugin/plugin.py`,191 行)
+## 6. 插件门面层(`vox_plugin/plugin.py`,191 行)
 
 `VoicePlugin` 是 EvoX 看到的唯一接口,dataclass 实现,持有状态机、事件列表、可选传输层与可选采集层。信封构造已下沉到 `core/events.py`,`_event()` 现在只负责调 `build_event()` 并把结果追加进 `self.events`。
 
@@ -249,14 +249,14 @@ cancel         → transport.cancel(last_turn_id) + state.changed(cancelled) + t
 | `always_on_top` | `true` | 常驻置顶 |
 | `skip_taskbar` | `true` | 不占任务栏 |
 | `focused` | `false` | **不抢焦点** |
-| `visible` | 由 `EVOX_WAKE_VISIBLE` 环境变量控制 | 默认隐藏,便于无干扰开发 |
+| `visible` | 由 `VOX_WAKE_VISIBLE` 环境变量控制 | 默认隐藏,便于无干扰开发 |
 | `resizable` | `false` | 固定尺寸 |
 
 定位逻辑:读当前显示器尺寸与 `scale_factor`,水平居中、底部上移 250 逻辑像素。**注意**:该 DPI 换算只做过 `cargo check`,真机 125%/150%/175% 缩放未验收(发布阻塞项 #5)。
 
 ### 7.2 前端(`desktop/src/main.ts` 34 行 + `style.css`)
 
-- 监听 `evox-voice-state` 自定义事件,取 `state` 与 `amplitude` 驱动渲染。
+- 监听 `vox-voice-state` 自定义事件,取 `state` 与 `amplitude` 驱动渲染。
 - 状态中文标签:待机 / 已唤醒 / 聆听中 / 思考中 / 正在回复 / 需要处理。
 - `amplitude` 钳制在 `[0.12, 1]`,写入 CSS 变量 `--amplitude`;`--phase` 由 `requestAnimationFrame` 循环推进。
 - 当前是 **CSS-only 渲染**(conic-gradient 核心 + 三层波纹环 + blur)。Canvas 2D 生产渲染器属 Phase 4(t28–t35),**尚未实现**。
@@ -318,7 +318,7 @@ Phase 4 新增的四个包。`agents` / `dispatch` 两包**只有契约与契约
 | 边界 | 谁不许知道谁 | 强制手段 |
 |---|---|---|
 | 模型推理 ↔ 音频设备 | `SherpaKeywordProvider` 不碰麦克风 | 采集逻辑独立在 `SounddeviceWakeCapture` |
-| 核心层 ↔ 插件层 | `core/` 不 import `evox_plugin/` | 单向依赖,插件层 import 核心层 |
+| 核心层 ↔ 插件层 | `core/` 不 import `vox_plugin/` | 单向依赖,插件层 import 核心层 |
 | 后端 ↔ 前端 | 前端只认事件契约 | JSON Schema + `additionalProperties: false` |
 | 语音契约 ↔ 平台契约 | 两个契约互不知道对方的类型 | 枚举互斥 + 信封同形(测试断言),归属由 `contract_for()` 查表 |
 | 业务 ↔ 会话后端 | 插件只认 `ConversationTransport` | Protocol 接口,mock 可完全替代 |

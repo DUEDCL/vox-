@@ -217,7 +217,7 @@ class DefaultRouter:
                 agent, ok=ok, latency_ms=elapsed_ms
             )
         except Exception:  # noqa: BLE001 - an audit write must not fail a turn
-            # Same posture as the memory wiring in ``evox_plugin.plugin``:
+            # Same posture as the memory wiring in ``vox_plugin.plugin``:
             # statistics are an enhancement to a turn, never a precondition
             # for one. A locked database must not be able to end a
             # conversation.

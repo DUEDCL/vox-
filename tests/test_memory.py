@@ -544,8 +544,8 @@ def test_config_defaults_are_absolute_and_inside_the_workspace():
 
 
 def test_open_memory_wires_the_three_collaborators(tmp_path, monkeypatch):
-    monkeypatch.setenv("EVOX_MEMORY_DB", str(tmp_path / "m.db"))
-    monkeypatch.setenv("EVOX_MEMORY_FACTS", str(tmp_path / "facts"))
+    monkeypatch.setenv("VOX_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("VOX_MEMORY_FACTS", str(tmp_path / "facts"))
     store, writer, recaller = open_memory()
     try:
         writer.write_fact("用户偏好中文回答")

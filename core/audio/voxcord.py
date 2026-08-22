@@ -18,7 +18,7 @@ class VoxCordAdapter:
     """
 
     def __init__(self, root: str | Path | None = None) -> None:
-        configured = root or os.getenv("EVOX_VOXCORD_ROOT") or r"D:\program\voxcord"
+        configured = root or os.getenv("VOX_VOXCORD_ROOT") or r"D:\program\voxcord"
         self.root = Path(configured)
         self.core_root = self.root / "packages" / "voxcord_core"
         self.core_lib = self.core_root / "lib"

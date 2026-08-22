@@ -331,7 +331,7 @@ class VoicePlugin:
         provider = VoxCordAdapter().load()
         root = Path(__file__).resolve().parents[1]
         kws_root = Path(os.getenv(
-            "EVOX_KWS_MODEL_DIR",
+            "VOX_KWS_MODEL_DIR",
             root / "models" / "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01",
         ))
         local_kws = SherpaKeywordProvider(kws_root)
@@ -353,8 +353,8 @@ class VoicePlugin:
                 "details": provider.details,
             },
             "bridge": {
-                "url": os.getenv("EVOX_VOICE_BRIDGE_URL", "http://localhost:8765"),
-                "token_configured": bool(os.getenv("EVOX_VOICE_BRIDGE_TOKEN")),
+                "url": os.getenv("VOX_VOICE_BRIDGE_URL", "http://localhost:8765"),
+                "token_configured": bool(os.getenv("VOX_VOICE_BRIDGE_TOKEN")),
             },
             "transport_attached": self.transport is not None,
             "capture_attached": self.audio_capture is not None,

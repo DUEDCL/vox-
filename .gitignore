@@ -23,5 +23,5 @@ enrollment/
 # 运行时产物与日志
 *.log
 .vite.pid
-.evox/
+.vox/
 tmp_proto/*.wav

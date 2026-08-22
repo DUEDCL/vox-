@@ -171,7 +171,7 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 | 设备枚举 | `.venv\Scripts\python.exe -c "import sounddevice as sd; print(sd.query_devices())"` | REAL-MIC | 列出输入设备 |
 | 麦克风冒烟 | `.venv\Scripts\python.exe scripts/acceptance/smoke_microphone.py --device 1 --duration 3` | REAL-MIC | `audio_saved: false` |
 | 真机唤醒 | `.venv\Scripts\python.exe scripts/acceptance/live_wake.py --duration 45 --device 1` | REAL-MIC | `WAKE HIT` |
-| 诊断 | `.venv\Scripts\python.exe -c "from evox_plugin import VoicePlugin; import json; print(json.dumps(VoicePlugin().diagnose(), ensure_ascii=False, indent=2))"` | AUTO | 不含 token 内容 |
+| 诊断 | `.venv\Scripts\python.exe -c "from vox_plugin import VoicePlugin; import json; print(json.dumps(VoicePlugin().diagnose(), ensure_ascii=False, indent=2))"` | AUTO | 不含 token 内容 |
 | 前端构建 | `cd desktop; npm run build` | AUTO | tsc + vite 通过 |
 | Rust 检查 | `cd desktop/src-tauri; cargo check` | AUTO | 零警告 |
 | 渲染路线原型 | 起 http server 后驱动 `window.__SPIKE__` | SIM | 三路线 FPS 数据 |

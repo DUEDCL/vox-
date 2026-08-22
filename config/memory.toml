@@ -1,9 +1,9 @@
 # 记忆系统配置(ADR 004:SQLite + FTS5,单文件,不做向量检索)
 #
 # 路径相对仓库根解析。可用环境变量覆盖:
-#   EVOX_MEMORY_CONFIG  本文件的位置
-#   EVOX_MEMORY_DB      数据库文件
-#   EVOX_MEMORY_FACTS   中期事实的 Markdown 目录
+#   VOX_MEMORY_CONFIG  本文件的位置
+#   VOX_MEMORY_DB      数据库文件
+#   VOX_MEMORY_FACTS   中期事实的 Markdown 目录
 #
 # 记忆库只存文本 —— 音频永不入库(红线 1),疑似凭据的文本整条拒绝而不是打码。
 

@@ -12,6 +12,8 @@ completing one turn through this adapter is REAL-AGENT and is still owed
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 
 import pytest
@@ -73,9 +75,49 @@ def test_the_handshake_streams_text_and_echoes_the_prompt():
 
 
 def test_a_chinese_prompt_crosses_the_process_boundary_intact():
+    """ACP frames are UTF-8 by protocol, so text -- not just length -- must
+    survive both directions. This passed only under an ambient ``PYTHONUTF8``
+    before: a Python child on Windows encodes stdout with the ANSI code page
+    (cp936 here), and the adapter's ``errors="replace"`` read turned that into
+    U+FFFD instead of an error. The adapter now forces UTF-8 on the child, so
+    the assertion holds in a clean shell too."""
     chunks = list(agent(ACP_ECHO).stream(task("讲个笑话")))
 
     assert spoken(chunks).strip() == "hello 讲个笑话"
+
+
+def test_the_child_is_told_to_speak_utf8_regardless_of_the_host_code_page():
+    """The guard for the test above: assert the mechanism, not just the effect.
+    Without this, someone removes ``_UTF8_ENV`` and the Chinese test starts
+    depending on the shell again -- passing on the machine that set the variable
+    and failing on the one that did not."""
+    probe = "import sys; print(sys.stdout.encoding)"
+    env = AcpAgentAdapter(name="mock", command=sys.executable)._child_env()
+
+    assert env["PYTHONUTF8"] == "1"
+    assert env["PYTHONIOENCODING"] == "utf-8"
+
+    resolved = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+    )
+    assert resolved.stdout.strip().lower() == "utf-8"
+
+
+def test_an_explicit_passthrough_still_wins_over_the_forced_encoding():
+    """``env_passthrough`` is the user naming a variable on purpose; a default
+    this module chose must not override it."""
+    os.environ["PYTHONIOENCODING"] = "latin-1"
+    try:
+        adapter = AcpAgentAdapter(
+            name="mock", command=sys.executable, env_passthrough=("PYTHONIOENCODING",)
+        )
+        assert adapter._child_env()["PYTHONIOENCODING"] == "latin-1"
+    finally:
+        os.environ.pop("PYTHONIOENCODING", None)
 
 
 def test_context_lines_are_rendered_into_the_prompt():

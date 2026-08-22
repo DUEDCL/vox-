@@ -109,7 +109,7 @@ def load_tools_config(path: str | Path | None = None) -> dict[str, Any]:
     """
     root = workspace_root()
     config_path = Path(
-        path or os.getenv("EVOX_TOOLS_CONFIG", root / "config" / DEFAULT_CONFIG_NAME)
+        path or os.getenv("VOX_TOOLS_CONFIG", root / "config" / DEFAULT_CONFIG_NAME)
     )
     config = {section: dict(values) for section, values in DEFAULTS.items()}
     if not config_path.is_file():

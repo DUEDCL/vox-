@@ -1,0 +1,26 @@
+name: AI collaboration contract
+
+on:
+  pull_request:
+    paths:
+      - ".ai/**"
+      - ".github/**"
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "scripts/ai/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate AI handoff artifacts
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate contract
+        shell: pwsh
+        run: .\scripts\ai\validate-contract.ps1

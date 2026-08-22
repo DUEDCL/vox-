@@ -190,7 +190,7 @@ Enrolled a 120 Hz harmonic stack (7 partials + noise), verified a 240 Hz one —
 - `core/audio/ring.py` — 3 s in-memory ring buffer (~192 KB @16 kHz float32). Red line 1's literal enforcement point: an AST test asserts the module imports nothing beyond `numpy`/`typing` and references no filesystem, socket, or subprocess name.
 - `core/audio/capture.py` — gate wired at the KWS hit (ADR 002 option A). Preconditions checked **before** the device opens; every fail-closed branch raises.
 - `core/audio/speaker.py` — `load_speaker_config()` + `from_config()` over `config/speaker.toml` via stdlib `tomllib`. Paths deliberately stay on environment variables so a checked-in config can never point at somebody's enrollment data.
-- `evox_plugin/plugin.py` — `wake_rejected()` (no state transition, no reply) and `_diagnose_speaker()` (names and counts only, never a vector; explicit `warnings` when the gate is off).
+- `vox_plugin/plugin.py` — `wake_rejected()` (no state transition, no reply) and `_diagnose_speaker()` (names and counts only, never a vector; explicit `warnings` when the gate is off).
 - `scripts/enroll_speaker.py` — interactive Chinese-prompted enrollment, append-only, audio never written anywhere.
 - Suite: **67 passed, 2 skipped** (was 43 at the end of P0; 19 privacy/fail-closed tests plus 5 model-gated integration tests added).
 
@@ -267,7 +267,7 @@ The gate was written before any tool that needs it, and the refusal matrix was w
 | `core/tools/runner.py` | 171 lines — the single funnel: gate → tool → `tool.*` events → audit row |
 | `core/tools/web.py` / `shell.py` / `fs.py` / `contract.py` / `__init__.py` | 120 / 115 / 76 / 80 / 85 lines (992 total for the package) |
 | `config/tools.toml` | 53 lines, `[shell] enabled = false` as shipped |
-| `evox_plugin/plugin.py` | 413 lines (was 326): `attach_tools()`, `run_tool()`, `diagnose()["tools"]` |
+| `vox_plugin/plugin.py` | 413 lines (was 326): `attach_tools()`, `run_tool()`, `diagnose()["tools"]` |
 | `tests/test_tools.py` | 460 lines, **35 passed** |
 | `tests/test_tool_security.py` | 555 lines, **89 collected — 88 passed, 1 skipped** |
 | Both tool files together | **123 passed, 1 skipped in 0.48 s** |
@@ -326,13 +326,53 @@ The gap cases are the point of the whole design: a naive bounding box would leav
 
 **Failure paths deliberately fail *open* (window eats the mouse).** If the cursor read, window position, or scale factor fails, or no region has been reported yet, the region is treated as "inside". The reverse looks politer but turns the tool-confirmation card into an un-clickable picture, and a confirmation nobody can click is equivalent to no confirmation. A ~200 px square blocking the desktop is recoverable; a dead Allow button is not.
 
-Also closed this session: `.shadow(false)` (a transparent undecorated Windows window otherwise draws a rectangular grey halo that tracks the orb), window size following the reported content box clamped into `monitor.work_area()`, drag via an own `evox_start_drag` command behind a 4 px threshold (with the OS-synthesised trailing `click` swallowed only when `event.detail > 0`, so keyboard activation still fires), and runtime show/hide via `evox_set_visible` — which settles any pending confirmation as **denied** and collapses the panel before hiding.
+Also closed this session: `.shadow(false)` (a transparent undecorated Windows window otherwise draws a rectangular grey halo that tracks the orb), window size following the reported content box clamped into `monitor.work_area()`, drag via an own `vox_start_drag` command behind a 4 px threshold (with the OS-synthesised trailing `click` swallowed only when `event.detail > 0`, so keyboard activation still fires), and runtime show/hide via `vox_set_visible` — which settles any pending confirmation as **denied** and collapses the panel before hiding.
 
-**No capabilities file, deliberately.** Tauri 2 checks the ACL only for `plugin:`-prefixed commands or when the app ships its own ACL manifest (`tauri-2.10.3` `webview/mod.rs:1802`; the generated `acl-manifests.json` has no `app` key). Shipping none is the tightest posture available: every `core:*` plugin command is unreachable from the webview and the entire IPC surface is the three `evox_*` commands. The cost is that the frontend must never `import` `@tauri-apps/api` — it calls `__TAURI_INTERNALS__.invoke` directly and degrades silently to a no-op in a browser, which is what makes the SIM tests above runnable at all.
+**No capabilities file, deliberately.** Tauri 2 checks the ACL only for `plugin:`-prefixed commands or when the app ships its own ACL manifest (`tauri-2.10.3` `webview/mod.rs:1802`; the generated `acl-manifests.json` has no `app` key). Shipping none is the tightest posture available: every `core:*` plugin command is unreachable from the webview and the entire IPC surface is the three `vox_*` commands. The cost is that the frontend must never `import` `@tauri-apps/api` — it calls `__TAURI_INTERNALS__.invoke` directly and degrades silently to a no-op in a browser, which is what makes the SIM tests above runnable at all.
 
 CSP widened to `default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost`. Without it IPC still works — `ipc-protocol.js` falls back from `fetch` to `window.ipc.postMessage` — but logs a warning on the first invoke.
 
 **Nothing here is REAL-WIN.** `cargo check` is AUTO and the click-through table is SIM. Whether the click-through actually feels right, whether the shadow is really gone, whether drag tracks the cursor, and whether the DPI conversion holds at 125% / 150% / 175% all need the window on screen (发布阻塞项 #5).
+
+## Session 2026-08-16 (subprocess encoding — AUTO, and a REAL-AGENT attempt that failed)
+
+### A real defect, found by re-running the claimed baseline in a clean shell
+
+`docs/handoff.md` and `.claude/CLAUDE.md` both recorded `599 passed, 2 skipped`. In a shell with no `PYTHON*` variables set the actual result was **`1 failed, 597 passed, 3 skipped`**. The failure:
+
+```
+tests/test_agent_acp.py::test_a_chinese_prompt_crosses_the_process_boundary_intact
+assert 'hello 讲个笑话' == 'hello ����Ц��'
+```
+
+Left side (what came back from the child) was correct; the right side is the *expected* literal rendered through the console code page. The test file's bytes on disk are clean UTF-8 — verified byte-by-byte, both literals are `\xe8\xae\xb2\xe4\xb8\xaa\xe7\xac\x91\xe8\xaf\x9d`. So this was **not** the known "console mojibake is a display artifact" case: two Python `str` objects genuinely differed.
+
+Root cause, measured rather than reasoned: a child `python -c` reports `sys.stdin.encoding sys.stdout.encoding` as **`gbk gbk`**. `Popen(encoding="utf-8")` binds only the *parent's* codecs. The child encodes its stdout with the ANSI code page (cp936 on this host), the parent decodes as UTF-8, and because the read side passes `errors="replace"` the result is U+FFFD sitting inside an otherwise valid reply — **silently wrong, never an error**. Setting either `PYTHONUTF8=1` or `PYTHONIOENCODING=utf-8` made the same file pass 10/10, which is what proves the mechanism *and* what made the old baseline unreproducible: it was recorded in a shell that happened to have one of them set.
+
+### Scope, measured per spawn site
+
+| Site | Prompt in | Reply out | Affected? |
+|---|---|---|---|
+| `cli.py` | argv (Windows argv is UTF-16, never the code page) | child's stdout codec | **only the reply**, and only for children that use the ANSI page |
+| `acp.py` | stdin, parent writes UTF-8 | child's stdout codec | **both directions** for a Python child |
+| `shell.py` | argv | child's stdout codec | reply only (`enabled=false` + empty allow-list today) |
+| `desktop_bridge.py` | stdin | Rust child, writes UTF-8 | no |
+
+`claude` is **not** affected: its stdout bytes for a non-ASCII reply are `\xc2\xb7` (UTF-8 `·`), i.e. Node writes UTF-8 on a cp936 Windows regardless. Decoded as gbk the same bytes give `路`. So the configured default agent's Chinese replies were never at risk; Python-based children and native Windows console tools are.
+
+### The fix, and the half of it that is not fixable
+
+`acp.py` now forces `PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8` on the child (`_UTF8_ENV`), placed *before* `env_passthrough` so a variable the user named on purpose still wins. The justification is protocol-level, not cosmetic: **ACP frames are UTF-8 by specification**, so a peer emitting cp936 JSON is non-conforming and the adapter is entitled to say so.
+
+`cli.py` deliberately keeps the opposite stance, which was already written into its test docstring — a bare CLI's stdout has no declared encoding, so its Chinese test asserts *length* (`"4"`), not text. Two sibling adapters taking opposite positions looked like an inconsistency and is actually the correct distinction; both docstrings now say why, so the next reader does not "unify" them.
+
+**Not fixable from this side:** a non-Python child that writes the local code page. No environment variable can instruct an arbitrary program to change its stdout codec. Recorded in `handoff.md` §5 rather than smoothed over.
+
+Result: **600 passed, 3 skipped**, identical in a clean shell and under `PYTHONUTF8=1`. Verified the two new tests actually bite by deleting `env.update(_UTF8_ENV)` and confirming both go red (2 failed, 10 passed) before restoring it.
+
+### REAL-AGENT attempted and blocked — evidence not obtained
+
+`claude` is on PATH (2.1.223), so the CLI adapter's SIM-only status looked upgradable without a microphone. It is not, on this host: invoked as a child process, `claude -p <prompt>` returns **`Not logged in · Please run /login`** and exits 1. A nested invocation does not inherit the parent session's credentials. So `agents/cli.py` remains **SIM**. This is "attempted and blocked by login state", not "not yet tried" — the distinction matters for whoever picks up P9.
 
 ## Not yet verified
 
@@ -343,6 +383,7 @@ CSP widened to `default-src 'self'; style-src 'self' 'unsafe-inline'; connect-sr
 - Separate always-on-top, skip-taskbar wake window (defined and compiling, not visually accepted).
 - Wake-orb click-through, shadow suppression, drag, and DPI conversion at 125% / 150% / 175% — all SIM/AUTO only, REAL-WIN pending (P10).
 - The Python→desktop event path. `main.rs` has no `emit` and the frontend listens to DOM `CustomEvent`s; nothing in Python drives the orb yet.
+- A real external agent completing one turn (REAL-AGENT). **Attempted 2026-08-16 and blocked** by nested-invocation login state — see the session note above.
 
 ## Blockers
 

@@ -78,7 +78,7 @@ class Dispatcher:
 
     ``router``, ``aggregator``, and ``resolver`` are injected. ``tool_runner``
     is optional and opt-in, matching the memory and tools wiring in
-    ``evox_plugin.plugin``: without it, a tool-shaped utterance falls through
+    ``vox_plugin.plugin``: without it, a tool-shaped utterance falls through
     to an agent rather than failing, because an agent can still answer
     「读一下 config.toml」by other means.
     """

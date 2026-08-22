@@ -28,7 +28,7 @@ from core.audio import (
     SpeakerVerificationProvider,
 )
 from core.audio.speaker import load_speaker_config
-from evox_plugin import VoicePlugin
+from vox_plugin import VoicePlugin
 
 ROOT = Path(__file__).resolve().parents[1]
 

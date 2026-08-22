@@ -1,6 +1,6 @@
 # agent 后端注册表(ADR 003:契约在前,后端在后)
 #
-# 可用环境变量覆盖本文件位置:EVOX_AGENTS_CONFIG
+# 可用环境变量覆盖本文件位置:VOX_AGENTS_CONFIG
 # 形状由 contracts/agents.schema.json 校验。未知键、放错 kind 的键、重名
 # 都会**报错**而不是被忽略 —— 一个「看起来配置了但其实没接上」的 agent
 # 比一个缺失的 agent 更难查。
@@ -11,7 +11,7 @@
 # 值仍然只从环境变量读。
 #
 # kind 四种:cli 与 evox(P5)、acp 与 http(P7)都已实现。
-# http 的 token 只从环境变量 EVOX_AGENT_HTTP_TOKEN 读(本文件没有放密钥的键);
+# http 的 token 只从环境变量 VOX_AGENT_HTTP_TOKEN 读(本文件没有放密钥的键);
 # http 的 url 遵循与 EvoX 桥接相同的约束:明文 HTTP 只许回环地址、URL 带凭据一律拒绝。
 #
 # capabilities 目前是自由词表:路由规则在 P6 才定义,此刻它只是给
@@ -60,7 +60,7 @@ timeout_s = 180.0
 [[agents]]
 name = "evox"
 kind = "evox"
-# 需要 EVOX_VOICE_BRIDGE_TOKEN 与一个在跑的本地会话桥,所以默认关闭。
+# 需要 VOX_VOICE_BRIDGE_TOKEN 与一个在跑的本地会话桥,所以默认关闭。
 # 打开后 url 可在此覆盖(仍受 session_bridge 的回环校验约束:
 # 非 https 只许 loopback,URL 里带凭据一律拒绝)。
 enabled = false
@@ -83,4 +83,4 @@ name = "openclaw"
 kind = "http"
 enabled = false
 url = "http://127.0.0.1:18789/v1"
-# model = "claude"  # 需要指定模型时取消注释;token 来自 EVOX_AGENT_HTTP_TOKEN
+# model = "claude"  # 需要指定模型时取消注释;token 来自 VOX_AGENT_HTTP_TOKEN

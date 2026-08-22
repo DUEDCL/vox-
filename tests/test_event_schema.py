@@ -2,7 +2,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from evox_plugin import VoicePlugin
+from vox_plugin import VoicePlugin
 
 
 def test_generated_events_match_required_schema_shape():

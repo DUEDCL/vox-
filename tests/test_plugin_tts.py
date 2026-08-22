@@ -11,7 +11,7 @@ Evidence level: AUTO (fake TTS engine, no speaker, no model).
 from __future__ import annotations
 
 from core.state import VoiceState
-from evox_plugin import VoicePlugin
+from vox_plugin import VoicePlugin
 
 
 class FakeTts:

@@ -86,7 +86,7 @@ def config_path(path: str | Path | None = None) -> Path:
     return Path(
         path
         or os.getenv(
-            "EVOX_AGENTS_CONFIG", workspace_root() / "config" / DEFAULT_CONFIG_NAME
+            "VOX_AGENTS_CONFIG", workspace_root() / "config" / DEFAULT_CONFIG_NAME
         )
     )
 

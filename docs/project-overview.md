@@ -6,7 +6,7 @@
 
 ## 1. 项目是什么
 
-**EvoX Voice Wake** 是面向 Windows 的**开放式语音唤醒对话平台**。目标交互链路:
+**Vox** 是面向 Windows 的**开放式语音唤醒对话平台**。目标交互链路:
 
 ```
 说出唤醒词 → 声纹确认是本人 → 唤醒球弹出 → 本地识别语音
@@ -180,11 +180,11 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 记忆配置 | `config/memory.toml` | 23 | 库路径、事实目录、召回上限、短期保留数 |
 | 本地工具 | `core/tools/`(`contract`/`policy`/`fs`/`web`/`shell`/`runner`/`__init__`) | 992 | 一道门两个来源、13 条不可配置的硬拦截、审计落长期层 |
 | 工具配置 | `config/tools.toml` | 53 | 沙箱根、拒读名单、`shell.enabled = false`(出厂即关) |
-| 插件门面 | `evox_plugin/plugin.py` | 413 | EvoX 工具面 + 回合编排 + 声纹诊断 + 记忆接线 + 工具接线 |
+| 插件门面 | `vox_plugin/plugin.py` | 413 | EvoX 工具面 + 回合编排 + 声纹诊断 + 记忆接线 + 工具接线 |
 | 声纹配置 | `config/speaker.toml` | 28 | 阈值与时长下限,`tomllib` 读 |
 | 录入 CLI | `scripts/enroll_speaker.py` | 125 | 交互式录入,音频不落盘 |
 | 前端 | `desktop/src/main.ts` + `style.css` + `index.html` | 1076 | 六态唤醒球、展开态流式文本、工具确认卡(含命令原文)、命中区上报 |
-| 窗口 | `desktop/src-tauri/src/main.rs` | 329 | 透明、置顶、无投影、不占任务栏;三个 `evox_*` IPC + 30 ms 光标轮询的选择性穿透 |
+| 窗口 | `desktop/src-tauri/src/main.rs` | 329 | 透明、置顶、无投影、不占任务栏;三个 `vox_*` IPC + 30 ms 光标轮询的选择性穿透 |
 | 测试 | `tests/*.py` + `tests/integration/` | 5749 | 521 用例(518 passed + 3 skipped),见 [测试文档](testing.md) |
 
 ## 5. 进行中 / 下一步
@@ -209,7 +209,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 
 **尚余的接线缺口(有代码但没有接线人)**:
 - `Dispatcher` 已由 `VoiceRuntime.say()` 构造并接进语音路径(`submit_text` → `dispatch` → `complete_turn`);记忆召回文本也已由 `Dispatcher._recall_context()` 拼进 `Task.context`,`write_turn()` 自裁剪(`prune_turns`)
-- Python→桌面事件通道 —— 三层已接上:Python `desktop_bridge`(管道) → Rust `spawn_event_reader`(stdin→`evox-bridge`) → 前端 `applyEnvelope`/`askConfirm`;确认应答走 `evox_confirm_reply` 回 stdout。**编译+单测已过(npm build、cargo test 15 passed),真机窗口上的点击/焦点/Esc 仍待 P10 REAL-WIN**
+- Python→桌面事件通道 —— 三层已接上:Python `desktop_bridge`(管道) → Rust `spawn_event_reader`(stdin→`vox-bridge`) → 前端 `applyEnvelope`/`askConfirm`;确认应答走 `vox_confirm_reply` 回 stdout。**编译+单测已过(npm build、cargo test 15 passed),真机窗口上的点击/焦点/Esc 仍待 P10 REAL-WIN**
 - `web.search` 无真实后端(每个托管 API 都是带 key 的云依赖,红线 1)
 
 ## 6. 发布阻塞项(release blockers)

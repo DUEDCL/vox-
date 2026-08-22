@@ -1,4 +1,4 @@
-"""EvoX voice bridge core."""
+"""Vox voice bridge core."""
 
 from .state import VoiceState, VoiceStateMachine
 

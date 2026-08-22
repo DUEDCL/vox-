@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! EvoX Voice Wake —— 唤醒球的宿主窗口。
+//! Vox —— 唤醒球的宿主窗口。
 //!
 //! 这里只做浏览器做不到、必须落在 OS 层的五件事：
 //!   1. 无边框 + 透明 + 置顶，并关掉 Windows 给无边框窗口画的方形投影；
@@ -13,13 +13,13 @@
 //! 因此本 crate **不需要 capabilities 文件**：Tauri 2 只对 `plugin:` 前缀的命令、
 //! 或应用自带 ACL manifest 时才查权限（tauri-2.10.3 `webview/mod.rs:1802`）。
 //! 不放 capabilities 反而是更紧的姿态 —— 所有 core 插件命令对前端一律不可达，
-//! IPC 面就是下面这四个 `evox_*`。
+//! IPC 面就是下面这四个 `vox_*`。
 //!
 //! 事件通道走**父进程的管道，不是回环端口**。工具确认卡的答复决定 `shell.run`
 //! 跑不跑；开一个本地端口等于让机器上任何进程都能替用户按「允许」。管道只有
 //! spawn 我们的那个父进程够得着，而且不需要绑端口、发 token、写回环校验。
 //!
-//! Rust 侧**不认识事件类型**：整个信封原样投给前端的 `evox-bridge`。
+//! Rust 侧**不认识事件类型**：整个信封原样投给前端的 `vox-bridge`。
 //! 契约里加一种事件不该需要改 Rust —— 那种耦合的表现是「新事件在 UI 上静默消失」。
 
 
@@ -102,19 +102,19 @@ struct Layout(Mutex<Option<HitRegion>>);
 /* ============ IPC 命令 ============ */
 
 #[tauri::command]
-fn evox_report_layout(region: HitRegion, window: WebviewWindow, layout: tauri::State<'_, Layout>) {
+fn vox_report_layout(region: HitRegion, window: WebviewWindow, layout: tauri::State<'_, Layout>) {
     // 先落尺寸再存命中区：反过来会有一帧拿新命中区去测旧窗口
     resize_to(&window, region.width, region.height);
     *layout.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(region);
 }
 
 #[tauri::command]
-fn evox_start_drag(window: WebviewWindow) {
+fn vox_start_drag(window: WebviewWindow) {
     let _ = window.start_dragging();
 }
 
 #[tauri::command]
-fn evox_set_visible(window: WebviewWindow, visible: bool) {
+fn vox_set_visible(window: WebviewWindow, visible: bool) {
     let _ = if visible { window.show() } else { window.hide() };
 }
 
@@ -123,7 +123,7 @@ fn evox_set_visible(window: WebviewWindow, visible: bool) {
 /// 用信封 id 而不是新造一个关联字段：平台契约的 `additionalProperties: false`
 /// 本来就不允许多一个键，而信封 id 已经唯一。
 #[tauri::command]
-fn evox_confirm_reply(id: String, approved: bool) {
+fn vox_confirm_reply(id: String, approved: bool) {
     write_line(&format!(
         "{{\"kind\":\"confirm\",\"id\":{},\"approved\":{}}}",
         js_string_literal(&id),
@@ -179,7 +179,7 @@ fn script_for_line(line: &str) -> Option<String> {
     }
     let literal = js_string_literal(text);
     Some(format!(
-        "window.dispatchEvent(new CustomEvent('evox-bridge',{{detail:JSON.parse({})}}))",
+        "window.dispatchEvent(new CustomEvent('vox-bridge',{{detail:JSON.parse({})}}))",
         literal
     ))
 }
@@ -312,7 +312,7 @@ fn spawn_hit_test(app: tauri::AppHandle) {
 /// 球是无边框 + skip_taskbar + 置顶，桌面上没有别的入口能关它。托盘是用户唯一的
 /// 「显示/隐藏/退出」路径：没有它，退出这个进程只能去任务管理器。
 ///
-/// 托盘菜单是 Rust 侧直接建的，和四个 `evox_*` 命令无关，因此**不扩大 IPC 面**：
+/// 托盘菜单是 Rust 侧直接建的，和四个 `vox_*` 命令无关，因此**不扩大 IPC 面**：
 /// 前端仍然够不到托盘。
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let toggle = MenuItem::with_id(app, "toggle", "显示 / 隐藏", true, None::<&str>)?;
@@ -320,7 +320,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&toggle, &quit])?;
     TrayIconBuilder::with_id("wake-tray")
         .icon(app.default_window_icon().cloned().expect("app icon must be bundled"))
-        .tooltip("EvoX Voice Wake")
+        .tooltip("Vox")
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "toggle" => {
@@ -343,15 +343,15 @@ fn main() {
     tauri::Builder::default()
         .manage(Layout::default())
         .invoke_handler(tauri::generate_handler![
-            evox_report_layout,
-            evox_start_drag,
-            evox_set_visible,
-            evox_confirm_reply
+            vox_report_layout,
+            vox_start_drag,
+            vox_set_visible,
+            vox_confirm_reply
         ])
         .setup(|app| {
             let wake =
                 WebviewWindowBuilder::new(app, WAKE_LABEL, WebviewUrl::App("index.html".into()))
-                    .title("EvoX Voice Wake")
+                    .title("Vox")
                     .inner_size(INIT_W, INIT_H)
                     .resizable(false)
                     .decorations(false)
@@ -361,7 +361,7 @@ fn main() {
                     .always_on_top(true)
                     .skip_taskbar(true)
                     .focused(false)
-                    .visible(std::env::var_os("EVOX_WAKE_VISIBLE").is_some())
+                    .visible(std::env::var_os("VOX_WAKE_VISIBLE").is_some())
                     .build()?;
             wake.set_ignore_cursor_events(false)?;
             place_initially(&wake);
@@ -373,7 +373,7 @@ fn main() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("failed to run EvoX voice wake window");
+        .expect("failed to run Vox voice wake window");
 }
 
 #[cfg(test)]
@@ -511,7 +511,7 @@ mod tests {
     #[test]
     fn an_envelope_reaches_one_frontend_event() {
         let script = script_for_line(r#"{"kind":"event","event":{"type":"task.done"}}"#).unwrap();
-        assert!(script.contains("evox-bridge"));
+        assert!(script.contains("vox-bridge"));
         assert!(script.contains("JSON.parse"));
         // Rust 不认识事件类型：类型名只作为数据出现，不参与分派
         assert!(!script.contains("if"));

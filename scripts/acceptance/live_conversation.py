@@ -35,7 +35,7 @@ from core.audio import (
     SounddeviceWakeCapture,
     SpeakerVerificationProvider,
 )
-from evox_plugin.runtime import VoiceRuntime
+from vox_plugin.runtime import VoiceRuntime
 
 KWS_DIR = ROOT / "models" / "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
 ASR_DIR = ROOT / "models" / "sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23"

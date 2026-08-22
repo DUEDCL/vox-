@@ -1,6 +1,6 @@
 import './style.css';
 
-/* EvoX Voice Wake — main.ts
+/* Vox — main.ts
    六态球体 + 流式回复 + 工具确认卡(FR-6.13)。
    测试钩子保持兼容现有 SIM 测试。 */
 
@@ -44,7 +44,7 @@ function setState(next: string, amplitude = 0.35) {
   app.dataset.state = next;
   app.style.setProperty('--amplitude', String(Math.max(0.12, Math.min(1, amplitude))));
   status.textContent = labels[next] ?? next;
-  orb.setAttribute('aria-label', `EvoX 状态: ${labels[next] ?? next}`);
+  orb.setAttribute('aria-label', `Vox 状态: ${labels[next] ?? next}`);
 
   // 一次性动作：进入时放一次
   if (next === 'cancelled' && prev !== 'cancelled') {
@@ -240,7 +240,7 @@ function reportLayout(force = false) {
   if (!force && key === lastLayoutKey) return region;   // 不变就不喊，避免每帧过 IPC
   lastLayoutKey = key;
   lastRegion = region;
-  bridgeInvoke('evox_report_layout', {region});
+  bridgeInvoke('vox_report_layout', {region});
   return region;
 }
 
@@ -276,7 +276,7 @@ window.addEventListener('pointermove', (ev) => {
   dragged = true;
   // start_dragging 之后鼠标被 OS 接管，webview 收不到 pointerup，所以在这儿就地清账
   dragOrigin = null;
-  bridgeInvoke('evox_start_drag', {});
+  bridgeInvoke('vox_start_drag', {});
 });
 
 window.addEventListener('pointerup', () => { dragOrigin = null; });
@@ -313,7 +313,7 @@ orb.addEventListener('click', (ev) => {
   }
 
   // 事件桥接：点击可切态（测试用途）
-  window.dispatchEvent(new CustomEvent('evox-orb-click', {detail: {state}}));
+  window.dispatchEvent(new CustomEvent('vox-orb-click', {detail: {state}}));
 });
 
 /* ============ 眨眼 ============
@@ -407,20 +407,20 @@ function loop() {
 }
 
 /* ============ 与后端的桥 ============
-   后端（或 SIM 测试）只需派发 evox-voice-state 事件，前端不关心它从哪来。 */
-window.addEventListener('evox-voice-state', (ev) => {
+   后端（或 SIM 测试）只需派发 vox-voice-state 事件，前端不关心它从哪来。 */
+window.addEventListener('vox-voice-state', (ev) => {
   const d = (ev as CustomEvent).detail ?? {};
   if (typeof d.state === 'string') setState(d.state, typeof d.amplitude === 'number' ? d.amplitude : 0.35);
 });
 
-window.addEventListener('evox-reply-start', () => startReply());
-window.addEventListener('evox-reply-chunk', (ev) => {
+window.addEventListener('vox-reply-start', () => startReply());
+window.addEventListener('vox-reply-chunk', (ev) => {
   const d = (ev as CustomEvent).detail ?? {};
   if (typeof d.text === 'string') appendReplyChunk(d.text);
 });
-window.addEventListener('evox-reply-end', () => endReply());
+window.addEventListener('vox-reply-end', () => endReply());
 
-/* 运行时显隐。此前可见性由 `EVOX_WAKE_VISIBLE` 在启动时静态决定，隐藏后没有回来的路。
+/* 运行时显隐。此前可见性由 `VOX_WAKE_VISIBLE` 在启动时静态决定，隐藏后没有回来的路。
    隐藏前先收面板：下次显示时若停在展开态，会先闪一帧大窗口再缩回去。 */
 function setVisible(visible: boolean) {
   if (!visible) {
@@ -428,15 +428,15 @@ function setVisible(visible: boolean) {
     confirmCard.hidden = true;
     collapse();
   }
-  bridgeInvoke('evox_set_visible', {visible});
+  bridgeInvoke('vox_set_visible', {visible});
 }
-window.addEventListener('evox-set-visible', (ev) => {
+window.addEventListener('vox-set-visible', (ev) => {
   const d = (ev as CustomEvent).detail ?? {};
   setVisible(d.visible !== false);
 });
 
 /* ============ 事件信封 -> 界面(P8 接线) ============
-   Rust 侧把 stdin 收到的整行原样投成 `evox-bridge`，**不解析类型**。
+   Rust 侧把 stdin 收到的整行原样投成 `vox-bridge`，**不解析类型**。
    契约里加一种事件不该需要改 Rust，所以类型分派落在这里 —— UI 语义在的地方。
 
    只处理界面真的有位置显示的那几种。剩下的（memory.* / agent.* / tool.requested）
@@ -489,11 +489,11 @@ function askConfirm(env: Envelope, p: Record<string, unknown>): void {
   const tool = typeof p.tool === 'string' ? p.tool : '';
   const reason = [tool, origin && `来自 ${origin}`].filter(Boolean).join(' · ');
   showConfirm(cmd, reason).then((approved) => {
-    bridgeInvoke('evox_confirm_reply', {id, approved});
+    bridgeInvoke('vox_confirm_reply', {id, approved});
   });
 }
 
-window.addEventListener('evox-bridge', (ev) => {
+window.addEventListener('vox-bridge', (ev) => {
   const msg = (ev as CustomEvent).detail ?? {};
   if (msg.kind === 'event' && msg.event && typeof msg.event === 'object') {
     applyEnvelope(msg.event as Envelope);

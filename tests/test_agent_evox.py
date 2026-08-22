@@ -164,7 +164,7 @@ def test_a_refused_cancel_is_counted_not_raised():
 @pytest.mark.parametrize(
     "base_url, token, expected",
     [
-        ("http://localhost:8765", "", "EVOX_VOICE_BRIDGE_TOKEN is required"),
+        ("http://localhost:8765", "", "VOX_VOICE_BRIDGE_TOKEN is required"),
         ("http://example.com", "secret", "loopback"),
         ("http://user:pass@localhost:8765", "secret", "must not contain credentials"),
     ],
@@ -204,7 +204,7 @@ def test_check_names_the_missing_variable():
     report = EvoXAgentAdapter(LocalEvoXTransport("http://localhost:8765", "")).check()
 
     assert report["available"] is False
-    assert report["reason"] == "EVOX_VOICE_BRIDGE_TOKEN is not set"
+    assert report["reason"] == "VOX_VOICE_BRIDGE_TOKEN is not set"
 
 
 # --- declarations ------------------------------------------------------------
@@ -222,8 +222,8 @@ def test_describe_declares_the_evox_kind():
 
 
 def test_from_env_wires_a_transport_without_contacting_it(monkeypatch):
-    monkeypatch.setenv("EVOX_VOICE_BRIDGE_URL", "http://127.0.0.1:9000")
-    monkeypatch.setenv("EVOX_VOICE_BRIDGE_TOKEN", "sk-env")
+    monkeypatch.setenv("VOX_VOICE_BRIDGE_URL", "http://127.0.0.1:9000")
+    monkeypatch.setenv("VOX_VOICE_BRIDGE_TOKEN", "sk-env")
 
     adapter = EvoXAgentAdapter.from_env(name="evox-local")
 

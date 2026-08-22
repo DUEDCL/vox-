@@ -32,8 +32,8 @@ CONTEXT_PROBE = (
     "import sys; lines = sys.argv[1].splitlines(); print(lines[0]); print(lines[1])"
 )
 ENV_PROBE = (
-    "import os; print(os.environ.get('EVOX_TEST_TOKEN', 'absent'));"
-    " print(os.environ.get('EVOX_TEST_PLAIN', 'absent'))"
+    "import os; print(os.environ.get('VOX_TEST_TOKEN', 'absent'));"
+    " print(os.environ.get('VOX_TEST_PLAIN', 'absent'))"
 )
 SLEEPER = "import time; print('one', flush=True); time.sleep(30)"
 
@@ -241,8 +241,8 @@ def test_abandoning_the_stream_kills_the_child():
 
 
 def test_credential_shaped_variables_are_not_inherited(monkeypatch):
-    monkeypatch.setenv("EVOX_TEST_TOKEN", "sk-leak")
-    monkeypatch.setenv("EVOX_TEST_PLAIN", "fine")
+    monkeypatch.setenv("VOX_TEST_TOKEN", "sk-leak")
+    monkeypatch.setenv("VOX_TEST_PLAIN", "fine")
 
     chunks = list(agent(ENV_PROBE).stream(task()))
 
@@ -250,8 +250,8 @@ def test_credential_shaped_variables_are_not_inherited(monkeypatch):
 
 
 def test_a_named_variable_is_passed_through_on_purpose(monkeypatch):
-    monkeypatch.setenv("EVOX_TEST_TOKEN", "sk-explicit")
-    adapter = agent(ENV_PROBE, env_passthrough=("EVOX_TEST_TOKEN",))
+    monkeypatch.setenv("VOX_TEST_TOKEN", "sk-explicit")
+    adapter = agent(ENV_PROBE, env_passthrough=("VOX_TEST_TOKEN",))
 
     chunks = list(adapter.stream(task()))
 

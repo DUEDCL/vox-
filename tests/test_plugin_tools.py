@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from core.state import VoiceState
-from evox_plugin import VoicePlugin
+from vox_plugin import VoicePlugin
 
 
 class StubTransport:
@@ -114,7 +114,7 @@ def test_transport_send_and_cancel_wiring():
 
 
 def test_diagnose_reports_without_leaking_token(monkeypatch):
-    monkeypatch.setenv("EVOX_VOICE_BRIDGE_TOKEN", "super-secret-value")
+    monkeypatch.setenv("VOX_VOICE_BRIDGE_TOKEN", "super-secret-value")
     plugin = VoicePlugin()
     report = plugin.diagnose()
     assert report["bridge"]["token_configured"] is True

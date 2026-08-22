@@ -49,16 +49,16 @@ DEFAULT_CONFIRM_TIMEOUT_S = 60.0
 
 #: Set to make the child window visible from the start; the orb's own default is
 #: hidden so that a launch nobody asked for does not paint on the desktop.
-VISIBLE_ENV = "EVOX_WAKE_VISIBLE"
+VISIBLE_ENV = "VOX_WAKE_VISIBLE"
 
 #: Where a built desktop binary is looked for, relative to the workspace root.
 #: Order is deliberate: a release build wins over a debug one, because a stale
 #: debug binary is the likelier thing to be lying around.
 _BINARY_CANDIDATES = (
-    Path("desktop/src-tauri/target/release/evox_voice_wake.exe"),
-    Path("desktop/src-tauri/target/release/evox_voice_wake"),
-    Path("desktop/src-tauri/target/debug/evox_voice_wake.exe"),
-    Path("desktop/src-tauri/target/debug/evox_voice_wake"),
+    Path("desktop/src-tauri/target/release/vox.exe"),
+    Path("desktop/src-tauri/target/release/vox"),
+    Path("desktop/src-tauri/target/debug/vox.exe"),
+    Path("desktop/src-tauri/target/debug/vox"),
 )
 
 
@@ -74,7 +74,7 @@ def find_desktop_binary(root: str | Path | None = None) -> Path | None:
     ``start()`` without a binary is an error.
     """
     base = Path(root) if root is not None else Path(__file__).resolve().parent.parent
-    override = os.getenv("EVOX_DESKTOP_BINARY")
+    override = os.getenv("VOX_DESKTOP_BINARY")
     if override:
         candidate = Path(override)
         return candidate if candidate.is_file() else None
@@ -82,7 +82,7 @@ def find_desktop_binary(root: str | Path | None = None) -> Path | None:
         candidate = base / relative
         if candidate.is_file():
             return candidate
-    found = shutil.which("evox_voice_wake")
+    found = shutil.which("vox")
     return Path(found) if found else None
 
 
@@ -124,7 +124,7 @@ class DesktopBridge:
     def start(self) -> None:
         """Spawn the orb and begin reading its answers.
 
-        ``EVOX_WAKE_VISIBLE`` is passed through the child's environment rather
+        ``VOX_WAKE_VISIBLE`` is passed through the child's environment rather
         than a command-line flag, because that is the switch ``main.rs`` already
         reads -- adding a second way to say the same thing invites the two to
         disagree.
@@ -152,7 +152,7 @@ class DesktopBridge:
         except OSError as exc:
             raise DesktopBridgeError(f"cannot start the desktop orb: {exc}") from exc
         self._reader = threading.Thread(
-            target=self._read_loop, name="evox-desktop-bridge", daemon=True
+            target=self._read_loop, name="vox-desktop-bridge", daemon=True
         )
         self._reader.start()
 

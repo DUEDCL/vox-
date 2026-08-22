@@ -34,7 +34,7 @@ from core.session_bridge import BridgeError, ConversationTransport, LocalEvoXTra
 from .contract import AgentChunk, AgentDescriptor, Task, render_prompt
 
 #: Keys the bridge has been observed to answer with. ``reply`` is what
-#: ``evox_plugin.plugin`` already reads, so the two agree by construction.
+#: ``vox_plugin.plugin`` already reads, so the two agree by construction.
 _REPLY_KEYS = ("reply", "text", "message")
 
 
@@ -143,7 +143,7 @@ class EvoXAgentAdapter:
             **(
                 {}
                 if configured
-                else {"reason": "EVOX_VOICE_BRIDGE_TOKEN is not set"}
+                else {"reason": "VOX_VOICE_BRIDGE_TOKEN is not set"}
             ),
         }
 

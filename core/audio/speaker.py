@@ -37,7 +37,7 @@ def load_speaker_config(path: str | Path | None = None) -> dict[str, Any]:
     the moment protection quietly turns off.
     """
     root = Path(__file__).resolve().parents[2]
-    config_path = Path(path or os.getenv("EVOX_SPEAKER_CONFIG", root / "config" / DEFAULT_CONFIG_NAME))
+    config_path = Path(path or os.getenv("VOX_SPEAKER_CONFIG", root / "config" / DEFAULT_CONFIG_NAME))
     defaults: dict[str, Any] = {
         "require_verification": True,
         "threshold": 0.5,
@@ -138,10 +138,10 @@ class SpeakerVerificationProvider:
     ) -> None:
         root = Path(__file__).resolve().parents[2]
         self.model_path = Path(
-            model_path or os.getenv("EVOX_SPEAKER_MODEL", root / "models" / DEFAULT_MODEL_NAME)
+            model_path or os.getenv("VOX_SPEAKER_MODEL", root / "models" / DEFAULT_MODEL_NAME)
         )
         self.store = SpeakerStore(
-            store_path or os.getenv("EVOX_SPEAKER_ENROLLMENT", root / "enrollment" / "voiceprints.json")
+            store_path or os.getenv("VOX_SPEAKER_ENROLLMENT", root / "enrollment" / "voiceprints.json")
         )
         self.threshold = threshold
         self.min_verify_seconds = min_verify_seconds

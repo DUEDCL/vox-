@@ -15,7 +15,7 @@ import pytest
 from core.agents.contract import AgentChunk
 from core.dispatch.dispatcher import DispatchResult
 from core.state import VoiceState
-from evox_plugin.runtime import VoiceRuntime
+from vox_plugin.runtime import VoiceRuntime
 
 
 class FakeDispatcher:

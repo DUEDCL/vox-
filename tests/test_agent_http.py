@@ -143,7 +143,7 @@ def test_bad_urls_are_refused_at_construction():
 
 
 def test_a_bearer_token_comes_from_the_environment_only():
-    # ``token=None`` reads EVOX_AGENT_HTTP_TOKEN; an explicit empty string opts out.
+    # ``token=None`` reads VOX_AGENT_HTTP_TOKEN; an explicit empty string opts out.
     adapter = HttpAgentAdapter(name="mock", url="http://127.0.0.1:1", token="")
     assert adapter.token == ""
 

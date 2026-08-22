@@ -715,7 +715,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "evox_voice_wake"
+name = "vox"
 version = "0.1.0"
 dependencies = [
  "serde",

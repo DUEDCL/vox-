@@ -6,7 +6,7 @@ adapter that reaches across a network boundary, so three things hold here that
 the subprocess adapters take for granted:
 
 - **Credentials never come from config.** The registry schema has no key for a
-  token; a bearer token is read from ``EVOX_AGENT_HTTP_TOKEN`` only when it is
+  token; a bearer token is read from ``VOX_AGENT_HTTP_TOKEN`` only when it is
   set. A local gateway on loopback typically needs none, and red line 1 says the
   default install talks to nobody it was not pointed at.
 - **The URL is validated like the EvoX bridge checks its own.** Plain HTTP is
@@ -42,7 +42,7 @@ from .contract import AgentChunk, AgentDescriptor, Task, render_prompt
 
 #: Environment variable carrying the optional bearer token. Not in the config
 #: schema -- a credential has no key there, exactly as ADR 003 decided.
-TOKEN_ENV = "EVOX_AGENT_HTTP_TOKEN"
+TOKEN_ENV = "VOX_AGENT_HTTP_TOKEN"
 
 #: The OpenAI Chat Completions path, appended to the configured base URL. A URL
 #: that already ends in it is used as-is, so ``/v1`` and the full endpoint both
@@ -67,7 +67,7 @@ class HttpAgentAdapter:
     #: Model name to send. ``default`` is the honest placeholder for a gateway
     #: that routes on its own; a host that needs a specific model sets it here.
     model: str = "default"
-    #: ``None`` means "read ``EVOX_AGENT_HTTP_TOKEN``". An empty string means
+    #: ``None`` means "read ``VOX_AGENT_HTTP_TOKEN``". An empty string means
     #: none -- the correct value for an unauthenticated local gateway.
     token: str | None = None
     _live: dict[str, Any] = field(default_factory=dict, repr=False)

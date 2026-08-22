@@ -15,6 +15,15 @@ the stream kills the process. Cancellation terminates the session process rather
 than sending a graceful ``session/cancel`` -- the turn is over, and the process
 is the only thing this side owns.
 
+**Encoding is the protocol's, not the host's.** ACP frames are UTF-8, so this
+adapter writes UTF-8 and reads UTF-8, and forces ``PYTHONUTF8``/
+``PYTHONIOENCODING`` on the child (see ``_UTF8_ENV``). This is not cosmetic: on
+Windows a Python child defaults its stdio codec to the ANSI code page, and
+because the read side uses ``errors="replace"`` the resulting mojibake arrives
+as U+FFFD inside an otherwise valid reply -- silently wrong rather than failed.
+**Remaining gap:** a non-Python agent that writes the local code page is still
+mangled the same way, and nothing in the environment can tell it not to.
+
 **Evidence level: SIM.** The tests drive a Python snippet that speaks these
 shapes; no real ACP agent has completed a turn through this adapter yet.
 """
@@ -46,6 +55,14 @@ _TEXT_UPDATE_KINDS = frozenset({"agent_message_chunk", "user_message_chunk"})
 
 #: ``session/update`` kinds that carry an agent-requested tool call.
 _TOOL_UPDATE_KINDS = frozenset({"tool_call", "tool_call_update"})
+
+#: Forced on the child because ACP frames are UTF-8 *by protocol*, while a
+#: Python child on Windows picks its stdio codec from the ANSI code page
+#: (cp936 here) and would emit mojibake this side cannot distinguish from a
+#: legitimate reply -- ``errors="replace"`` turns it into U+FFFD, never an
+#: error. Only Python children read these; a non-Python agent that writes the
+#: local code page is a known remaining gap, recorded in the module docstring.
+_UTF8_ENV = {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
 
 
 class AcpAgentError(RuntimeError):
@@ -281,6 +298,7 @@ class AcpAgentAdapter:
 
     def _child_env(self) -> dict[str, str]:
         env = scrubbed_env()
+        env.update(_UTF8_ENV)
         for name in self.env_passthrough:
             value = os.environ.get(name)
             if value is not None:

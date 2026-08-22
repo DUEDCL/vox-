@@ -15,7 +15,7 @@ python -m venv .venv
 
 ## 日常修改后的最小回归
 
-适用时机：修改 `core/`、`evox_plugin/`、`contracts/` 或 Python 测试后。
+适用时机：修改 `core/`、`vox_plugin/`、`contracts/` 或 Python 测试后。
 
 ```powershell
 python -m pytest tests -q
@@ -140,7 +140,7 @@ python -c "from core.providers import VoxCordAdapter; print(VoxCordAdapter().loa
 改完阈值后同时看诊断：
 
 ```powershell
-.\.venv\Scripts\python.exe -c "from evox_plugin import VoicePlugin; import json; print(json.dumps(VoicePlugin().diagnose()['speaker'], ensure_ascii=False, indent=2))"
+.\.venv\Scripts\python.exe -c "from vox_plugin import VoicePlugin; import json; print(json.dumps(VoicePlugin().diagnose()['speaker'], ensure_ascii=False, indent=2))"
 ```
 
 预期只有名字与样本数，**绝不含向量**。若 `require_verification` 为 `False`，诊断必须把它报成警告。识别准确率（本人通过率、他人拒绝率、录音回放）只能 REAL-MIC 实测，AUTO 一律不背书。
@@ -169,7 +169,7 @@ python -c "from core.providers import VoxCordAdapter; print(VoxCordAdapter().loa
 改完工具与语音路径的接线，另跑 `tests/test_plugin_tools.py`（工具接线 8 项）并看诊断：
 
 ```powershell
-.\.venv\Scripts\python.exe -c "from evox_plugin import VoicePlugin; import json; print(json.dumps(VoicePlugin().diagnose()['tools'], ensure_ascii=False, indent=2))"
+.\.venv\Scripts\python.exe -c "from vox_plugin import VoicePlugin; import json; print(json.dumps(VoicePlugin().diagnose()['tools'], ensure_ascii=False, indent=2))"
 ```
 
 未 attach 时应报 `attached: false` 加一条告警；attach 后只报注册名、计数、沙箱根与告警，**不得出现任何路径参数、文件正文或命令输出**。`shell.run` 开着时诊断必须出显式告警。
@@ -358,7 +358,7 @@ P8 唤醒球的具体验收项（都是 REAL-WIN 级）：
 - 无边框窗口没有跟随球的方形灰影（`shadow(false)` 生效）；
 - 按住球拖 4px 以上窗口跟手，松手后不误触点击；键盘激活（`detail=0`）的点击不受拖动标志影响；
 - 展开时窗口向下长、不越出工作区下边界；球在正常展开时**不跳动**；
-- `EVOX_WAKE_VISIBLE` 未设时窗口隐藏、`evox_set_visible(true)` 后可见；
+- `VOX_WAKE_VISIBLE` 未设时窗口隐藏、`vox_set_visible(true)` 后可见；
 - 125% / 150% / 175% 缩放下命中区与光标不漂移。
 
 验证等级说明：`cargo check`/`cargo test` 只算 AUTO；命中表在 `docs/research/prototype-results.md` 里是 SIM；真机手感是 P10（发布阻塞项 #5）。
@@ -378,7 +378,7 @@ python -m pytest tests/test_session_bridge.py tests/test_plugin_tools.py -q
 适用时机：用户反馈“没有唤醒”“没有麦克风”“会话不回消息”时。
 
 ```powershell
-python -c "from evox_plugin import VoicePlugin; import json; print(json.dumps(VoicePlugin().diagnose(), ensure_ascii=False, indent=2))"
+python -c "from vox_plugin import VoicePlugin; import json; print(json.dumps(VoicePlugin().diagnose(), ensure_ascii=False, indent=2))"
 ```
 
 诊断只输出 provider、桥接 URL 是否配置 token、音频后端可用性和设备列表，不输出 token 内容。设备枚举失败时先看 `reason`，再决定是否安装 `sounddevice` 或系统音频驱动。
@@ -390,7 +390,7 @@ python -c "from evox_plugin import VoicePlugin; import json; print(json.dumps(Vo
 ```powershell
 git status --short
 rg --files -g '!desktop/node_modules' -g '!.venv' | sort
-rg "TODO|FIXME|release blocker|not verified" core evox_plugin desktop docs tests scripts
+rg "TODO|FIXME|release blocker|not verified" core vox_plugin desktop docs tests scripts
 ```
 
 先确认已有用户修改，不要覆盖无关脏文件；再根据未验证项选择最小回归范围。
