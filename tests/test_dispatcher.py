@@ -261,7 +261,7 @@ def test_a_successful_turn_reports_ok_and_concatenates_the_text():
 
 
 def test_an_agent_failure_arrives_as_a_chunk_and_is_recorded_as_failed():
-    adapter = FakeAdapter(done(error="exit status 1"))
+    adapter = FakeAdapter(done(error="exit 1: backend detail"))
     dispatcher, router = build()
     result = dispatcher.dispatch(task(), {"claude": adapter})
     assert result.ok is False
@@ -472,8 +472,26 @@ def test_a_failed_turn_emits_task_failed_with_a_reason_but_no_text():
     dispatcher, _ = build(on_event=events.append)
     dispatcher.dispatch(task("我的秘密问题"), {"claude": adapter})
     failed = next(e for e in events if e["type"] == "task.failed")
-    assert failed["payload"]["error"] == "exit status 1"
+    assert failed["payload"]["error"] == "agent reported failure"
     assert failed["payload"]["task_id"] == "t-1"
+
+
+def test_task_failed_does_not_publish_agent_error_or_reply_text():
+    events: list[dict[str, Any]] = []
+    prompt = "用户提示中的秘密"
+    reply = "模型回复中的秘密"
+    stderr = f"backend echoed {prompt}; generated {reply}"
+    adapter = FakeAdapter(done(error=stderr))
+    dispatcher, _ = build(on_event=events.append)
+
+    dispatcher.dispatch(task(prompt), {"claude": adapter})
+
+    blob = repr(events)
+    failed = next(e for e in events if e["type"] == "task.failed")
+    assert failed["payload"]["error"] == "agent reported failure"
+    assert prompt not in blob
+    assert reply not in blob
+    assert stderr not in blob
 
 
 def test_an_abandoned_stream_names_its_own_failure_mode():

@@ -340,14 +340,26 @@ def _drain(stream: Any, events: queue.Queue[tuple[str, str | None]], tag: str) -
 
 
 def _terminate(process: subprocess.Popen[str]) -> None:
+    """Best-effort termination that never masks the stream's own outcome."""
     try:
         process.terminate()
-        try:
-            process.wait(timeout=_GRACE_S)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=_GRACE_S)
     except (OSError, ValueError):
+        return
+    try:
+        process.wait(timeout=_GRACE_S)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    except (OSError, ValueError):
+        return
+    try:
+        process.kill()
+    except (OSError, ValueError):
+        return
+    try:
+        process.wait(timeout=_GRACE_S)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        # A stubborn child is still a cleanup failure, not a new agent error.
         pass
 
 

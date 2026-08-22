@@ -29,7 +29,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 |---|---|
 | 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架 + P1 声纹门 + P2 平台契约 + P3 记忆 + P4 工具与安全门 + P5 agent 适配器 + **P6 派发层** + **P7 ACP/HTTP 适配器**已落,`VoiceRuntime` 已把语音接进派发,「Python→桌面事件通道」已接线(代码级) |
 | 技术选型 | **已定案**,见 [ADR 001](adr/001-voice-stack-selection.md) ~ [ADR 005](adr/005-task-dispatch-model.md) |
-| Python 测试 | **625 passed, 3 skipped**（全量 AUTO；DesktopBridge 专项 **33 passed**、采集专项 **36 passed**；无真实设备） |
+| Python 测试 | **628 passed, 3 skipped**（全量 AUTO；DesktopBridge 专项 **33 passed**、采集专项 **36 passed**；无真实设备） |
 | 前端构建 | `npm run build`(tsc + vite)通过;`cargo check` 通过 |
 | 真机麦克风唤醒 | **已验证一次**(2026-07-26,`你好问问`,7.193s;当时打印的 score 1.0 是硬编码常量,不是测量值 —— 已改正,见 §7) |
 | 声纹准入 | 门**已接线**,模型已下载(dim 512);判别力 **AUTO 已验**(簇内 0.736 / 簇间 0.370,阈值 0.5 落在间隙);校验耗时 41 ms;**真机通过率未验** |
@@ -42,7 +42,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 真实 EvoX 会话桥接 | **未验证** — 发布阻塞项 |
 | 真实外部 agent | **未验证** — 发布阻塞项(REAL-AGENT) |
 | 真实透明窗口验收 | **未验证** — 发布阻塞项 |
-| 版本控制 | 已推送到 `https://github.com/DUEDCL/vox-.git`;最近完成 `f223008`（DesktopBridge 生命周期加固），当前文档同步在独立分支进行；合并前仍需独立审查 |
+| 版本控制 | 已推送到 `https://github.com/DUEDCL/vox-.git`;最近完成 DesktopBridge 与 Agent 失败路径加固，当前分支仍需独立审查 |
 
 ## 3. 已定案的技术选型
 
@@ -185,7 +185,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 录入 CLI | `scripts/enroll_speaker.py` | 125 | 交互式录入,音频不落盘 |
 | 前端 | `desktop/src/main.ts` + `style.css` + `index.html` | 1076 | 六态唤醒球、展开态流式文本、工具确认卡(含命令原文)、命中区上报 |
 | 窗口 | `desktop/src-tauri/src/main.rs` | 329 | 透明、置顶、无投影、不占任务栏;三个 `vox_*` IPC + 30 ms 光标轮询的选择性穿透 |
-| 测试 | `tests/*.py` + `tests/integration/` | — | 628 collected（625 passed + 3 skipped）；DesktopBridge 专项 33 passed，采集专项覆盖启动回滚、回调隔离、ASR/KWS 恢复与幂等停止，见 [测试文档](testing.md) |
+| 测试 | `tests/*.py` + `tests/integration/` | — | 631 collected（628 passed + 3 skipped）；DesktopBridge 专项 33 passed，采集专项覆盖启动回滚、回调隔离、ASR/KWS 恢复与幂等停止，见 [测试文档](testing.md) |
 
 ## 5. 进行中 / 下一步
 

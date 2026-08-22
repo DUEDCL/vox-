@@ -13,6 +13,7 @@ and is still owed (ADR 003 blocker).
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import time
 
@@ -22,6 +23,7 @@ from core.agents.cli import (
     PROMPT_PLACEHOLDER,
     CliAgentAdapter,
     CliAgentError,
+    _terminate,
     spawn_target,
 )
 from core.agents.contract import Task
@@ -179,6 +181,25 @@ def test_a_timeout_terminates_the_child_and_says_so():
 
     assert chunks[-1].error == "timed out after 0.6s"
     assert time.perf_counter() - started < 10, "the child outlived its timeout"
+
+
+def test_terminate_swallows_a_second_wait_timeout():
+    class StuckProcess:
+        def __init__(self):
+            self.killed = False
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, *, timeout):
+            raise subprocess.TimeoutExpired("stuck", timeout)
+
+    process = StuckProcess()
+    _terminate(process)
+    assert process.killed is True
 
 
 def test_the_output_cap_stops_the_stream():

@@ -25,6 +25,7 @@ rebuilding this object.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterator, Mapping
@@ -39,6 +40,37 @@ from core.dispatch.contract import (
 )
 from core.events import AGENT_SCHEMA_PATH, build_event, validate_event
 from core.tools.contract import ToolRequest
+
+
+_SAFE_FAILURE_REASONS = frozenset(
+    {
+        "stream ended without a terminal chunk",
+        "no agents available",
+    }
+)
+_SAFE_FAILURE_PATTERNS = (
+    re.compile(r"^exit -?\d+$"),
+    re.compile(r"^timed out after \d+(?:\.\d+)?s$"),
+    re.compile(r"^output exceeded \d+ characters$"),
+)
+
+
+def _public_failure_reason(error: str | None) -> str:
+    """Return a safe task-event summary, never an agent-provided message.
+
+    Agent stderr and protocol error fields can contain the prompt, a reply, or
+    credentials echoed by a backend. They remain available on the internal
+    ``AgentChunk`` for local handling, but the event stream fans out to
+    logs/transports and may only carry fixed, shape-validated summaries.
+    """
+    if not isinstance(error, str):
+        return "agent reported failure"
+    candidate = error.strip()
+    if candidate in _SAFE_FAILURE_REASONS:
+        return candidate
+    if any(pattern.fullmatch(candidate) for pattern in _SAFE_FAILURE_PATTERNS):
+        return candidate
+    return "agent reported failure"
 
 
 @dataclass(frozen=True)
@@ -414,7 +446,9 @@ class Dispatcher:
                 # Why it failed, never what was said. A stream that ends with no
                 # terminating chunk is its own failure mode, distinct from one
                 # that reported an error.
-                payload["error"] = failed_error or "stream ended without a terminal chunk"
+                payload["error"] = _public_failure_reason(
+                    failed_error or "stream ended without a terminal chunk"
+                )
             self._emit("task.done" if ok else "task.failed", payload)
 
     def _cancel_all(

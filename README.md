@@ -58,7 +58,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe tmp_proto/t10_voice_stack_validation.py
 ```
 
-当前可复现基线：`625 passed, 3 skipped`（2026-08-23，使用仓库 `.venv` 与仓库隔离的 `--basetemp`；全量 AUTO）。DesktopBridge 专项为 `33 passed`（SIM 子进程替身）。3 个 skipped 用例：2 个依赖本机不存在的可选 VoxCord checkout（检出目录），1 个需要创建符号链接的权限（本账户没有）；skip 数会随环境变化，passed 数下降才是回归。记基线前先确认没有设置 `PYTHONUTF8` / `PYTHONIOENCODING`。
+当前可复现基线：`628 passed, 3 skipped`（2026-08-23，使用仓库 `.venv` 与仓库隔离的 `--basetemp`；全量 AUTO）。DesktopBridge 专项为 `33 passed`（SIM 子进程替身）。3 个 skipped 用例：2 个依赖本机不存在的可选 VoxCord checkout（检出目录），1 个需要创建符号链接的权限（本账户没有）；skip 数会随环境变化，passed 数下降才是回归。记基线前先确认没有设置 `PYTHONUTF8` / `PYTHONIOENCODING`。
 
 ### 桌面构建
 
