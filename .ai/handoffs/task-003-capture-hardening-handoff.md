@@ -32,8 +32,8 @@
   - 结果：`619 passed, 3 skipped`，退出码 0。
 - `git diff --check`
   - 结果：通过。
-- `git hash-object contracts\voice-events.schema.json`
-  - 结果：`2a917916f4cee389a0b3f288338d00165c20b71e`；本任务未改动该文件。
+- `Get-FileHash -Algorithm SHA256 contracts\voice-events.schema.json`
+  - 结果：`4f60b6124dcb9704624a0606f411981d0bf572de22fcf4a25fad133bd3c75de5`；本任务未改动该文件。
 
 ## 审查边界与风险
 
