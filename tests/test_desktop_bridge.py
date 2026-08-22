@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import textwrap
 import time
 from pathlib import Path
@@ -63,6 +64,34 @@ def orb_script(tmp_path: Path) -> Path:
     return script
 
 
+@pytest.fixture
+def exiting_orb_script(tmp_path: Path) -> Path:
+    script = tmp_path / "exiting_orb.py"
+    script.write_text(
+        "import json, sys, time\n"
+        "sys.stdin.reconfigure(encoding=\"utf-8\")\n"
+        "sys.stdout.reconfigure(encoding=\"utf-8\")\n"
+        "print(json.dumps({\"kind\": \"ready\"}), flush=True)\n"
+        "time.sleep(0.15)\n",
+        encoding="utf-8",
+    )
+    return script
+
+
+@pytest.fixture
+def orphaned_stdout_orb_script(tmp_path: Path) -> Path:
+    script = tmp_path / "orphaned_stdout_orb.py"
+    script.write_text(
+        "import json, subprocess, sys, time\n"
+        "sys.stdin.reconfigure(encoding=\"utf-8\")\n"
+        "sys.stdout.reconfigure(encoding=\"utf-8\")\n"
+        "print(json.dumps({\"kind\": \"ready\"}), flush=True)\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(2)'])\n",
+        encoding="utf-8",
+    )
+    return script
+
+
 def bridge_for(script: Path, mode: str = "silent", **kwargs) -> DesktopBridge:
     return DesktopBridge([sys.executable, str(script), mode], **kwargs)
 
@@ -95,6 +124,129 @@ class TestLifecycle:
         assert bridge.ready.wait(5.0)
         bridge.close()
         bridge.close()
+        assert not bridge.alive
+        assert bridge.process is None
+        assert not bridge.ready.is_set()
+
+    def test_close_then_start_creates_a_fresh_session(self, orb_script: Path) -> None:
+        bridge = bridge_for(orb_script)
+        bridge.start()
+        assert bridge.ready.wait(5.0)
+        bridge.close()
+        assert not bridge.ready.is_set()
+
+        bridge.start()
+        try:
+            assert bridge.ready.wait(5.0)
+            assert bridge.alive
+        finally:
+            bridge.close()
+
+    def test_start_failure_leaves_no_process_or_ready_state(
+        self, orb_script: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import core.desktop_bridge as desktop_bridge
+
+        bridge = bridge_for(orb_script)
+        real_popen = desktop_bridge.subprocess.Popen
+
+        def fail_popen(*_args, **_kwargs):
+            raise OSError("synthetic spawn failure")
+
+        monkeypatch.setattr(desktop_bridge.subprocess, "Popen", fail_popen)
+        with pytest.raises(DesktopBridgeError):
+            bridge.start()
+        assert bridge.process is None
+        assert bridge._reader is None
+        assert not bridge.ready.is_set()
+
+        monkeypatch.setattr(desktop_bridge.subprocess, "Popen", real_popen)
+        bridge.start()
+        try:
+            assert bridge.ready.wait(5.0)
+        finally:
+            bridge.close()
+
+    def test_reader_start_failure_rolls_back_the_child(
+        self, orb_script: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bridge = bridge_for(orb_script)
+        real_thread_start = threading.Thread.start
+
+        def fail_thread_start(_thread: threading.Thread) -> None:
+            raise RuntimeError("synthetic reader failure")
+
+        monkeypatch.setattr(threading.Thread, "start", fail_thread_start)
+        with pytest.raises(DesktopBridgeError):
+            bridge.start()
+        assert bridge.process is None
+        assert bridge._reader is None
+        assert not bridge.ready.is_set()
+
+        monkeypatch.setattr(threading.Thread, "start", real_thread_start)
+        bridge.start()
+        try:
+            assert bridge.ready.wait(5.0)
+        finally:
+            bridge.close()
+
+    def test_child_eof_resets_liveness_and_ready(self, exiting_orb_script: Path) -> None:
+        bridge = bridge_for(exiting_orb_script)
+        bridge.start()
+        assert bridge.ready.wait(5.0)
+        assert wait_for(lambda: bridge.process is None)
+        assert not bridge.alive
+        assert not bridge.ready.is_set()
+        assert bridge.send(build_event("turn.done", {})) is False
+
+    def test_restart_releases_waiters_before_old_reader_reaches_eof(
+        self, orphaned_stdout_orb_script: Path
+    ) -> None:
+        bridge = bridge_for(orphaned_stdout_orb_script)
+        bridge.start()
+        assert bridge.ready.wait(5.0)
+        request = validate_any_event(
+            build_event(
+                "tool.confirm_required",
+                {"tool": "shell.run", "origin": "voice", "command": "git status"},
+            )
+        )
+        result: list[bool] = []
+        waiter = threading.Thread(
+            target=lambda: result.append(bridge.await_confirmation(request, timeout_s=10.0)),
+            daemon=True,
+        )
+        waiter.start()
+        assert wait_for(lambda: bridge.describe()["pending_confirmations"] == 1)
+        assert wait_for(lambda: bridge.process is not None and bridge.process.poll() is not None)
+
+        started = time.monotonic()
+        bridge.start()
+        waiter.join(timeout=1.0)
+        assert result == [False]
+        assert time.monotonic() - started < 1.5
+        bridge.close()
+
+    def test_close_racing_with_writes_does_not_raise(self, orb_script: Path) -> None:
+        bridge = bridge_for(orb_script)
+        bridge.start()
+        assert bridge.ready.wait(5.0)
+        errors: list[BaseException] = []
+
+        def write_events() -> None:
+            try:
+                for _ in range(100):
+                    bridge.send(build_event("turn.done", {}))
+            except BaseException as exc:  # pragma: no cover - assertion below
+                errors.append(exc)
+
+        writers = [threading.Thread(target=write_events) for _ in range(4)]
+        for writer in writers:
+            writer.start()
+        bridge.close()
+        for writer in writers:
+            writer.join(timeout=5.0)
+        assert not errors
         assert not bridge.alive
 
     def test_a_missing_binary_is_an_error_only_when_asked_to_start(self) -> None:
@@ -206,15 +358,15 @@ class TestConfirmation:
         bridge.close()
         assert bridge.await_confirmation(self._request(), timeout_s=5.0) is False
 
-    def test_the_child_dying_mid_wait_settles_as_refused(self, orb_script: Path) -> None:
+    def test_the_child_dying_mid_wait_settles_as_refused(
+        self, exiting_orb_script: Path
+    ) -> None:
         # 卡还开着就崩了 —— 调用方必须被放行，且是往拒绝一侧放
-        bridge = bridge_for(orb_script, "silent")
+        bridge = bridge_for(exiting_orb_script)
         bridge.start()
         assert bridge.ready.wait(5.0)
-        import threading
-
-        threading.Timer(0.2, bridge.close).start()
         assert bridge.await_confirmation(self._request(), timeout_s=10.0) is False
+        assert bridge.describe()["pending_confirmations"] == 0
 
     def test_an_envelope_without_an_id_cannot_be_answered(self, orb_script: Path) -> None:
         with bridge_for(orb_script, "approve") as bridge:
