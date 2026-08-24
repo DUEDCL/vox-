@@ -349,7 +349,7 @@ fn main() {
             vox_confirm_reply
         ])
         .setup(|app| {
-            let wake =
+            let mut builder =
                 WebviewWindowBuilder::new(app, WAKE_LABEL, WebviewUrl::App("index.html".into()))
                     .title("Vox")
                     .inner_size(INIT_W, INIT_H)
@@ -361,8 +361,22 @@ fn main() {
                     .always_on_top(true)
                     .skip_taskbar(true)
                     .focused(false)
-                    .visible(std::env::var_os("VOX_WAKE_VISIBLE").is_some())
-                    .build()?;
+                    // 右键浏览器菜单在前端 main.ts 里 preventDefault，
+                    // tauri 2.10 的 builder 没有对应开关，别在这里找。
+                    .visible(std::env::var_os("VOX_WAKE_VISIBLE").is_some());
+            // 远程会话（RDP）里 WebView2 的 GPU 合成会让窗口透明失效，
+            // 表现为球周围一块实底方框。只在真远程时才退回软件合成，
+            // 本地会话保持硬件加速。覆盖默认参数时必须带上这三项禁用，
+            // 否则 PDF/OOUI/SmartScreen 会重新出现。
+            if std::env::var("SESSIONNAME")
+                .map(|session| session.starts_with("RDP-"))
+                .unwrap_or(false)
+            {
+                builder = builder.additional_browser_args(
+                    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu",
+                );
+            }
+            let wake = builder.build()?;
             wake.set_ignore_cursor_events(false)?;
             place_initially(&wake);
             spawn_hit_test(app.handle().clone());

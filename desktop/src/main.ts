@@ -1,5 +1,10 @@
 import './style.css';
 
+/* 唤醒球不是浏览器页面：右键菜单、文本拖拽鬼影一律关掉。 */
+window.addEventListener('contextmenu', (e) => e.preventDefault());
+window.addEventListener('dragstart', (e) => e.preventDefault());
+window.addEventListener('selectstart', (e) => e.preventDefault());
+
 /* Vox — main.ts
    六态球体 + 流式回复 + 工具确认卡(FR-6.13)。
    测试钩子保持兼容现有 SIM 测试。 */
