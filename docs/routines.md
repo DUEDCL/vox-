@@ -35,7 +35,7 @@ python scripts/e2e_simulated.py
 
 该专项覆盖 sink 故障不改变派发、熔断和记忆结果；如果本机设置了代理变量，跑 loopback 网络测试前先清空 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`。
 
-当前全量基线 **634 passed, 3 skipped**（2 个 skip 是可选的 VoxCord 适配器，1 个是符号链接越界用例 —— 本账户无权创建符号链接）。DesktopBridge 专项当前为 **33 passed**；采集专项基线为 **36 passed**。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
+当前全量基线 **635 passed, 3 skipped**（2026-08-24 新增记忆跨进程持久性集成测试）（2 个 skip 是可选的 VoxCord 适配器，1 个是符号链接越界用例 —— 本账户无权创建符号链接）。DesktopBridge 专项当前为 **33 passed**；采集专项基线为 **36 passed**。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
 
 ## 契约或事件字段变更
 
@@ -192,13 +192,25 @@ python -c "from core.providers import VoxCordAdapter; print(VoxCordAdapter().loa
 .\.venv\Scripts\python.exe -m pytest tests/test_memory.py -q
 ```
 
-当前 **62 passed**；改了记忆与语音路径的接线还要跑 `tests/test_plugin_tools.py`（24 个用例，含记忆接线 6 项与工具接线 8 项，两者合跑 **86 passed**）。
+当前 **65 passed**（含 Task 008 新增的 2 条 sink 用例）；改了记忆与语音路径的接线还要跑 `tests/test_plugin_tools.py`（24 个用例，含记忆接线 6 项与工具接线 8 项，两者合跑 **86 passed**）。
 
 四组：写入、召回、去重、审计。两条红线断言：**音频永不入库**（`records` 表每一列都是 `TEXT` 或 `INTEGER`，没有 BLOB 可放音频；`write()` 遇 `bytes` 抛 `TypeError`），`asr.final` 入库前过敏感模式过滤（9 个凭据样本整条拒绝，5 句含「密码」「token」的日常话不误伤）。SQLite 必须保持单文件；改 schema 前先定迁移路径，不要靠删库重建。
 
-中期事实同时落 `memory/facts/*.md`，人类可读层是事实来源、SQLite 是索引。手改 Markdown 后应能在下一次召回中体现 —— AUTO 已覆盖同进程内的往返（`sync_facts()` 折回索引），**跨进程重启仍未验**。
+中期事实同时落 `memory/facts/*.md`，人类可读层是事实来源、SQLite 是索引。手改 Markdown 后应能在下一次召回中体现 —— AUTO 已覆盖同进程内的往返（`sync_facts()` 折回索引），跨进程持久性另见下方验收例程。
 
 `sync_facts(prune=True)` 才会因为文件消失而删索引，默认 `prune=False`：一次误删目录不该清空记忆。
+
+## 记忆跨进程持久性验收
+
+适用时机：修改 `core/memory/` 的存储、镜像或折回逻辑后；以及发布前确认「记忆跨会话持久性」阻塞项的自动化部分仍成立。
+
+```powershell
+$tmp = Join-Path $env:TEMP ("vox-mem-persist-" + [guid]::NewGuid().ToString("N"))
+.\.venv\Scripts\python.exe scripts/acceptance/verify_memory_persistence.py --workdir $tmp
+Remove-Item -Recurse -Force $tmp
+```
+
+预期最后一行 JSON `all_pass: true`：进程 A 写入的事实在新进程 B 中可召回；脚本模拟手改 Markdown 后，`sync_facts()` 折回且下一次召回只见新文案、旧文案不再命中。等价集成用例 `tests/integration/test_memory_cross_process.py` 会随全量一起跑。证据等级 AUTO_MULTI_PROCESS —— 真机应用重启的人工确认仍属 REAL（P10），不因本例程视为关闭。
 
 改中文分词（`index_tokens` / `query_tokens`）必须同时跑 `test_index_and_query_tokenizers_agree_on_chinese` 与 `test_recall_is_precise_enough_to_return_nothing` —— 索引侧与查询侧的分词一旦不一致，召回会静默变空或静默变宽，两个方向都不会报错。原因见 ADR 004 的 2026-08-02 修正：FTS5 默认分词器搜不到中文，索引的是派生 token 列而不是原文。
 
@@ -415,4 +427,4 @@ rg "TODO|FIXME|release blocker|not verified" core vox_plugin desktop docs tests 
 - 前端修改：`npm run build`；窗口属性修改再加 `cargo check` 和 Windows 实机验收。
 - 模型或依赖变更：记录版本、来源、归档校验结果到 `THIRD_PARTY_NOTICES.md` 和 `docs/research/prototype-results.md`。
 
-每个阶段收尾一律跑全量 `.\.venv\Scripts\python.exe -m pytest tests -q --basetemp .pytest-run`（当前基线 **634 passed, 3 skipped**），不用单文件绿灯代替全量。
+每个阶段收尾一律跑全量 `.\.venv\Scripts\python.exe -m pytest tests -q --basetemp .pytest-run`（当前基线 **635 passed, 3 skipped**），不用单文件绿灯代替全量。

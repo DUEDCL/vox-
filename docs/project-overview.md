@@ -29,7 +29,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 |---|---|
 | 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架 + P1 声纹门 + P2 平台契约 + P3 记忆 + P4 工具与安全门 + P5 agent 适配器 + **P6 派发层** + **P7 ACP/HTTP 适配器**已落,`VoiceRuntime` 已把语音接进派发,「Python→桌面事件通道」已接线(代码级) |
 | 技术选型 | **已定案**,见 [ADR 001](adr/001-voice-stack-selection.md) ~ [ADR 005](adr/005-task-dispatch-model.md) |
-| Python 测试 | **634 passed, 3 skipped**（全量 AUTO；事件 sink 专项 **123 passed**、DesktopBridge 专项 **33 passed**、采集专项 **36 passed**；无真实设备） |
+| Python 测试 | **635 passed, 3 skipped**（全量 AUTO；事件 sink 专项 **123 passed**、DesktopBridge 专项 **33 passed**、采集专项 **36 passed**；无真实设备） |
 | 前端构建 | `npm run build`(tsc + vite)通过;`cargo check` 通过 |
 | 真机麦克风唤醒 | **已验证一次**(2026-07-26,`你好问问`,7.193s;当时打印的 score 1.0 是硬编码常量,不是测量值 —— 已改正,见 §7) |
 | 声纹准入 | 门**已接线**,模型已下载(dim 512);判别力 **AUTO 已验**(簇内 0.736 / 簇间 0.370,阈值 0.5 落在间隙);校验耗时 41 ms;**真机通过率未验** |
@@ -185,7 +185,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 录入 CLI | `scripts/enroll_speaker.py` | 125 | 交互式录入,音频不落盘 |
 | 前端 | `desktop/src/main.ts` + `style.css` + `index.html` | 1076 | 六态唤醒球、展开态流式文本、工具确认卡(含命令原文)、命中区上报 |
 | 窗口 | `desktop/src-tauri/src/main.rs` | 329 | 透明、置顶、无投影、不占任务栏;三个 `vox_*` IPC + 30 ms 光标轮询的选择性穿透 |
-| 测试 | `tests/*.py` + `tests/integration/` | — | 637 collected（634 passed + 3 skipped）；DesktopBridge 专项 33 passed，采集专项覆盖启动回滚、回调隔离、ASR/KWS 恢复与幂等停止，见 [测试文档](testing.md) |
+| 测试 | `tests/*.py` + `tests/integration/` | — | 638 collected（635 passed + 3 skipped）；DesktopBridge 专项 33 passed，采集专项覆盖启动回滚、回调隔离、ASR/KWS 恢复与幂等停止，见 [测试文档](testing.md) |
 
 ## 5. 进行中 / 下一步
 
@@ -196,7 +196,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | P0 | 骨架:声纹 provider、`events.py`、四包契约、测试归位、ADR 与文档 | AUTO | ✅ 完成 |
 | P1 | **声纹门**:环形缓冲、fail-closed 门、录入 CLI、`wake.rejected` 产出点 | AUTO | ✅ 完成(真机留 P10) |
 | P2 | 平台事件契约:`agent-events.schema.json` + `agents.schema.json` | AUTO | ✅ 完成 |
-| P3 | 记忆系统 `core/memory/` | AUTO | ✅ 完成(跨进程持久性留 P10) |
+| P3 | 记忆系统 `core/memory/` | AUTO+双进程实测 | ✅ 完成(真机重启人工确认留 P10) |
 | P4 | 本地工具 `core/tools/` + `config/tools.toml` | AUTO | ✅ 完成(真实搜索后端未定) |
 | P5 | agent 适配器 `cli.py` + `evox.py` + `registry.py` + `config/agents.toml` | AUTO+SIM | ✅ 完成(真实 CLI 留 P9) |
 | P6 | 派发/路由/汇总 `core/dispatch/` | AUTO+SIM | ✅ 完成（已由 `VoiceRuntime` 接入语音路径） |
@@ -228,7 +228,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 8 | **声纹准入实测**(本人通过 / 他人拒绝球不弹 / 录音回放) | AUTO(fail-closed、store、判别力与阈值) | REAL-MIC([ADR 002](adr/002-speaker-verification.md)) |
 | 9 | **真实外部 agent 跑通一轮** | 仅契约 | REAL-AGENT([ADR 003](adr/003-agent-integration-protocol.md)) |
 | 10 | **工具安全实机**(`shell.run` 确认含拒绝路径、误唤醒防护) | AUTO 全绿(89 条拒绝矩阵) | REAL-WIN 确认流程 + REAL-MIC 误唤醒([ADR 005](adr/005-task-dispatch-model.md)) |
-| 11 | **记忆跨会话持久性**(重开进程后事实仍在、手改 Markdown 被下一次召回看到) | AUTO(同进程往返) | REAL([ADR 004](adr/004-memory-architecture.md)) |
+| 11 | **记忆跨会话持久性**(重开进程后事实仍在、手改 Markdown 被下一次召回看到) | AUTO_MULTI_PROCESS(双进程实测 2026-08-24,[例程](routines.md)) | REAL([ADR 004](adr/004-memory-architecture.md)) |
 
 ## 7. 文档地图
 

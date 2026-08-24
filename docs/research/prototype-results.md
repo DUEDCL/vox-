@@ -374,6 +374,15 @@ Result: **600 passed, 3 skipped**, identical in a clean shell and under `PYTHONU
 
 `claude` is on PATH (2.1.223), so the CLI adapter's SIM-only status looked upgradable without a microphone. It is not, on this host: invoked as a child process, `claude -p <prompt>` returns **`Not logged in · Please run /login`** and exits 1. A nested invocation does not inherit the parent session's credentials. So `agents/cli.py` remains **SIM**. This is "attempted and blocked by login state", not "not yet tried" — the distinction matters for whoever picks up P9.
 
+## Session 2026-08-24 (memory cross-process persistence — AUTO multi-process)
+
+- Target: the automatable half of release blocker #11 in `docs/project-overview.md`(记忆跨会话持久性).
+- New `scripts/acceptance/verify_memory_persistence.py`: three real interpreter processes over one SQLite file — process A writes a fact and exits; the parent edits the Markdown mirror out of band (front matter kept); a fresh process B must recall the original text, fold the edit via `sync_facts()` (`updated=1`), then return only the edited wording with the superseded wording gone. No mocks; scratch DB in a caller-provided temp dir; user `memory/` untouched.
+- Every child hop forces `PYTHONUTF8`/`PYTHONIOENCODING` — same rationale as `core/agents/acp.py` `_UTF8_ENV`; without it the JSON fact text arrives cp936-mangled on this host.
+- New `tests/integration/test_memory_cross_process.py` pins the property through the script and runs with the full suite.
+- Result: `all_pass: true`. Group run (cross-process test + `tests/test_memory.py`) **66 passed**; full suite **635 passed, 3 skipped** in ~34 s (clean shell: no PYTHONUTF8/PYTHONIOENCODING, proxies cleared).
+- Level: **AUTO_MULTI_PROCESS** — real processes and real files, but automation only. It does NOT close the REAL half of ADR 004's acceptance (a human relaunching the actual app and observing recall); that stays open under P10.
+
 ## Not yet verified
 
 - Speaker gate on this host's microphone: own-voice pass rate, another person's rejection, recorded-replay behaviour (the gate does **not** claim replay resistance — ADR 002 「局限」).

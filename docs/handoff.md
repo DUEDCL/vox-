@@ -1,7 +1,7 @@
 # 交接文档 —— Vox
 
 > 交接时间：2026-08-24  ·  最近完成：Agent、工具事件隐私与事件 sink 隔离加固（提交历史见 `git log`）
-> 验证基线：Python **634 passed, 3 skipped**（637 collected）· DesktopBridge 专项 **33 passed** · Rust **15 passed** · `npm run build` 通过
+> 验证基线：Python **635 passed, 3 skipped**（638 collected）· DesktopBridge 专项 **33 passed** · Rust **15 passed** · `npm run build` 通过
 > 基线在**干净 shell**（未设置 `PYTHONUTF8` / `PYTHONIOENCODING`）下复现；数字取决于环境变量的话就不是基线。
 > 本文件是**接手者的第一份材料**。项目全貌看 [`docs/project-overview.md`](project-overview.md)，
 > 干活的规矩看 [`.claude/CLAUDE.md`](../.claude/CLAUDE.md)（那份是硬约束，本文件只做导航）。
@@ -74,7 +74,7 @@ scripts/        run_desktop.py 命令行 · acceptance/ 真机验收脚本 · en
 按这个顺序跑，每一步都**看返回值而不是「没报错」**：
 
 ```powershell
-# 0) 环境自检（应当 634 passed, 3 skipped；DesktopBridge 专项应当 33 passed）
+# 0) 环境自检（应当 635 passed, 3 skipped；DesktopBridge 专项应当 33 passed）
 #    先确认环境里没有 PYTHONUTF8 / PYTHONIOENCODING —— 基线只在干净 shell 里成立
 .\.venv\Scripts\python.exe -m pytest tests -q --basetemp .pytest-run
 
@@ -104,7 +104,7 @@ Push-Location desktop/src-tauri; cargo build; Pop-Location
 - **Canvas 2D 生产渲染器** —— 现在是 DOM + CSS（六态与动画都已落地，够用）；ADR 001 里的 Canvas 主路径还没写。
 - **超时 / 重连 / 错误恢复** —— 桥接与 agent 的失败已是 chunk，但没有重连策略。
 - **声纹反欺骗** —— 门不防录音回放，这是 ADR 002 明确记下的局限，**不是待办**。
-- **记忆跨进程持久性** —— Markdown 往返同进程内已验，重启后未验。
+- **记忆跨进程持久性** —— 同进程往返 + 双进程自动化实测已过（2026-08-24，`scripts/acceptance/verify_memory_persistence.py`，等级 AUTO_MULTI_PROCESS）；剩真机应用重启的人工确认（REAL）。
 - **子进程输出编码只修了一半** —— Windows 上子进程默认按 ANSI 代码页（本机 cp936）编 stdout，父进程按 UTF-8 读且 `errors="replace"`，于是乱码变成夹在正常回复里的 U+FFFD：**静默错，不报错**。`acp.py` 已给 Python 子进程注入 `PYTHONUTF8`/`PYTHONIOENCODING`（ACP 协议规定 UTF-8，所以强制是对的）；**非 Python 的子进程无解** —— 环境里没有变量能命令一个任意程序改 stdout 编码。已知受影响面：`shell.run` 读原生控制台工具（`git` / `dir`）的中文输出（当前 `enabled=false` + 空白名单，够不到）。`claude` 实测不受影响（Node 恒写 UTF-8）。
 
 ## 6. 最容易踩的坑（血泪版，完整清单在 CLAUDE.md）

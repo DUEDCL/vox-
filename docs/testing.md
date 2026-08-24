@@ -301,9 +301,9 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 | 无观测时的成功率 | ✅ `rate` 是 `None` 而不是 `0.0` |
 | 记忆接进语音路径 | ✅ 两侧轮次都入库并带 `role:*`;不 attach 就不产生数据库文件;writer 抛异常不打断回合 |
 | `/memory/` 是否锚定 | ✅ 前导斜杠已加,并有测试解析 `.gitignore` 双向断言 —— 不带斜杠时 `git check-ignore` 实测把 `core/memory/store.py` 也算进忽略 |
-| 用例数 / 耗时 | 62 passed in 0.69 s(`tests/test_memory.py`) |
+| 用例数 / 耗时 | 65 passed in 0.89 s(`tests/test_memory.py`,含 Task 008 的 2 条 sink 用例) |
 
-**跨进程重启未验。** 上面的 Markdown 往返全部发生在一个进程内。「关掉程序重开,事实还在」是第 25 项待验收,等级 REAL,不是 AUTO 能关的。
+**跨进程持久性:双进程自动化已过(2026-08-24)。** `scripts/acceptance/verify_memory_persistence.py` 以两个真实子进程验证:A 进程写入的事实 B 进程可召回,带外手改 Markdown 经 `sync_facts()` 折回后召回只见新文案(`tests/integration/test_memory_cross_process.py` 随全量钉住)。等级 AUTO_MULTI_PROCESS。「人在场重启真实应用亲眼确认」仍是 REAL 待验收项,不因本条视为关闭。
 
 ### 5.8 工具与安全门(AUTO,2026-08-02,P4)
 
