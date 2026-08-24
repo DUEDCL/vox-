@@ -1,7 +1,7 @@
 # Task 008 交接：派发、熔断与记忆事件 sink 隔离
 
 状态：REVIEW
-分支：`codex/tool-event-privacy`
+分支：`codex/event-sink-isolation`
 实现者：Codex
 独立审查：待 Claude Code / 人类执行
 
