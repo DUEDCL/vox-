@@ -401,6 +401,16 @@ Result: **600 passed, 3 skipped**, identical in a clean shell and under `PYTHONU
 - Tests: 6 new cases in `tests/test_session_bridge.py` (refused→recover, DNS→recover, exhausted budget, timeout never retried, HTTP error never retried, default single attempt).
 - REAL-AGENT re-probe on this host (2026-08-24): `claude -p` → Not logged in (2.1.241); `codex exec` → no output within 90 s (auth hang suspected); `opencode run` → "Unable to connect" to its provider endpoint. All three remain blocked; SIM-only status unchanged.
 
+## Session 2026-08-24 (speaker gate hardening — AUTO)
+
+- Human directive: harden the voiceprint gate. Scope kept honest: input-side heuristics only, NOT spoof/replay detection (ADR 002 limitation stands).
+- Quality gate (`_audio_quality_issue`): rejects silence (RMS < `min_rms`, default 0.002) and clipping (share of samples at |x|>=0.99 above `max_clip_ratio`, default 0.05) BEFORE the model check — reachable and tested on model-less hosts.
+- Brute-force cooldown: `max_consecutive_rejections` (default 5) input-driven rejections inside the streak window arm a `cooldown_s` (default 30 s) blanket refusal; injected clock makes it deterministic; streaks older than one window start fresh so yesterday's pressure cannot lock the owner out today.
+- Optional multi-window vote: `verify_windows > 1` splits the buffer into equal windows and requires every one to clear threshold AND agree on the speaker; default 1 keeps today's single-window decision pending REAL-MIC tuning.
+- `describe()` now reports `gate` config and `gate_stats` counters (ints only — no text, no vectors); fail-closed ordering unchanged and every new path lands on rejection.
+- Tests: new `tests/test_speaker_hardening.py` (14 cases); existing groups updated where silence inputs now stop at the quality gate by design. Speaker+privacy+hardening group **44 passed**.
+- Level: **AUTO**. Real-voice pass/rejection rates and replay behaviour remain REAL-MIC (P10) and are NOT claimed here.
+
 ## Not yet verified
 
 - Speaker gate on this host's microphone: own-voice pass rate, another person's rejection, recorded-replay behaviour (the gate does **not** claim replay resistance — ADR 002 「局限」).

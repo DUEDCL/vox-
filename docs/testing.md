@@ -156,7 +156,7 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 | 工具与安全门 | `.venv\Scripts\python.exe -m pytest tests/test_tools.py tests/test_tool_security.py -q` | AUTO | 123 passed, 1 skipped(skip 是符号链接) |
 | 工具/记忆与语音路径接线 | `.venv\Scripts\python.exe -m pytest tests/test_memory.py tests/test_plugin_tools.py -q` | AUTO | 86 passed |
 | 记忆 | `.venv\Scripts\python.exe -m pytest tests/test_memory.py -q` | AUTO | 62 passed(**无需模型**) |
-| 声纹(免模型) | `.venv\Scripts\python.exe -m pytest tests/test_speaker.py tests/test_speaker_privacy.py -q` | AUTO | 30 passed(**无需模型**) |
+| 声纹(免模型) | `.venv\Scripts\python.exe -m pytest tests/test_speaker.py tests/test_speaker_privacy.py tests/test_speaker_hardening.py -q` → **44 passed** | AUTO |rivacy.py -q` | AUTO | 30 passed(**无需模型**) |
 | 声纹(真实模型) | `.venv\Scripts\python.exe -m pytest tests/integration/test_speaker_model.py -q` | AUTO | 5 passed(缺模型时 5 skipped) |
 | 声纹录入 | `.venv\Scripts\python.exe scripts/enroll_speaker.py --name <名字>` | REAL-MIC | 写入向量,不写音频 |
 | 声纹注册状态 | `.venv\Scripts\python.exe scripts/enroll_speaker.py --name x --list-only` | AUTO | 只出名字与样本数 |

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pytest
 
 from core.audio import (
@@ -80,7 +81,10 @@ def test_missing_model_reports_unavailable_rather_than_raising(tmp_path):
 
 def test_verify_without_a_model_rejects(tmp_path):
     """Fail-closed: no model means no match, never an accidental pass."""
-    result = _provider(tmp_path).verify([0.0] * 16000)
+    # Audible input on purpose: silence now stops at the quality gate before
+    # the model check ever runs (see tests/test_speaker_hardening.py).
+    audible = (np.sin(np.linspace(0, 400, 16000)) * 0.2).astype(np.float32)
+    result = _provider(tmp_path).verify(audible)
 
     assert result.accepted is False
     assert result.speaker is None

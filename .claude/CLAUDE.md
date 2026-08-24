@@ -14,12 +14,12 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **655 passed, 3 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **669 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
 | `core/audio/`(除 speaker) | `pytest tests/test_provider_adapter.py tests/test_sherpa_provider.py -q` | 全绿 |
-| `core/audio/speaker.py` `ring.py` `capture.py` | `pytest tests/test_speaker.py tests/test_speaker_privacy.py -q` | **30 passed**（**不需要声纹模型**） |
+| `core/audio/speaker.py` `ring.py` `capture.py` | `pytest tests/test_speaker.py tests/test_speaker_privacy.py tests/test_speaker_hardening.py -q` | **44 passed**（**不需要声纹模型**） |
 | 声纹阈值或判别力 | `pytest tests/integration/test_speaker_model.py -q` | 5 passed（缺模型时 5 skipped） |
 | TTS 合成（需模型） | `pytest tests/integration/test_tts_model.py -q` | 4 passed（缺模型时 2 skipped） |
 | `core/tools/` | `pytest tests/test_tools.py tests/test_tool_security.py -q` | **123 passed, 1 skipped**（skip 是符号链接越界，本账户无权建链接） |
@@ -63,7 +63,7 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - **唤醒词打断已接线** —— `wake_detected` 在 THINKING/SPEAKING 时先 `cancel()`（停 TTS + 停 transport、发 `turn.cancelled`）再进 LISTENING，返回的仍是 `[wake.detected, state.changed]`；`attach_capture` 把 capture 的 `on_wake`/`on_reject` 指到插件，capture 的 InputStream 在 speaking 期间不关，所以「说唤醒词打断正在播的回复」这条链在代码级是通的。真机打断是 REAL
 - **流式 ASR 已落地（`core/audio/asr.py`）** —— `SherpaStreamingAsrProvider` 用 sherpa-onnx `OnlineRecognizer.from_transducer`（zipformer-zh-14M，16kHz 流式 transducer，`cjkchar` 建模单元，带端点检测）。`feed()` 逐块回 `AsrResult(text, is_endpoint)`，`finalize()` 冲洗出最终文本。真实模型实测：bundled wav 识别为「对我做了介绍那么我想说的是大家如果对我的研究感兴趣」。真机麦克风转写是 REAL-MIC
 - **capture 两段模式（唤醒 → 聆听）已接线** —— 一条音频流两种模式：唤醒前喂 KWS，**被接受的**唤醒后改喂流式 ASR，端点到达就把最终文本交给 `on_recognized` 并回到 KWS。三条不变式有测试钉死：被拒绝的唤醒**绝不**开识别器（否则等于转写未授权人声）；唤醒命中那一块音频不进识别器（唤醒词不会落进请求文本）；空转写不开启回合。`VoiceRuntime.attach_microphone()` 把 `on_recognized` 接成 `utterances.put` —— **回调线程只入队**，`pump()` 在调用方线程跑整轮：在音频回调里跑派发+TTS 会占住设备丢帧，表现为「识别器听错」而不是卡死
-- 声纹门已接线：3 秒内存环形缓冲 + KWS 命中即校验 + `require_verification` 默认 `True` + `wake.rejected` 产出点
+- 声纹门已接线并加固（2026-08-24）：3 秒环形缓冲 + KWS 命中即校验 + fail-closed 不变。新增三道输入侧闸：质量门（静音 RMS 下限 / 削波饱和比例，先于模型运行，无模型也可测）、暴力冷却（连续拒绝达阈值后冷却期拒答，注入时钟可测，隔日自动解封）、可选多窗口一致校验（`verify_windows`>1 需逐窗同阈值同人，默认 1 关闭待真机调参）。`describe()` 暴露 gate 配置与 gate_stats 计数（纯数字）。启发式 ≠ 反录音回放，ADR 002 局限不变
 - 37.8 MB 声纹模型**已下载**（dim 512，SHA-256 记在 `THIRD_PARTY_NOTICES.md`）
 - `feed()` 返回 `(keyword, None)` —— sherpa-onnx 的 `KeywordResult` **根本不含置信度**，`None` 是经核实的陈述不是遗漏；`wake.detected` 的分数来自声纹相似度
 - 两个事件契约共用同一信封：语音 9 种 + 平台 12 种，`type` 枚举互斥。`validate_any_event()` 按 `type` 查表选契约，`validate_event(event, path)` 仍是严格路径

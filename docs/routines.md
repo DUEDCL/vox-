@@ -35,7 +35,7 @@ python scripts/e2e_simulated.py
 
 该专项覆盖 sink 故障不改变派发、熔断和记忆结果；如果本机设置了代理变量，跑 loopback 网络测试前先清空 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`。
 
-当前全量基线 **655 passed, 3 skipped**（2026-08-24 新增持久性/排队/桥接重试用例）（2 个 skip 是可选的 VoxCord 适配器，1 个是符号链接越界用例 —— 本账户无权创建符号链接）。DesktopBridge 专项当前为 **33 passed**；采集专项基线为 **36 passed**。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
+当前全量基线 **669 passed, 3 skipped**（2026-08-24 新增持久性/排队/桥接重试/声纹加固用例）（2 个 skip 是可选的 VoxCord 适配器，1 个是符号链接越界用例 —— 本账户无权创建符号链接）。DesktopBridge 专项当前为 **33 passed**；采集专项基线为 **36 passed**。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
 
 ## 契约或事件字段变更
 
@@ -135,7 +135,7 @@ python -c "from core.providers import VoxCordAdapter; print(VoxCordAdapter().loa
 .\.venv\Scripts\python.exe -m pytest tests/test_speaker.py tests/test_speaker_privacy.py -q
 ```
 
-预期 **30 passed**。这组测试**故意不依赖 37.8 MB 声纹模型**：要守的性质恰恰是模型缺失时必须成立的那些。逐条必须成立的是 fail-closed（失败即关闭）四条路径 —— 模型缺失、无人注册、embedding 抛异常、分数低于阈值 —— 全部落在拒绝一侧，`verify()` 对普通拒绝从不抛异常而是返回 `accepted=False`。另外两条是隐私断言：`describe()` 不含任何向量值，音频不落盘。
+预期 **30 passed**；声纹加固另跑 `tests/test_speaker_hardening.py`（14 例，同样免模型）。这组测试**故意不依赖 37.8 MB 声纹模型**：要守的性质恰恰是模型缺失时必须成立的那些。逐条必须成立的是 fail-closed（失败即关闭）四条路径 —— 模型缺失、无人注册、embedding 抛异常、分数低于阈值 —— 全部落在拒绝一侧，`verify()` 对普通拒绝从不抛异常而是返回 `accepted=False`。另外两条是隐私断言：`describe()` 不含任何向量值，音频不落盘。
 
 **任何一条 fail-closed 断言变红都不许绕过。** 一个模型缺失就静默放行的声纹门，比没有门更糟 —— 它给了一种不存在的安全感。
 
@@ -427,4 +427,4 @@ rg "TODO|FIXME|release blocker|not verified" core vox_plugin desktop docs tests 
 - 前端修改：`npm run build`；窗口属性修改再加 `cargo check` 和 Windows 实机验收。
 - 模型或依赖变更：记录版本、来源、归档校验结果到 `THIRD_PARTY_NOTICES.md` 和 `docs/research/prototype-results.md`。
 
-每个阶段收尾一律跑全量 `.\.venv\Scripts\python.exe -m pytest tests -q --basetemp .pytest-run`（当前基线 **655 passed, 3 skipped**），不用单文件绿灯代替全量。
+每个阶段收尾一律跑全量 `.\.venv\Scripts\python.exe -m pytest tests -q --basetemp .pytest-run`（当前基线 **669 passed, 3 skipped**），不用单文件绿灯代替全量。

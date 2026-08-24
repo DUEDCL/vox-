@@ -16,10 +16,13 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
+
+import numpy as np
 
 from .base import ProviderStatus, ProviderUnavailable
 
@@ -45,6 +48,15 @@ def load_speaker_config(path: str | Path | None = None) -> dict[str, Any]:
         "min_enroll_seconds": 1.5,
         "buffer_seconds": 3.0,
         "verify_seconds": 1.5,
+        # Gate-hardening limits (2026-08-24). Quality floors reject junk audio
+        # before it reaches the model; the cooldown throttles brute-force wake
+        # attempts. They are heuristics, NOT anti-replay spoof detection --
+        # ADR 002's limitation stands until a dedicated spoof model lands.
+        "min_rms": 0.002,
+        "max_clip_ratio": 0.05,
+        "verify_windows": 1,
+        "max_consecutive_rejections": 5,
+        "cooldown_s": 30.0,
     }
     if not config_path.is_file():
         return defaults
@@ -135,6 +147,12 @@ class SpeakerVerificationProvider:
         min_enroll_seconds: float = 1.5,
         num_threads: int = 1,
         provider: str = "cpu",
+        min_rms: float = 0.002,
+        max_clip_ratio: float = 0.05,
+        verify_windows: int = 1,
+        max_consecutive_rejections: int = 5,
+        cooldown_s: float = 30.0,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         root = Path(__file__).resolve().parents[2]
         self.model_path = Path(
@@ -148,6 +166,26 @@ class SpeakerVerificationProvider:
         self.min_enroll_seconds = min_enroll_seconds
         self.num_threads = num_threads
         self.execution_provider = provider
+        self.min_rms = min_rms
+        self.max_clip_ratio = max_clip_ratio
+        #: >1 splits the buffer into equal windows and requires every one of
+        #: them to match the same speaker. Default 1 keeps the single-window
+        #: decision; the stricter setting needs REAL-MIC tuning before use.
+        self.verify_windows = max(1, int(verify_windows))
+        self.max_consecutive_rejections = max(0, int(max_consecutive_rejections))
+        self.cooldown_s = cooldown_s
+        self._clock: Callable[[], float] = clock if clock is not None else time.monotonic
+        # Brute-force throttle state. Counts only -- no audio, no vectors.
+        self._rejection_streak = 0
+        self._last_rejection_at = 0.0
+        self._cooldown_until = 0.0
+        self.gate_stats = {
+            "accepted": 0,
+            "rejected_below_threshold": 0,
+            "rejected_quality": 0,
+            "rejected_cooldown": 0,
+            "consecutive_rejections": 0,
+        }
         self._extractor: Any = None
         self._manager: Any = None
         self._dim = 0
@@ -270,17 +308,35 @@ class SpeakerVerificationProvider:
     def verify(self, samples: Any, *, sample_rate: int = 16000) -> VerificationResult:
         """Decide whether in-memory audio belongs to an enrolled speaker.
 
-        This never raises for an ordinary rejection. Every failure path -- model
-        missing, nobody enrolled, embedding error -- returns ``accepted=False``,
+        This never raises for an ordinary rejection. Every failure path --
+        cooldown, bad audio quality, model missing, nobody enrolled, embedding
+        error, below threshold -- returns ``accepted=False``,
         so a caller that only branches on ``accepted`` is fail-closed by
         construction.
         """
+        # Cheap input-side gates run before anything expensive or
+        # environment-dependent, so their verdicts stay reachable even on a
+        # host with no model installed.
+        if self._cooldown_active():
+            self.gate_stats["rejected_cooldown"] += 1
+            remaining = round(self._cooldown_until - self._clock(), 1)
+            return VerificationResult(
+                False, None, 0.0, f"verification cooling down for {remaining}s"
+            )
+        quality = self._audio_quality_issue(samples)
+        if quality is not None:
+            self.gate_stats["rejected_quality"] += 1
+            return self._after_input_rejection(
+                VerificationResult(False, None, 0.0, quality)
+            )
         try:
             self._require()
         except ProviderUnavailable as exc:
             return VerificationResult(False, None, 0.0, str(exc))
         if self._manager.num_speakers == 0:
             return VerificationResult(False, None, 0.0, "no speaker enrolled")
+        if self.verify_windows > 1:
+            return self._verify_multi_window(samples, sample_rate)
         try:
             vector = self.embed(samples, sample_rate)
         except Exception as exc:
@@ -289,8 +345,108 @@ class SpeakerVerificationProvider:
         if name is None:
             return VerificationResult(False, None, 0.0, "no comparable enrollment")
         if score >= self.threshold:
+            self._rejection_streak = 0
+            self.gate_stats["consecutive_rejections"] = 0
+            self.gate_stats["accepted"] += 1
             return VerificationResult(True, name, score, "match")
-        return VerificationResult(False, None, score, f"below threshold {self.threshold}")
+        self.gate_stats["rejected_below_threshold"] += 1
+        return self._after_input_rejection(
+            VerificationResult(False, None, score, f"below threshold {self.threshold}")
+        )
+
+    def _cooldown_active(self) -> bool:
+        return self._clock() < self._cooldown_until
+
+    def _after_input_rejection(self, result: VerificationResult) -> VerificationResult:
+        """Feed one input-driven rejection into the brute-force throttle.
+
+        Model-missing and nobody-enrolled rejections say nothing about the
+        input, so they never reach here -- only junk or unmatched audio does.
+        A streak older than one cooldown period starts over: yesterday's
+        pressure must not lock the owner out today.
+        """
+        now = self._clock()
+        if now - self._last_rejection_at > max(self.cooldown_s, 60.0):
+            self._rejection_streak = 0
+        self._rejection_streak += 1
+        self._last_rejection_at = now
+        self.gate_stats["consecutive_rejections"] = self._rejection_streak
+        if (
+            self.max_consecutive_rejections
+            and self._rejection_streak >= self.max_consecutive_rejections
+        ):
+            self._cooldown_until = now + self.cooldown_s
+        return result
+
+    def _audio_quality_issue(self, samples: Any) -> str | None:
+        """Reject silence or clipping before any model runs.
+
+        Cheap, deterministic, testable without the model. These checks throw
+        away garbage inputs; they are heuristics and do NOT detect replayed
+        speech (ADR 002's limitation stands until a spoof model lands).
+        """
+        values = np.asarray(samples, dtype=np.float32)
+        if values.size == 0:
+            return "empty audio buffer"
+        rms = float(np.sqrt(np.mean(np.square(values))))
+        if rms < self.min_rms:
+            return f"audio too quiet to verify (rms {rms:.5f} < {self.min_rms})"
+        clip_ratio = float(np.mean(np.abs(values) >= 0.99))
+        if clip_ratio > self.max_clip_ratio:
+            return f"audio is clipped/saturated ({clip_ratio:.2f} at rail; limit {self.max_clip_ratio})"
+        return None
+
+    def _verify_multi_window(self, samples: Any, sample_rate: int) -> VerificationResult:
+        """Every equal window must match the same speaker above threshold.
+
+        Stricter than a single pass: flukes and short splices must survive
+        every window instead of one. Needs REAL-MIC tuning of threshold and
+        window count before production use.
+        """
+        values = np.asarray(samples, dtype=np.float32)
+        window_length = len(values) // self.verify_windows
+        minimum = int(self.min_verify_seconds * sample_rate)
+        if window_length < minimum:
+            return self._after_input_rejection(
+                VerificationResult(
+                    False,
+                    None,
+                    0.0,
+                    f"not enough audio for {self.verify_windows}-window verification:"
+                    f" {len(values)} samples < {self.verify_windows} x {minimum}",
+                )
+            )
+        best_score = 0.0
+        agreed_speaker: str | None = None
+        for index in range(self.verify_windows):
+            chunk = values[index * window_length : (index + 1) * window_length]
+            vector = self.embed(chunk, sample_rate)
+            name, score = self._best_match(vector)
+            best_score = max(best_score, score)
+            if name is None or score < self.threshold:
+                return self._after_input_rejection(
+                    VerificationResult(
+                        False,
+                        None,
+                        best_score,
+                        f"window {index} below threshold {self.threshold}",
+                    )
+                )
+            if agreed_speaker is None:
+                agreed_speaker = name
+            elif name != agreed_speaker:
+                return self._after_input_rejection(
+                    VerificationResult(
+                        False,
+                        None,
+                        best_score,
+                        f"windows disagree on speaker: {agreed_speaker} vs {name}",
+                    )
+                )
+        self._rejection_streak = 0
+        self.gate_stats["consecutive_rejections"] = 0
+        self.gate_stats["accepted"] += 1
+        return VerificationResult(True, agreed_speaker, best_score, "all windows match")
 
     def _best_match(self, vector: list[float]) -> tuple[str | None, float]:
         """Best cosine score across enrolled speakers.
@@ -355,6 +511,14 @@ class SpeakerVerificationProvider:
             "threshold": self.threshold,
             "speakers": sorted(speakers),
             "samples_per_speaker": {name: len(v) for name, v in speakers.items()},
+            "gate": {
+                "min_rms": self.min_rms,
+                "max_clip_ratio": self.max_clip_ratio,
+                "verify_windows": self.verify_windows,
+                "max_consecutive_rejections": self.max_consecutive_rejections,
+                "cooldown_s": self.cooldown_s,
+            },
+            "gate_stats": dict(self.gate_stats),
         }
 
     def close(self) -> None:
@@ -379,6 +543,13 @@ class SpeakerVerificationProvider:
             threshold=overrides.pop("threshold", config["threshold"]),
             min_verify_seconds=overrides.pop("min_verify_seconds", config["min_verify_seconds"]),
             min_enroll_seconds=overrides.pop("min_enroll_seconds", config["min_enroll_seconds"]),
+            min_rms=overrides.pop("min_rms", config["min_rms"]),
+            max_clip_ratio=overrides.pop("max_clip_ratio", config["max_clip_ratio"]),
+            verify_windows=overrides.pop("verify_windows", config["verify_windows"]),
+            max_consecutive_rejections=overrides.pop(
+                "max_consecutive_rejections", config["max_consecutive_rejections"]
+            ),
+            cooldown_s=overrides.pop("cooldown_s", config["cooldown_s"]),
             **overrides,
         )
 
