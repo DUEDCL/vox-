@@ -58,7 +58,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe tmp_proto/t10_voice_stack_validation.py
 ```
 
-当前可复现基线：`630 passed, 3 skipped`（2026-08-23，使用仓库 `.venv` 与仓库隔离的 `--basetemp`；全量 AUTO）。DesktopBridge 专项为 `33 passed`（SIM 子进程替身）。3 个 skipped 用例：2 个依赖本机不存在的可选 VoxCord checkout（检出目录），1 个需要创建符号链接的权限（本账户没有）；skip 数会随环境变化，passed 数下降才是回归。记基线前先确认没有设置 `PYTHONUTF8` / `PYTHONIOENCODING`。
+当前可复现基线：`634 passed, 3 skipped`（2026-08-24，使用仓库 `.venv`、清空代理变量与仓库隔离的 `--basetemp`；全量 AUTO）。DesktopBridge 专项为 `33 passed`（SIM 子进程替身）。3 个 skipped 用例：2 个依赖本机不存在的可选 VoxCord checkout（检出目录），1 个需要创建符号链接的权限（本账户没有）；skip 数会随环境变化，passed 数下降才是回归。记基线前先确认没有设置 `PYTHONUTF8` / `PYTHONIOENCODING`。
 
 ### 桌面构建
 
@@ -117,6 +117,6 @@ tmp_proto/       原型验证脚本与 UI 技术验证页
 
 ## 重要说明
 
-- 已是 Git 仓库；平台化进展与当前分支提交见 `git log`，最近完成了 VoiceRuntime、采集生命周期和 DesktopBridge 生命周期加固。
+- 已是 Git 仓库；平台化进展与当前分支提交见 `git log`，最近完成了 VoiceRuntime、采集生命周期、DesktopBridge 生命周期、工具事件隐私和派发/熔断/记忆事件 sink 隔离加固。
 - `models/` 中包含较大的模型目录和下载归档，发布前需要确定模型分发及归档清理策略。
 - 本项目是 EvoX 生态中的原型项目，真实 EvoX 会话端点尚未完成联调。

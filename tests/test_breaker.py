@@ -245,6 +245,23 @@ def test_reset_with_no_name_clears_all():
     assert breaker.state_of("agent-2").consecutive_failures == 0
 
 
+def test_a_failing_sink_does_not_change_breaker_state():
+    """Event delivery is best effort; health transitions remain authoritative."""
+    def broken_sink(_event):
+        raise RuntimeError("transport secret: C:/private/agent.log")
+
+    breaker = CircuitBreaker(threshold=1, on_event=broken_sink)
+
+    breaker.record("agent-1", ok=False)
+
+    state = breaker.state_of("agent-1")
+    assert state.state == "open"
+    assert state.consecutive_failures == 1
+    assert breaker.sink_failures == 1
+    assert "C:/private/agent.log" not in repr(breaker.describe())
+
+
+
 # -- describe -----------------------------------------------------------------
 
 

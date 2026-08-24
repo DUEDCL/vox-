@@ -538,6 +538,22 @@ def test_dispatched_carries_the_mode_and_the_router_reason():
     assert payload["agents"] == ["a"]
 
 
+def test_a_failing_event_sink_does_not_change_dispatch_result():
+    """A transport failure cannot turn a successful agent turn into an error."""
+    def broken_sink(_event):
+        raise RuntimeError("reply secret and C:/private/turn.log")
+
+    dispatcher, _ = build(on_event=broken_sink)
+
+    result = dispatcher.dispatch(task(), {"claude": FakeAdapter(done())})
+
+    assert result.ok is True
+    assert result.route == "agent"
+    assert dispatcher.sink_failures > 0
+    assert "C:/private/turn.log" not in repr(dispatcher.__dict__)
+
+
+
 # -- the result object --------------------------------------------------------
 
 

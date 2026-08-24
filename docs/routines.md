@@ -27,7 +27,15 @@ python scripts/e2e_simulated.py
 
 `--basetemp .pytest-run` 用仓库内临时根目录规避部分 Windows 主机默认临时目录的权限清理问题；验证结束后删除该临时目录，避免把测试产物留在工作区。
 
-当前全量基线 **630 passed, 3 skipped**（2 个 skip 是可选的 VoxCord 适配器，1 个是符号链接越界用例 —— 本账户无权创建符号链接）。DesktopBridge 专项当前为 **33 passed**；采集专项基线为 **36 passed**。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
+事件 sink 隔离专项使用：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_breaker.py tests\test_dispatcher.py tests\test_memory.py -q --basetemp .pytest-run-event-sinks
+```
+
+该专项覆盖 sink 故障不改变派发、熔断和记忆结果；如果本机设置了代理变量，跑 loopback 网络测试前先清空 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`。
+
+当前全量基线 **634 passed, 3 skipped**（2 个 skip 是可选的 VoxCord 适配器，1 个是符号链接越界用例 —— 本账户无权创建符号链接）。DesktopBridge 专项当前为 **33 passed**；采集专项基线为 **36 passed**。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
 
 ## 契约或事件字段变更
 
@@ -407,4 +415,4 @@ rg "TODO|FIXME|release blocker|not verified" core vox_plugin desktop docs tests 
 - 前端修改：`npm run build`；窗口属性修改再加 `cargo check` 和 Windows 实机验收。
 - 模型或依赖变更：记录版本、来源、归档校验结果到 `THIRD_PARTY_NOTICES.md` 和 `docs/research/prototype-results.md`。
 
-每个阶段收尾一律跑全量 `.\.venv\Scripts\python.exe -m pytest tests -q --basetemp .pytest-run`（当前基线 **630 passed, 3 skipped**），不用单文件绿灯代替全量。
+每个阶段收尾一律跑全量 `.\.venv\Scripts\python.exe -m pytest tests -q --basetemp .pytest-run`（当前基线 **634 passed, 3 skipped**），不用单文件绿灯代替全量。

@@ -354,6 +354,46 @@ def test_index_and_query_tokenizers_agree_on_chinese():
     assert query_tokens("hello WORLD") == ("hello", "world")
 
 
+def test_writer_sink_failure_does_not_hide_a_successful_write(tmp_path):
+    def broken_sink(_event):
+        raise RuntimeError("memory secret: C:/private/memory.db")
+
+    store = SqliteMemoryStore(tmp_path / "memory.db")
+    try:
+        writer = MemoryWriter(
+            store, facts_dir=tmp_path / "facts", on_event=broken_sink
+        )
+        record_id = writer.write_fact("用户偏好中文回答")
+
+        assert record_id is not None
+        assert store.get(record_id) is not None
+        assert writer.sink_failures == 1
+        assert "C:/private/memory.db" not in repr(writer.describe())
+    finally:
+        store.close()
+
+
+def test_recaller_sink_failure_does_not_hide_recalled_records(tmp_path):
+    def broken_sink(_event):
+        raise RuntimeError("query secret: 用户住在北京")
+
+    store = SqliteMemoryStore(tmp_path / "memory.db")
+    try:
+        writer = MemoryWriter(store)
+        writer.write_fact("用户住在北京")
+        recaller = MemoryRecaller(store, on_event=broken_sink)
+
+        hits = recaller.facts("北京")
+
+        assert len(hits) == 1
+        assert hits[0].text == "用户住在北京"
+        assert recaller.sink_failures == 1
+        assert "用户住在北京" not in repr(recaller.__dict__)
+    finally:
+        store.close()
+
+
+
 # -- the long layer feeding the router ---------------------------------------
 
 

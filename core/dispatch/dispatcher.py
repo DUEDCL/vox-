@@ -131,6 +131,8 @@ class Dispatcher:
         self.tool_runner = tool_runner
         self.memory_recaller = memory_recaller
         self._on_event = on_event
+        #: Event delivery is a side channel and must not change a turn result.
+        self.sink_failures = 0
 
     # -- public --------------------------------------------------------------
 
@@ -490,7 +492,12 @@ class Dispatcher:
         """
         event = validate_event(build_event(event_type, dict(detail)), AGENT_SCHEMA_PATH)
         if self._on_event is not None:
-            self._on_event(event)
+            try:
+                self._on_event(event)
+            except Exception:
+                # Do not turn a healthy agent response into a dispatch error
+                # because the desktop/logging transport went away.
+                self.sink_failures += 1
         return event
 
     @staticmethod
