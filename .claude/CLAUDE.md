@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **635 passed, 3 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **649 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -45,7 +45,7 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 
 **未实现，不要假设存在**：
 - `web.search` 的**真实后端** —— 平台不自带（每个托管搜索 API 都是带 key 的云依赖），未注入时工具报 `no search backend is configured`
-- TTS 多段排队（打断已通：`wake_detected` 在 SPEAKING/THINKING 先 `cancel()` 停 TTS + transport 再进 LISTENING，`attach_capture` 把 capture 的 `on_wake`/`on_reject` 指到插件；真机说话打断是 REAL，需麦克风+扬声器在场）
+- 真机说话打断是 REAL，需麦克风+扬声器在场（打断链路本身已通：`wake_detected` 在 SPEAKING/THINKING 先 `cancel()` 停 TTS + transport 再进 LISTENING）
 - Canvas 2D 生产渲染器（现在是 DOM + CSS，六态与动画都已落地）
 - 超时/重连/错误恢复（系统托盘已由 `build_tray` 实现：显示/隐藏/退出，Rust 侧建、不扩 IPC 面；真机点开未验）
 - 声纹**反欺骗**：门不防录音回放，这是已知缺口（ADR 002 局限），不是待办
@@ -59,7 +59,7 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - **ACP 子进程被强制 UTF-8，`cli.py` 故意不强制** —— 差别不是疏漏：ACP 帧**由协议规定**是 UTF-8，裸 CLI 的 stdout 没有声明编码。`acp.py` 的 `_child_env()` 注入 `_UTF8_ENV`（`PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8`），因为 Windows 上 Python 子进程默认按 ANSI 代码页（本机 cp936）编 stdout，而读侧的 `errors="replace"` 会把乱码变成夹在正常回复里的 U+FFFD —— **静默错，不是失败**。`env_passthrough` 排在注入之后，用户点名的变量仍然赢。**只对 Python 子进程有效**：非 Python 的 agent 写本地代码页照样烂，这是已记录的残留缺口。`cli.py` 的中文测试断言长度而非文本，正是这个立场的体现，不要「统一」掉
 - **`claude` 不受代码页影响，别把它当反例** —— 实测 `claude -p` 的 stdout 字节是 UTF-8（`\xc2\xb7`），Node 在 cp936 的 Windows 上照样写 UTF-8。所以默认 agent 的中文回复是好的；中招的是 Python 系子进程与原生 Windows 控制台工具（`shell.run` 读 `git`/`dir` 的中文输出同样会烂，当前 `enabled=false` + 空白名单所以够不到）
 - **记忆召回已接进派发、短期层自裁剪** —— `Dispatcher._recall_context()` 只在 agent 路径上把 `facts()` + `recent_turns()` 的文本拼进 `Task.context`（工具路径不召回，快路径保持快）；召回失败静默吞掉（记忆是增强不是前提）。`write_turn()` 每次接受写入后 `prune_turns()` 自裁剪（`short_keep=200`）。runtime 把 `session_id` 传进 `open_memory`，故 `recent_turns(session_id=...)` 能按会话匹配
-- **TTS 合成+播放已接线** —— `core/audio/playback.py` 的 `SounddevicePlayback`（sounddevice 懒加载）；`SherpaTtsProvider.speak()` = `synthesize()` + 播放（`playback` 可注入 fake，测试用）；`VoicePlugin.attach_tts()` opt-in，`complete_turn` 在 SPEAKING 与 turn.done 之间 `speak(reply)`（失败吞掉，不结束回合），`cancel()` 调 `stop()`。事件序列不变（`speak` 是副作用）。真实出声是 REAL，需扬声器在场
+- **TTS 合成+播放已接线，且回复按句排队** —— `SherpaTtsProvider.speak()` = `synthesize()` + 播放；`speak_segments(texts)` 逐句合成逐句播（首句渲染即出声，不等整段），`stop()`/`is_stopped()` 让 barge-in 能弃掉未播的队列——此前真 provider 没有 `stop()`，`cancel()` 对它实际是 no-op，这个缺口已补上。切分在编排器：`vox_plugin.plugin.split_speech()` 按 。！？；…!?; 和换行分句（数字间小数点不切），每句发一条 `tts.chunk`（index 递增）；不支持批量接口的旧引擎走逐句 `speak()` 并在句间看 `is_stopped()`。失败语义不变：任一句失败整轮照常完成。真实出声是 REAL，需扬声器在场
 - **唤醒词打断已接线** —— `wake_detected` 在 THINKING/SPEAKING 时先 `cancel()`（停 TTS + 停 transport、发 `turn.cancelled`）再进 LISTENING，返回的仍是 `[wake.detected, state.changed]`；`attach_capture` 把 capture 的 `on_wake`/`on_reject` 指到插件，capture 的 InputStream 在 speaking 期间不关，所以「说唤醒词打断正在播的回复」这条链在代码级是通的。真机打断是 REAL
 - **流式 ASR 已落地（`core/audio/asr.py`）** —— `SherpaStreamingAsrProvider` 用 sherpa-onnx `OnlineRecognizer.from_transducer`（zipformer-zh-14M，16kHz 流式 transducer，`cjkchar` 建模单元，带端点检测）。`feed()` 逐块回 `AsrResult(text, is_endpoint)`，`finalize()` 冲洗出最终文本。真实模型实测：bundled wav 识别为「对我做了介绍那么我想说的是大家如果对我的研究感兴趣」。真机麦克风转写是 REAL-MIC
 - **capture 两段模式（唤醒 → 聆听）已接线** —— 一条音频流两种模式：唤醒前喂 KWS，**被接受的**唤醒后改喂流式 ASR，端点到达就把最终文本交给 `on_recognized` 并回到 KWS。三条不变式有测试钉死：被拒绝的唤醒**绝不**开识别器（否则等于转写未授权人声）；唤醒命中那一块音频不进识别器（唤醒词不会落进请求文本）；空转写不开启回合。`VoiceRuntime.attach_microphone()` 把 `on_recognized` 接成 `utterances.put` —— **回调线程只入队**，`pump()` 在调用方线程跑整轮：在音频回调里跑派发+TTS 会占住设备丢帧，表现为「识别器听错」而不是卡死

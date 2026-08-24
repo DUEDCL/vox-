@@ -1,7 +1,7 @@
 # 交接文档 —— Vox
 
 > 交接时间：2026-08-24  ·  最近完成：Agent、工具事件隐私与事件 sink 隔离加固（提交历史见 `git log`）
-> 验证基线：Python **635 passed, 3 skipped**（638 collected）· DesktopBridge 专项 **33 passed** · Rust **15 passed** · `npm run build` 通过
+> 验证基线：Python **649 passed, 3 skipped**（652 collected）· DesktopBridge 专项 **33 passed** · Rust **15 passed** · `npm run build` 通过
 > 基线在**干净 shell**（未设置 `PYTHONUTF8` / `PYTHONIOENCODING`）下复现；数字取决于环境变量的话就不是基线。
 > 本文件是**接手者的第一份材料**。项目全貌看 [`docs/project-overview.md`](project-overview.md)，
 > 干活的规矩看 [`.claude/CLAUDE.md`](../.claude/CLAUDE.md)（那份是硬约束，本文件只做导航）。
@@ -74,7 +74,7 @@ scripts/        run_desktop.py 命令行 · acceptance/ 真机验收脚本 · en
 按这个顺序跑，每一步都**看返回值而不是「没报错」**：
 
 ```powershell
-# 0) 环境自检（应当 635 passed, 3 skipped；DesktopBridge 专项应当 33 passed）
+# 0) 环境自检（应当 649 passed, 3 skipped；DesktopBridge 专项应当 33 passed）
 #    先确认环境里没有 PYTHONUTF8 / PYTHONIOENCODING —— 基线只在干净 shell 里成立
 .\.venv\Scripts\python.exe -m pytest tests -q --basetemp .pytest-run
 
@@ -100,7 +100,7 @@ Push-Location desktop/src-tauri; cargo build; Pop-Location
 ## 5. 已知缺口（照实写，不要假设存在）
 
 - **`web.search` 没有真实后端** —— 每个托管搜索 API 都是带 key 的云依赖，撞红线 1，故意不内置；未注入时工具报 `no search backend is configured`。
-- **TTS 多段排队** —— 长回复目前一次性合成播放，没有按句切分排队。
+- ~~TTS 多段排队~~ **已解决（2026-08-24，AUTO）** —— `split_speech` 按句切分、`tts.chunk` 逐段带 index、provider `speak_segments` 排队播放且 `stop()` 可中途弃队；真机出声与打断仍是 REAL。
 - **Canvas 2D 生产渲染器** —— 现在是 DOM + CSS（六态与动画都已落地，够用）；ADR 001 里的 Canvas 主路径还没写。
 - **超时 / 重连 / 错误恢复** —— 桥接与 agent 的失败已是 chunk，但没有重连策略。
 - **声纹反欺骗** —— 门不防录音回放，这是 ADR 002 明确记下的局限，**不是待办**。

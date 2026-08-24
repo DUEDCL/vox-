@@ -16,7 +16,7 @@
 ## 自主可完成的工作队列（按依赖与价值排序）
 
 1. ✅ **记忆跨进程持久性验收**（2026-08-24 完成）：`scripts/acceptance/verify_memory_persistence.py` + `tests/integration/test_memory_cross_process.py`；组内 66 passed，全量 **635 passed, 3 skipped**。文档已同步（routines/testing/handoff/project-overview/prototype-results/CLAUDE.md）。剩余：真机应用重启人工确认（REAL，P10）。
-2. **TTS 多段排队**（已知缺口）：按句切分合成队列、打断即清空；fake playback 测试；真实出声仍标 REAL 待在场。
+2. ✅ **TTS 多段排队**（2026-08-24 完成）：`split_speech` 切分在编排器、`tts.chunk` 逐段 index、provider `speak_segments`/`stop()`/`is_stopped()`；顺带修复真 provider 无 stop() 导致 barge-in 停不掉声音的缺陷。新增 tests/test_plugin_tts_queue.py 14 例，全量 **649 passed, 3 skipped**。真实出声与口头打断保持 REAL 待在场。
 3. **Agent 超时与重连策略**（缺口 #4）：dispatcher/session_bridge 层超时、退避重连；桥接安全姿态（bearer/loopback/凭据拦截）不得降级。
 4. **REAL-AGENT 探测与真实一轮**（阻塞项 #5）：claude 登录态当前不通（已复测）；探测 codex exec / opencode 可用性，可用则真跑一轮并记 REAL-AGENT。
 5. **Canvas 2D 生产渲染器**（P8 缺口）：替换 DOM+CSS 主渲染路径，npm build + 页面冒烟验证。

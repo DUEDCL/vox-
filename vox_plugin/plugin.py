@@ -1,12 +1,59 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from core.events import build_event
 from core.state import VoiceState, VoiceStateMachine
+
+
+_PUNCT_ONLY_RE = re.compile(r"^[\s。！？；…!?;,.，、]+$")
+
+
+def split_speech(text: str) -> list[str]:
+    """Split a reply into speakable sentences for the TTS queue.
+
+    The orchestrator owns the split (ADR 001 puts the queue outside model
+    inference): each segment becomes one ``tts.chunk`` event and one unit of
+    playback, so audio starts after the *first* sentence renders instead of
+    after the whole reply. Sentence enders are CJK 。！？；… plus ! ? ; ; and
+    newline, and an ASCII dot -- except between digits, so 「3.14」 stays one
+    utterance.
+
+    ponytail: abbreviations like e.g. still split; prosody cost only, add a
+    table if real replies ever hit it.
+    """
+    segments: list[str] = []
+    start = 0
+    length = len(text)
+    for index, char in enumerate(text):
+        if char not in "。！？；…!?;;\n":
+            if char != ".":
+                continue
+            # A dot between digits is a decimal point, not a sentence end.
+            digit_before = index > 0 and text[index - 1].isdigit()
+            digit_after = index + 1 < length and text[index + 1].isdigit()
+            if digit_before and digit_after:
+                continue
+        segment = text[start : index + 1].strip()
+        if segment:
+            segments.append(segment)
+        start = index + 1
+    tail = text[start:].strip()
+    if tail:
+        segments.append(tail)
+    # A lone trailing punctuation run reads worse than it speaks:
+    # fold it into the sentence it belongs to.
+    merged: list[str] = []
+    for segment in segments:
+        if merged and _PUNCT_ONLY_RE.match(segment):
+            merged[-1] += segment
+        else:
+            merged.append(segment)
+    return merged
 
 
 @dataclass
@@ -150,18 +197,34 @@ class VoicePlugin:
         return events
 
     def complete_turn(self, reply: str) -> list[dict]:
-        """Finish the pending turn: reply -> speech -> back to listening."""
+        """Finish the pending turn: reply -> speech -> back to listening.
+
+        The reply is spoken as a queue of sentences (see ``split_speech``):
+        one ``tts.chunk`` per sentence, audio starting once the first one
+        renders. A barge-in mid-turn drops the not-yet-spoken remainder;
+        memory stores the full reply either way.
+        """
         if self.machine.state != VoiceState.THINKING:
             raise RuntimeError("turn can only complete while thinking")
-        events = [
-            self._event("llm.delta", {"text": reply}),
-            self._event("tts.chunk", {"index": 0, "text": reply}),
-        ]
+        chunks = split_speech(reply) or [reply]
+        events = [self._event("llm.delta", {"text": reply})]
+        for index, chunk in enumerate(chunks):
+            events.append(self._event("tts.chunk", {"index": index, "text": chunk}))
         events.append(self._state_event(VoiceState.SPEAKING, "tts playback"))
         if self.tts is not None:
             # Audio is the enhancement; a TTS failure must not end the turn.
             try:
-                self.tts.speak(reply)
+                batch = getattr(self.tts, "speak_segments", None)
+                if callable(batch):
+                    batch(chunks)
+                else:
+                    # Legacy engines only know single utterances; drain them
+                    # here and honour a cancellation marker between sentences.
+                    stopped = getattr(self.tts, "is_stopped", None)
+                    for chunk in chunks:
+                        if callable(stopped) and stopped():
+                            break
+                        self.tts.speak(chunk)
             except Exception:
                 pass
         events.append(self._event("turn.done", {}))

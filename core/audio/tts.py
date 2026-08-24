@@ -16,7 +16,7 @@ import importlib
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -58,6 +58,9 @@ class SherpaTtsProvider:
         #: Playback backend. ``None`` means sounddevice; a fake is how the turn
         #: orchestrator is tested without a speaker.
         self.playback = playback
+        #: Set by ``stop()`` (barge-in). A queued ``speak_segments`` batch checks
+        #: this between sentences and drops whatever has not been spoken yet.
+        self._stopped = False
         self._tts: Any = None
 
     @property
@@ -136,6 +139,62 @@ class SherpaTtsProvider:
             player = SounddevicePlayback()
         player.play(audio.samples, audio.sample_rate, blocking=blocking)
         return audio
+
+    def stop(self) -> None:
+        """Interrupt in-flight audio and mark any queued sentences as dropped.
+
+        Barge-in runs on the capture callback thread while a turn's speak loop
+        runs on the pump thread, so this must be safe to call concurrently with
+        ``speak``/``speak_segments``. Idempotent: stopping twice is one stop.
+        """
+        self._stopped = True
+        player = self.playback
+        if player is None:
+            from .playback import SounddevicePlayback
+
+            player = SounddevicePlayback()
+        try:
+            player.stop()
+        except Exception:
+            pass
+
+    def is_stopped(self) -> bool:
+        """Whether ``stop()`` was requested since the last utterance started."""
+        return self._stopped
+
+    def speak_segments(
+        self,
+        texts: Sequence[str],
+        *,
+        speaker_id: int | None = None,
+        speed: float | None = None,
+        blocking: bool = True,
+    ) -> list[TtsAudio]:
+        """Speak pre-split sentences in order, dropping the rest on ``stop()``.
+
+        The turn orchestrator owns the splitting (it emits the matching
+        ``tts.chunk`` events); this method only drains the queue. Synthesis of
+        sentence *n+1* starts only after sentence *n* finished playing, so the
+        first audible reply no longer waits for the whole response to render --
+        and a barge-in that lands mid-synthesis skips everything still queued.
+        """
+        self._stopped = False
+        player = self.playback
+        if player is None:
+            from .playback import SounddevicePlayback
+
+            player = SounddevicePlayback()
+        spoken: list[TtsAudio] = []
+        for text in texts:
+            if self._stopped:
+                break
+            audio = self.synthesize(text, speaker_id=speaker_id, speed=speed)
+            if self._stopped:
+                # Cancelled while the (slow) synthesis ran; do not open audio.
+                break
+            player.play(audio.samples, audio.sample_rate, blocking=blocking)
+            spoken.append(audio)
+        return spoken
 
     def close(self) -> None:
         """Release native inference state; the Python wrapper has no explicit close."""

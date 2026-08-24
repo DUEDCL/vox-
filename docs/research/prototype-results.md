@@ -383,6 +383,16 @@ Result: **600 passed, 3 skipped**, identical in a clean shell and under `PYTHONU
 - Result: `all_pass: true`. Group run (cross-process test + `tests/test_memory.py`) **66 passed**; full suite **635 passed, 3 skipped** in ~34 s (clean shell: no PYTHONUTF8/PYTHONIOENCODING, proxies cleared).
 - Level: **AUTO_MULTI_PROCESS** — real processes and real files, but automation only. It does NOT close the REAL half of ADR 004's acceptance (a human relaunching the actual app and observing recall); that stays open under P10.
 
+## Session 2026-08-24 (TTS multi-segment queueing — AUTO)
+
+- Target: the long-standing gap 「长回复一次性合成播放」(handoff §5 / CLAUDE.md 未实现清单).
+- Splitting lives in the orchestrator per ADR 001: `vox_plugin.plugin.split_speech()` cuts on CJK 。！？；… and ASCII ! ? ; ; newline; an ASCII dot between digits stays a decimal point (「3.14」 unsplit). Abbreviations like e.g. still split — prosody-only cost.
+- `complete_turn` now emits one `tts.chunk` (index 0..n-1) per sentence; single-sentence replies produce byte-identical event sequences to before.
+- New provider API: `speak_segments(texts)` synthesizes/plays sentence-by-sentence (first audio no longer waits for full-reply synthesis) and `stop()`/`is_stopped()` drop the unspoken remainder. This also fixes a real defect found en route: the concrete provider had **no** `stop()`, so plugin `cancel()` was a silent no-op with the real engine attached — barge-in could not actually silence audio.
+- Legacy engines without `speak_segments` are drained sentence-by-sentence honouring `is_stopped()` between sentences. Failure semantics unchanged: any mid-queue failure still finishes the turn (LISTENING), memory stores the full reply.
+- Tests: new `tests/test_plugin_tts_queue.py` (14 cases: splitter rules, chunk events, batch vs legacy engines, mid-queue failure, cancel-during-synthesis drops rest without opening audio). Adjacent groups green; full suite **649 passed, 3 skipped**.
+- Level: **AUTO** (fake/stub playback). Real audible speech and real spoken barge-in remain REAL-MIC/REAL-WIN items.
+
 ## Not yet verified
 
 - Speaker gate on this host's microphone: own-voice pass rate, another person's rejection, recorded-replay behaviour (the gate does **not** claim replay resistance — ADR 002 「局限」).
