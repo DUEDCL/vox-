@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **649 passed, 3 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **655 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -47,11 +47,11 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - `web.search` 的**真实后端** —— 平台不自带（每个托管搜索 API 都是带 key 的云依赖），未注入时工具报 `no search backend is configured`
 - 真机说话打断是 REAL，需麦克风+扬声器在场（打断链路本身已通：`wake_detected` 在 SPEAKING/THINKING 先 `cancel()` 停 TTS + transport 再进 LISTENING）
 - Canvas 2D 生产渲染器（现在是 DOM + CSS，六态与动画都已落地）
-- 超时/重连/错误恢复（系统托盘已由 `build_tray` 实现：显示/隐藏/退出，Rust 侧建、不扩 IPC 面；真机点开未验）
+- 桌面侧的超时/重连（系统托盘已由 `build_tray` 实现：显示/隐藏/退出，Rust 侧建、不扩 IPC 面；真机点开未验）。传输层超时与重试已覆盖：CLI agent 有 120s 超时（错误 chunk）、桥接有 30s 超时 + 仅连接期重试（`attempts` 默认 1 关闭；超时/HTTP 错误永不自动重发——回合可能已执行，重试即重复）
 - 声纹**反欺骗**：门不防录音回放，这是已知缺口（ADR 002 局限），不是待办
 - 声纹**真机验收**：本人通过率、他人拒绝、回放实测都需你在场（P10）
 - 记忆**跨进程持久性**：Markdown 往返在同进程内已验，重启后仍未验（P10）
-- **真实外部 agent 跑通一轮** —— `cli.py` 的全部测试用 mock 子进程，只算 SIM；真跑 `claude -p` 是 P9（REAL-AGENT）
+- **真实外部 agent 跑通一轮** —— `cli.py` 的全部测试用 mock 子进程，只算 SIM；P9 REAL-AGENT 在本机三个后端均已尝试且受阻（2026-08-24）：`claude -p` Not logged in、`codex exec` 挂起无输出、`opencode run` 无法连接云端点——是「试过被挡」不是「没试」，恢复任一后端登录/网络后即可重试
 
 **已完成但容易记错的**：
 - **语音接进派发的是 `VoiceRuntime`，不是 `VoicePlugin`** —— `VoicePlugin.submit_text` 本身不走派发（门面只做状态机 + 记忆 + transport，不自造已验说话人）。`vox_plugin/runtime.py` 的 `VoiceRuntime.say()` 构造 `Dispatcher`，`submit_text` 之后 `dispatcher.dispatch()`，再 `complete_turn` 说回答案。「说一句 → 读文件」的链路已接上并有 `tests/test_runtime.py` 覆盖；`VoicePlugin.run_tool()` 仍是 opt-in 的手动入口。`_reach_listening()` 是实例方法、操作 `self.plugin`（此前是 `@staticmethod` 在操作一个丢弃的副本）

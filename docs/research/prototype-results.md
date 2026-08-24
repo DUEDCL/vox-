@@ -393,6 +393,14 @@ Result: **600 passed, 3 skipped**, identical in a clean shell and under `PYTHONU
 - Tests: new `tests/test_plugin_tts_queue.py` (14 cases: splitter rules, chunk events, batch vs legacy engines, mid-queue failure, cancel-during-synthesis drops rest without opening audio). Adjacent groups green; full suite **649 passed, 3 skipped**.
 - Level: **AUTO** (fake/stub playback). Real audible speech and real spoken barge-in remain REAL-MIC/REAL-WIN items.
 
+## Session 2026-08-24 (bridge connect-phase retry — AUTO; REAL-AGENT re-probe still blocked)
+
+- Transport gap 「没有重连策略」 closed conservatively: `LocalEvoXTransport` gained `attempts` (default **1** = off) + `retry_backoff_s`, and retries ONLY on failures that prove the request never left the process — `ConnectionRefusedError` / `socket.gaierror` (checked at both exception layers, since urlopen wraps them as `URLError.reason`).
+- Deliberately NOT retried: timeouts and HTTP statuses — a blocking POST may have executed the turn server-side, and an automatic re-send could run it twice. The retry budget therefore cannot mask an ambiguous failure as success.
+- CLI agents already carried a 120s timeout (error chunk) and runtime already recovers a failed turn to LISTENING with `task.failed`; this session only added the missing transport piece.
+- Tests: 6 new cases in `tests/test_session_bridge.py` (refused→recover, DNS→recover, exhausted budget, timeout never retried, HTTP error never retried, default single attempt).
+- REAL-AGENT re-probe on this host (2026-08-24): `claude -p` → Not logged in (2.1.241); `codex exec` → no output within 90 s (auth hang suspected); `opencode run` → "Unable to connect" to its provider endpoint. All three remain blocked; SIM-only status unchanged.
+
 ## Not yet verified
 
 - Speaker gate on this host's microphone: own-voice pass rate, another person's rejection, recorded-replay behaviour (the gate does **not** claim replay resistance — ADR 002 「局限」).
