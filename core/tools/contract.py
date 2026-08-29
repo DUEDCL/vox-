@@ -12,8 +12,20 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, runtime_checkable
 
 #: Built-in tool names. ``shell.run`` is disabled by default in config/tools.toml.
+#:
+#: ``time.now`` / ``app.open`` / ``web.open`` 是「简单的事平台自己做」那一类：查时间、
+#: 打开播放器、打开一个搜索页 —— 派给 agent 要几秒和一次出网，而答案在本机。
 TOOL_NAMES = frozenset(
-    {"fs.read", "web.search", "shell.run", "memory.recall", "memory.write"}
+    {
+        "fs.read",
+        "web.search",
+        "web.open",
+        "shell.run",
+        "memory.recall",
+        "memory.write",
+        "time.now",
+        "app.open",
+    }
 )
 
 #: Who asked. A voice-originated request went through the speaker gate; an

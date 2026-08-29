@@ -91,6 +91,19 @@ class CliAgentAdapter:
     cwd: str | None = None
     #: Variable names -- not values -- the child is allowed to inherit.
     env_passthrough: tuple[str, ...] = ()
+    #: 把 prompt 从 stdin 送进去，而不是当命令行参数。
+    #:
+    #: Windows 上 npm 装的 CLI 在 PATH 里是一个 ``.cmd`` shim，而 shim 走 cmd.exe ——
+    #: **cmd.exe 的命令行不能跨行**，所以一个带换行的 prompt 会在第一个换行处被截断。
+    #: 记忆召回一接上就有换行（``render_prompt`` 的 ``Context:`` 那几行），于是
+    #: ``claude -p`` 收到的只剩 ``Context:`` 一行，它按一个空请求去回答，而这一回合
+    #: 照样报成功 —— **静默错，不是失败**。第一轮对话（还没有记忆）正常，第二轮起坏，
+    #: 这是最难查的那种形状。
+    #:
+    #: ``_CMD_UNSAFE`` 拒的是 ``"`` 和 ``%``，换行是同一类缺口的漏项；把它也加进拒绝表
+    #: 的结果是「有记忆之后就不能对话」，那不是修复。stdin 绕开整条命令行，换行在管道
+    #: 里没有任何特殊含义。
+    prompt_stdin: bool = False
     max_output_bytes: int = 200_000
     #: Lines that were not valid JSON in ``jsonl`` mode. Banners and progress
     #: noise are expected; counted so diagnostics can show the adapter is being
@@ -110,6 +123,12 @@ class CliAgentAdapter:
         self.args = tuple(self.args)
         self.capabilities = frozenset(self.capabilities)
         self.env_passthrough = tuple(self.env_passthrough)
+        if self.prompt_stdin and any(PROMPT_PLACEHOLDER in arg for arg in self.args):
+            # 两处都放 prompt 等于放了两遍,或者一处是空的 —— 配置错误报出来,
+            # 不要留给运行时去表现成"agent 好像没听懂"。
+            raise CliAgentError(
+                f"agent {self.name!r}: prompt_stdin 与 {PROMPT_PLACEHOLDER} 占位符互斥"
+            )
 
     # -- contract ---------------------------------------------------------
 
@@ -135,7 +154,8 @@ class CliAgentAdapter:
                     kind="done", error="cancelled", elapsed_ms=self._ms(started)
                 )
                 return
-        command, problem = spawn_target(self.build_argv(render_prompt(task)))
+        prompt = render_prompt(task)
+        command, problem = spawn_target(self.build_argv(prompt))
         if problem is not None:
             yield AgentChunk(kind="done", error=problem, elapsed_ms=self._ms(started))
             return
@@ -144,7 +164,8 @@ class CliAgentAdapter:
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                stdin=subprocess.DEVNULL,
+                # DEVNULL 仍是默认：一个不需要输入的子进程不该有一根等着它的管道。
+                stdin=subprocess.PIPE if self.prompt_stdin else subprocess.DEVNULL,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -162,6 +183,8 @@ class CliAgentAdapter:
             return
         with self._lock:
             self._live[task.id] = process
+        if self.prompt_stdin:
+            self._feed_prompt(process, prompt)
         try:
             yield from self._pump(task, process, started)
         finally:
@@ -175,9 +198,36 @@ class CliAgentAdapter:
         if process is not None and process.poll() is None:
             _terminate(process)
 
+    @staticmethod
+    def _feed_prompt(process: subprocess.Popen[str], prompt: str) -> None:
+        """把 prompt 写进 stdin，然后**立刻关掉**。
+
+        不关的话子进程会一直等更多输入 —— 一个读到 EOF 才开工的 CLI 会挂到超时，
+        而超时会被报成「这个 agent 很慢」，不是「我们没关管道」。
+
+        写失败静默吞掉：子进程可能已经退出了，那条失败会以带 ``error`` 的终结 chunk
+        到达（这个适配器的失败一律是 chunk 不是异常）；在这里再抛一次只会让同一个故障
+        有两种形状。
+        """
+        stream = process.stdin
+        if stream is None:
+            return
+        try:
+            stream.write(prompt)
+        except OSError:
+            pass
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
     # -- argv and environment ---------------------------------------------
 
     def build_argv(self, prompt: str) -> list[str]:
+        if self.prompt_stdin:
+            # prompt 走管道,命令行里就不该再有它的副本。
+            return [self.command, *self.args]
         if any(PROMPT_PLACEHOLDER in arg for arg in self.args):
             return [
                 self.command,

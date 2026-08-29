@@ -58,7 +58,7 @@ COMMON_KEYS = frozenset(
     {"name", "kind", "enabled", "capabilities", "cost", "latency_ms", "timeout_s"}
 )
 KIND_KEYS: Mapping[str, frozenset[str]] = {
-    "cli": frozenset({"command", "args", "output", "cwd", "env_passthrough"}),
+    "cli": frozenset({"command", "args", "output", "cwd", "env_passthrough", "prompt_stdin"}),
     "evox": frozenset({"url"}),
     "acp": frozenset({"command", "args", "cwd", "env_passthrough"}),
     "http": frozenset({"url", "model"}),
@@ -152,9 +152,11 @@ def build_adapter(
     if kind == "cli":
         extra = {
             name: entry[name]
-            for name in ("output", "cwd")
+            for name in ("output", "prompt_stdin")
             if name in entry
         }
+        if "cwd" in entry:
+            extra["cwd"] = _resolve_cwd(entry["cwd"])
         return CliAgentAdapter(
             command=entry["command"],
             args=tuple(entry.get("args", ())),
@@ -188,6 +190,17 @@ def _bridge(entry: Mapping[str, Any]) -> LocalEvoXTransport:
     if url:
         bridge.base_url = url
     return bridge
+
+
+def _resolve_cwd(raw: Any) -> str:
+    """``cwd`` 相对仓库根解析，不相对进程 cwd。
+
+    一个 agent 的工作目录决定它**能看见什么** —— 裸 CLI 会去读那个目录里的
+    ``CLAUDE.md``、``git status``、随手 glob 到的文件。按进程 cwd 解析会让「从哪里启动
+    Vox」改变 agent 的视野，而那不该是启动方式的函数。
+    """
+    path = Path(str(raw))
+    return str(path if path.is_absolute() else workspace_root() / path)
 
 
 def _check_entries(entries: Any) -> None:

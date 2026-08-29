@@ -12,7 +12,7 @@ Vox 是 Windows 本地优先的语音唤醒对话原型：中文唤醒 → 本�
 - Python：`core/`、`vox_plugin/`、`tests/`；负责语音状态、事件、音频提供器、Agent 适配器、会话桥、工具策略、记忆与运行时。
 - Desktop：Vite + TypeScript 前端，Tauri 2 + Rust 宿主；负责透明置顶唤醒球、命中区、拖动、显隐、确认卡和父子进程事件管道。
 - Contracts：`contracts/` 是可替换组件之间的稳定边界。
-- Docs/AI：`docs/` 记录架构、需求、验证证据；`.ai/` 记录任务、审查、交接和协作协议。
+- Docs：`docs/` 记录架构、需求、验证证据、ADR 与故意没做的技术债（`docs/backlog.md`）。
 
 ## 必须保持的边界
 
@@ -25,16 +25,16 @@ Vox 是 Windows 本地优先的语音唤醒对话原型：中文唤醒 → 本�
 
 ## 开发规范
 
-- 改动前先读取 `.ai/CONTRACT.md`、`.claude/CLAUDE.md` 和相关记忆。
-- 每个任务先写 `.ai/tasks/task-*.md`，声明允许范围、禁止范围、验收标准和验证命令。
+- 改动前先读取 `CLAUDE.md`、`.claude/CLAUDE.md` 和相关记忆。
+- 开工先明确「完成的判据」，收尾对照判据逐条报告，并给出实际跑过的命令与输出。
 - UI 组件考虑空、错、边界状态；接口输入校验、输出结构一致、错误可追溯；测试覆盖正常、边界和拒绝路径。
 - 证据等级必须诚实：DOC < AUTO < SIM < REAL-MIC < REAL-AGENT < REAL-EVOX < REAL-WIN。
-- 实现者不得批准自己的实现；独立审查必须有报告和实际命令证据。
+- 「跑过测试」必须能贴出命令与输出；没跑就说没跑，失败就贴失败。
 
 ## 当前进度快照
 
-- Vox 改名迁移已完成；当前开发分支已推送到用户仓库。
-- Python：`634 passed, 3 skipped`；事件 sink 专项 `123 passed`；DesktopBridge 专项 `33 passed`；前端构建和 Rust `cargo check` 已通过，均为 AUTO/SIM。
+- Vox 改名迁移已完成；所有开发分支已收敛到 `main`，仓库只保留这一条主干。
+- Python：`1190 passed, 3 skipped`（干净 shell）；DesktopBridge 专项 `33 passed`；前端构建和 Rust `cargo test` 15 passed，均为 AUTO/SIM。
 - VoiceRuntime、麦克风采集、DesktopBridge 生命周期和工具/Agent 事件隐私与派发/熔断/记忆 sink 隔离边界已加固；REAL-AGENT、REAL-EVOX、REAL-WIN、REAL-MIC 仍是后续发布风险。
 - 物理目录仍为 `D:\program\vioce-wake`，暂未改名以避免中断当前工作区。
 
@@ -44,3 +44,4 @@ Vox 是 Windows 本地优先的语音唤醒对话原型：中文唤醒 → 本�
 - 2026-08-23：同步当前测试基线与生命周期加固进度；保留真实设备/Agent/窗口证据边界。
 - 2026-08-23：补强工具事件的固定原因过滤与 sink 隔离；内部诊断和公开事件继续分层。
 - 2026-08-24：统一 Dispatcher、CircuitBreaker、MemoryWriter、MemoryRecaller 的 sink best-effort 语义并增加失败计数。
+- 2026-08-29：双 Agent 审查流程（`.ai/`、`AGENTS.md`、GitHub Agent HQ 模板与 CI）由使用者决定移除；分支收敛到 `main` 单主干，规则来源改为 `CLAUDE.md` + `.claude/CLAUDE.md`。证据诚实与安全边界不变。

@@ -1,3 +1,6 @@
 sherpa-onnx==1.13.4
 sounddevice==0.5.5
 soundfile==0.14.0
+# 只在**生成**自定义唤醒词表时用到（中文 -> 拼音声母/韵母）。跑现成词表的机器不需要它：
+# core/audio/keywords.py 在函数里 import，缺包时只有「改唤醒词」这一个动作会报错。
+pypinyin==0.55.0

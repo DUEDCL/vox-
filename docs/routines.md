@@ -35,7 +35,115 @@ python scripts/e2e_simulated.py
 
 该专项覆盖 sink 故障不改变派发、熔断和记忆结果；如果本机设置了代理变量，跑 loopback 网络测试前先清空 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`。
 
-当前全量基线 **669 passed, 3 skipped**（2026-08-24 新增持久性/排队/桥接重试/声纹加固用例）（2 个 skip 是可选的 VoxCord 适配器，1 个是符号链接越界用例 —— 本账户无权创建符号链接）。DesktopBridge 专项当前为 **33 passed**；采集专项基线为 **36 passed**。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
+当前全量基线 **1190 passed, 3 skipped**（2026-08-29 新增本机工具 35 + 意图分流 33 + 运行日志 19 + 唤醒词表 20 + 唤醒确认音 17 + `.env` 读写 13 + 控制台唤醒词 API 6 + 出站 User-Agent 2 + 中文语速 1 + 唤醒包装层 4 + agent 工作目录 3 + CLI prompt 走 stdin 6 + 出厂 agents.toml 可加载 1 + 模型列表拉取 19；2026-08-28 新增控制台 103 / 模型方案 60 / MCP 51 / 搜索后端 35 / 配置编辑 33 / 语音配置 20 / 语音装配 16 / 声纹身份 15 / 记忆并发 7）。3 个 skip：2 个可选 VoxCord 适配器（**目录在本机但依赖未装，见 `docs/backlog.md` B1**），1 个符号链接越界用例（本账户无权创建符号链接）。
+
+**断言出厂配置内容的测试改成了对本机改动宽容**：`config/models.toml` 那条改成「出厂那两套在」而不是「只有这两套」（控制台上新建方案是正常动作），搜索后端那条改成读 `_DEFAULTS` 而不是读本机 `config/tools.toml`（`allow_internet = true` 是一个正常的本机决定）。要守的是「出厂默认不配后端」，那由 `core/tools/policy.py` 的 `_DEFAULTS` 决定。
+
+DesktopBridge 专项 **33 passed**；采集专项 **36 passed**。声纹模型已就位，所以 `tests/integration/test_speaker_model.py` 的 5 个用例现在会真跑；模型缺失的机器上它们 skip —— skip 数会随环境变化，**passed 数下降才是回归**。
+
+## 控制台回归（含渲染取证）
+
+适用时机：修改 `core/console/`（含 `static/index.html`）、`core/config_edit.py`、
+`core/models_config.py` 或任何控制台可编辑的配置白名单之后。
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_console.py tests\test_config_edit.py tests\test_models_config.py -q --basetemp .pytest-run-console
+```
+
+期望 **103 + 33 + 60 passed**。它覆盖：回环校验（`0.0.0.0` 拒绝构造）、token（无 token 401
+含页面本身、Bearer 与 `?t=` 都认、`describe()` 不含 token）、WAV 解析的四条拒绝路径、
+安全边界不可编辑（`shell.enabled` / `fs.roots` / `speaker.require_verification` /
+`agents[N].command` / `mcp.require_confirmation` / `servers[N].auto_allow`）、档案路径
+穿越与凭据形状拒绝、配置编辑保留注释与**行尾**且校验失败不落盘、模型方案的密钥形状拒绝、
+预设值不落盘、探测端点不带凭据且不跟随重定向。
+
+**只跑测试不算验证。** 前端是一个单文件 HTML，测试碰不到它，所以还要一次渲染取证：
+
+```powershell
+# 起服务（.claude/launch.json 里的 console 配置，autoPort，不占唤醒球的 5173）
+#   preview_start console
+# 然后：
+#   preview_snapshot        读结构，确认侧栏九个视图都在
+#   preview_console_logs    必须为空 —— 一条 JS 错误就意味着某个面板根本没渲染
+#   preview_eval            逐个视图读它的宿主节点，确认吃到的是真实读数而不是占位态
+#   preview_screenshot      留一张视觉证据
+```
+
+判据：`preview_console_logs` 无输出；`#models-degraded` 是 hidden 的（可见就说明
+`/api/models` 没通，页面退到了出厂后备表）；`/api/state` 的 JSON 里搜不到 `token`、
+`voiceprint`、`embedding`、`vector`；就绪板的格数等于 `readiness()` 的行数
+（第二版**不再**额外加麦克风那一行）；侧栏底部读「已连接」。
+
+**宽版布局要另外量一次。** 预览面板通常只有 ~835px，那是响应式的那一支（≤1080px 时侧栏
+横排）。设计的主布局是 236px 侧栏 + 正文，得用 Edge headless 才看得到：
+
+```bash
+"/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" --headless=new \
+  --hide-scrollbars --window-size=1440,1600 --virtual-time-budget=9000 \
+  --screenshot=out.png "http://127.0.0.1:8899/#models"
+```
+
+同时量一次横向溢出，两个宽度都要：
+
+```javascript
+// preview_eval
+const d = document.documentElement;
+JSON.stringify({ overflowX: d.scrollWidth > d.clientWidth, doc: d.scrollWidth, client: d.clientWidth })
+```
+
+`overflowX` 必须是 `false`。**这条判据是一个真实缺陷换来的**：`.shell` 的
+`align-items:flex-start` 在竖排布局下让侧栏缩到内容宽（九个 nowrap 链接 = 1026px），
+把整页撑宽 223px，而 `nav` 的 `overflow-x:auto` 因为拿不到确定宽度永远不生效。
+
+**Browser 面板没显示时截图会超时**（页面不合成帧），那不是缺陷；此时 snapshot 与 eval
+仍然可用，视觉证据走上面那条 Edge headless。
+
+### 模型配置的写入取证
+
+配置写入的正确性不在截图里，在字节里。一次「什么都没改就保存」必须是**零字节差异**：
+
+```powershell
+# 保存前
+.\.venv\Scripts\python.exe -c "import hashlib,pathlib; print(hashlib.sha256(pathlib.Path('config/models.toml').read_bytes()).hexdigest()[:16])"
+# 在页面上点「保存方案」，然后再算一次 —— 两个哈希必须相同
+```
+
+不同就是回归，而且回归有两种已经发生过的形态：①预设的 `base`/`proto`/`key_env` 被写进
+文件（多出四行 `providers.py` 里已有的值）；②整个文件的行尾被重写（`write_text` 在
+Windows 上把 LF 翻成 CRLF）。第二种在 `git diff` 里**看不见** —— 本仓库
+`core.autocrlf=true` 会归一化掉它，所以哈希是唯一能抓到它的判据，这也是这条取证存在的理由。
+
+## 模型测试（拿真实模型跑一次）
+
+控制台的「模型测试」区就是这条例程的界面版，命令行等价物：
+
+```powershell
+# TTS：真实模型合成，不需要输出设备
+.\.venv\Scripts\python.exe -c "from vox_plugin.voice_stack import open_voice_stack; s=open_voice_stack(); p=s.tts; print(p.load()); a=p.synthesize('控制台测试完成'); print(a.sample_rate, a.samples.size, a.elapsed_ms)"
+
+# 就绪清单
+.\.venv\Scripts\python.exe scripts/run_voice.py --check
+```
+
+本机实测（2026-08-28）：MeloTTS 合成「控制台测试完成」→ 44100 Hz / 6041 采样点 /
+243 ms。等级 AUTO+真实模型；**听见声音**才是 REAL。
+
+## MCP 回归
+
+适用时机：修改 `core/tools/mcp.py`、`config/mcp.toml`、`contracts/mcp.schema.json`
+或 `policy.py` 的 `mcp.` 分支之后。
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_mcp.py -q --basetemp .pytest-run-mcp
+```
+
+期望 **51 passed**。等级 **SIM** —— 测试驱动的是一个进程内假 server（讲 `initialize` /
+`notifications/initialized` / `tools/list` / `tools/call` 四种形状）。**没有第三方 MCP
+server 通过这个客户端完成过调用**，那是一条新的 REAL 级验收项。
+
+其中最该看的四条：出厂配置不启用任何 server、一个 `fs.read` 之类的 server 名会被拒
+（否则能伪造内置工具段名）、`"confirmed": "no"` 不算确认、`allow` 名单在运行时复检。
+
 
 ## 契约或事件字段变更
 
@@ -125,7 +233,65 @@ python -c "from core.providers import VoxCordAdapter; print(VoxCordAdapter().loa
 .\.venv\Scripts\python.exe scripts/acceptance/live_wake.py --duration 45 --device 1
 ```
 
-运行后对着麦克风说「你好问问」。预期立即打印 `WAKE HIT: '你好问问'`，结束 JSON 中 `hit: true`、`audio_saved: false`、`resources_released: true`。可用 `--threshold` 调整灵敏度（默认 0.25），`--device` 从设备列表中选择。
+运行后对着麦克风说「你好问问」。预期立即打印 `WAKE HIT: '你好问问'`，结束 JSON 中 `hit: true`、`audio_saved: false`、`resources_released: true`。可用 `--threshold` 覆盖 `config/voice.toml` 的阈值（默认 0.25），`--device` 从设备列表中选择，`--all-hits` 跑满整个时长统计多次命中。
+
+**门默认是开的**，因为那是出厂配置。`--no-gate` 只测 KWS 模型本身；输出 JSON 里的
+`gate` 字段记录跑的是哪一种，**这样命中率永远不会被引用到错的配置上**。带门跑时被拒绝
+的唤醒会打印 `WAKE REJECTED` 并进 `rejections` 数组 —— 那也是数据。
+
+> 这个脚本在 2026-08-28 之前**跑不起来**：它建 capture 时既没传 verifier 也没传
+> `require_verification=False`，而默认是 `True`，所以 `capture.start()` 在 fail-closed
+> 门上直接抛。现在它复用 `open_voice_stack`，模型路径也不再硬编码。
+
+## 全链路语音（唤醒 → 识别 → 派发 → 出声 → 打断）
+
+```powershell
+.\.venv\Scripts\python.exe scripts/run_voice.py --check      # 先看还缺什么
+.\.venv\Scripts\python.exe scripts/run_voice.py              # 生产入口
+.\.venv\Scripts\python.exe scripts/acceptance/live_conversation.py   # 验收版，打印 verified_by
+```
+
+`run_voice.py` 是**生产入口**，`live_conversation.py` 是验收脚本（多打印一个
+`verified_by=` —— 声纹门验出来的那个名字，好让报告能写清这一轮是以授权说话人身份跑的
+还是以「没有人」跑的）。两者共用 `open_voice_stack`。
+
+必需项（唤醒模型、声纹注册）没就绪时 `run_voice.py` **拒绝启动**并逐项打印怎么补，
+不是启动后再失败。
+
+## REAL-AGENT 探测
+
+适用时机：任一 agent 后端完成登录、装好、或网络恢复之后。
+
+```powershell
+.\.venv\Scripts\python.exe scripts/acceptance/probe_agents.py
+.\.venv\Scripts\python.exe scripts/acceptance/probe_agents.py --all --json
+```
+
+它报三个互不混淆的等级：`configured`（配置里有）→ `available`（`check()` 找到了命令
+与传输）→ `REAL-AGENT`（**真的答了带文字的一轮**）。一条干净但没有文字的流不算答上 ——
+否则会用一个空回复关掉一个发布阻塞项。
+
+2026-08-24 三个后端全部「试过被挡」：`claude` Not logged in、`codex exec` 90s 无输出、
+`opencode` 连不上云端点。把每个 error 原样记进 `prototype-results.md`，恢复后重跑这条
+命令即是重试。
+
+## 30 分钟资源画像
+
+```powershell
+.\.venv\Scripts\python.exe scripts/acceptance/resource_profile.py --minutes 30
+.\.venv\Scripts\python.exe scripts/acceptance/resource_profile.py --minutes 1 --voice   # 冒烟
+```
+
+零新依赖：Windows 上走 `ctypes` 调 `GetProcessMemoryInfo` / `GetProcessTimes`。采不到
+时记 `not collected` 而不是 0（0 会读作一次测量）。输出 CSV + 摘要，其中
+**`rss_mb_growth` 是 30 分钟里最该看的一个数** —— 稳定 180 MB 没问题，180 爬到 900 是漏。
+
+脚本**只报数字，不给结论**：「180 MB 可不可以接受」取决于这台机器和同时在跑的东西，
+那一句要人写进 `prototype-results.md`。等级 REAL-WIN。
+
+> 注意：`ctypes` 的 `restype`/`argtypes` 必须声明。不声明的话 `GetCurrentProcess` 的
+> 伪句柄 `(HANDLE)-1` 会被截断成 32 位，之后每次调用都失败，症状是一整张 `n/a` 的画像
+> 看起来像「这个平台不支持」。
 
 ## 声纹回归
 
@@ -302,11 +468,21 @@ release tag 里 `recongition` 的拼写是**官方笔误**，照抄即可，改�
 (Get-FileHash models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx -Algorithm SHA256).Hash
 ```
 
-流式 ASR 模型（约 74 MB 归档，解压约 110 MB，16 kHz streaming zipformer-zh-14M）：
+流式 ASR 模型（**2026-08-29 换成 `multi-zh-hans-2023-12-12`**，约 310 MB 归档）：
+
+原来的 `zh-14M-2023-02-23` 在本机四段真人录音上字错误率 **21.4%**，其中一句「检查目前运行状态是否正常」被听成「起床先生信息的三个情况」—— 转写错到那个程度，后面的意图判定、派发、回答全都在回答一个没人问过的问题。官方文档不公布 CER/WER（只给 RTF 和文件大小），所以三个候选在同一批录音上实测（人工参考文本，编辑距离按字算）：
+
+| 模型 | 平均 CER | RTF | 那句长句 |
+|---|---|---|---|
+| `zh-14M-2023-02-23` | 21.4% | 0.014 | 18.8% |
+| **`multi-zh-hans-2023-12-12`** | **14.1%** | **0.061** | **6.2%（完全正确）** |
+| `zh-int8-2025-06-30` | 16.1% | 0.095 | 6.2% |
+
+选中间那个：比 2025 版**又准又快**。RTF 0.061 是实时的 16 倍速，常驻吃得下。剩下的错误几乎全在「沃」这个字上（听成「我/窝/吴」），不影响可用性 —— 唤醒靠 KWS 不靠 ASR。
 
 ```powershell
-curl.exe -C - -L -o models/asr.tar.bz2 `
-  https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23.tar.bz2
+curl.exe -C - -L -o models/asr-multi-zh-hans.tar.bz2 `
+  https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-multi-zh-hans-2023-12-12.tar.bz2
 tar -xjf models/asr.tar.bz2 -C models
 ```
 
@@ -354,6 +530,197 @@ Pop-Location
 
 Vite 应使用 `http://localhost:<port>`，不要把 `127.0.0.1` 作为视觉验证入口。
 
+### 签名动作门禁（替代已失效的「八态十元组零重复」）
+
+亮片数统一成 6、形状一直流动之后，静止一帧的元组不再能分辨八态（使用者选了「生命感
+优先」）。回归验收改成**量一段时间的动作**：每态预热 160 帧（让弹簧与成环走完）再连量
+252 帧（4 秒 = 一个心跳周期），逐帧读 canvas 像素算四个量。判据是**每一对至少有一个量
+明显不同**。
+
+在 `npm run dev` 起的 `index.html` 里跑（脚本见 git 历史里这一节的 eval，或照下面的量
+自己写）。当前基线：
+
+| 态 | 能量摆动× | 半径摆动% | 平均等效半径 | 质心行程 |
+|---|---|---|---|---|
+| idle | 2.27 | 16.0 | **0.019** | 0.03 |
+| listening | **3.17** | 8.6 | 0.415 | 0.13 |
+| thinking | 2.22 | **0.3** | **0.512** | 0.12 |
+| speaking | 1.93 | 3.8 | 0.479 | 0.15 |
+| cancelled | 2.32 | 8.3 | 0.279 | 0.24 |
+| error | 2.98 | 4.0 | 0.371 | 0.23 |
+
+逐对可辨的依据：`idle` 的平均半径 0.019 是唯一「几乎不存在」的（它会收回成一个点然后
+隐藏窗口）· `thinking` 的半径摆动 0.3% 是唯一不胀缩的、平均半径 0.512 是全表最大（元素
+全在 0.56R 的环上）· `listening` 能量摆动最高 + 轮廓真的胀缩 8.6% · `speaking` 能量摆动
+最低 1.93 而平均半径 0.479（吐到中段）· `cancelled` 是活着的五态里平均半径最小的 ·
+`error` 能量摆动 2.98 且质心行程最大（漏拍 + 单侧拉扣）。
+
+**`idle` 那一行的 16% 半径摆动不是呼吸**，是收回成点的过程被量进来了 —— 这一行的判据只
+看平均半径。
+
+### 调唤醒球的大小
+
+`desktop/size.html`（`npm run dev` 之后打开 `http://localhost:5173/size.html`）：
+三个尺寸并排 × 深浅两底，滑块调「布局盒总尺寸」与「球/布局盒」两个数，页面直接给出
+可照抄的两行。转场用的是与 `main.ts` **逐字相同**的弹簧与成环速率，所以这页看到的
+就是真机上的。
+
+真机上试不用重新编译前端 —— `VOX_ORB_SIZE` 由 Rust 侧拼成 `index.html?orb=N`
+（范围 96–420，越界忽略）：
+
+```bash
+VOX_ORB_SIZE=240 .venv/Scripts/python.exe scripts/demo_orb.py --hold 3 --wait 6
+```
+
+### 切态的转场是弹簧，逐条可断言
+
+`bloomSpring(to)` 给每个目标态一组 `{k, d}`，主循环按
+`vel += (target−bloom)·k − vel·d; bloom += vel` 积分。**过冲由 `d` 相对 `2√k` 决定**，
+所以「哪几个态允许回弹」是判据不是手感：
+
+| 转场 | 过冲 | 到 95% | 稳定 | 判据 |
+|---|---|---|---|---|
+| → listening | **+7.8%** | 6 帧 | 14 帧 | 允许过冲（醒过来有劲） |
+| → speaking | **+7.0%** | 7 帧 | 15 帧 | 允许过冲（开口有劲） |
+| → error | 0 | 13 帧 | 16 帧 | **禁止过冲**，最快 |
+| → cancelled | 0 | 15 帧 | 19 帧 | **禁止过冲**（垮掉不许回弹） |
+| → thinking | 0 | 20 帧 | 25 帧 | 禁止过冲（戏在成环） |
+| → idle | 0 | 45 帧 | 58 帧 | 禁止过冲，最慢（呼气） |
+
+成环 0.10/帧、收回 **0.15/帧**（收回之后紧接着要出声）。改这几个数之后重跑上表：
+`npx vite-node` 直接调 `bloomSpring` 模拟即可，不需要渲染。
+
+### 改了花冠（`desktop/src/core.ts`）还要做五件事
+
+一、几何指纹要看，而且**十个量都要看**。在 `npm run dev` 起的页面里：
+
+```javascript
+for (const s of ['idle','listening','thinking','speaking','cancelled','error']) {
+  window.setVoiceState(s, 0.85);
+  console.log(s, window.render_core_to_text());
+}
+window.setVoiceState('thinking', 0.35); window.setLanes(2);
+window.showConfirm('git push --force origin main', 'shell.run');
+console.log('gated', window.render_core_to_text());
+window.hideConfirm();
+```
+
+`{bloom, petals, ring, spin, skew, breath, rate, blobs, hot, wobble}` 必须**两两不同**，
+而且每一对至少有一个**视觉可读**的量不同 —— 要逐对检查，不能只看元组整体不等。
+当前实测值（八态、零重复）见 `D:\program\docs\design\AI_STATES.md` 第 1.1 节。
+
+二、**动效包络要量**，这是「够不够活」唯一不靠吵架的判据。跑满一个呼吸周期、
+逐帧读 canvas 像素，量亮度总和与亮度加权等效半径：
+
+```javascript
+(() => {
+  const cv = document.querySelector('#core'), ctx = cv.getContext('2d'), R = cv.width/2;
+  const out = {};
+  for (const [st, amp, rate] of [['idle',0.35,0.85],['listening',0.85,1.57],['speaking',0.8,2.9]]) {
+    window.setVoiceState(st, amp);
+    // **必须预热。** 不预热的话 bloom 正从上一态爬过来(bloom += (target-bloom)*0.12,
+    // 约 400ms),ring 也在爬(0.07/帧,约 700ms)——那段过渡会被算成「呼吸摆动」,
+    // 数字虚高一倍以上。此前记的 4.23×/5.78× 就是这么来的。
+    for (let j = 0; j < 140; j++) window.step(16);
+    const steps = Math.round((2*Math.PI/rate)/0.016), E = [], RR = [];
+    for (let k = 0; k < steps; k++) {
+      window.step(16);
+      if (k % 4) continue;
+      const d = ctx.getImageData(0,0,cv.width,cv.height).data;
+      let sum = 0, wr = 0;
+      for (let y = 0; y < cv.height; y += 2) for (let x = 0; x < cv.width; x += 2) {
+        const i = (y*cv.width+x)*4, a = d[i+3]/255;
+        if (a < 0.02) continue;
+        const L = (0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2])*a;
+        if (L < 6) continue;
+        sum += L; wr += L*Math.hypot(x-R, y-R);
+      }
+      if (sum > 0) { E.push(sum); RR.push(wr/sum/R); }
+    }
+    const rMin = Math.min(...RR), rMax = Math.max(...RR);
+    out[st] = { energy_ratio: +(Math.max(...E)/Math.min(...E)).toFixed(2),
+                eqR_swing_pct: +(((rMax-rMin)/2/((rMin+rMax)/2))*100).toFixed(1) };
+  }
+  return out;
+})()
+```
+
+当前**稳态**基线：idle 2.48× / ±2.7%、listening 2.21× / ±3.0%、
+speaking **3.26× / ±5.8%**、thinking 1.45× / ±1.5%。
+**单态的等效半径摆动已经不是判据**：0.72R 那条软边带（这一代唯一承担边界的层）
+是固定半径的，它必然按住亮度加权半径。保真度改看逐帧对照的 `eqR` 平均绝对差
+（当前 **0.042**，判据 ≤0.05）与 `energy_shape`（当前 **0.147**，判据 ≤0.16）。
+**能量摆动掉回 1.1× 量级就是退回「一张贴图」**，那正是使用者两次判断都指出的问题。
+判据是**每个呼吸态稳态 ≥1.8×**；保真度不看单态摆动，看逐帧对照的能量形状（≤0.16）——
+素材整轮的 3.8× 是一段固定编排的跨度，与「单态一次呼吸」不是同一个量。
+最聚合的那一态天然最不起伏：0.83 一段所有项都已经开着，没有会切换的项。
+`thinking` 的 1.61× 是刻意的：它的 `breathAmp` 只有 0.06，而且它合拢成一叠统一亮片，
+靠**转**而不是靠胀缩表达「在忙」。
+
+**两个已经踩过的坑，改这四个函数之前先读：**
+
+- **补偿要咬 `bloomLevel()`（态的目标值），不能咬 `bloomAt()`（含呼吸的当帧值）。**
+  单片 alpha 的过曝反向补偿一旦键在当帧值上，呼吸让 bloom 涨时 alpha 同步跌，
+  一涨一跌相消 —— 实测 listening 从 4.5× 崩到 **1.33×**，球退回一张贴图。
+- **任何固定半径的亮环都会把等效半径按住。** 体积光（DD-026）和 0.90R 的流动带
+  （DD-028）各犯过一次。带子不能挪就让它的**权重**随呼吸收放（alpha 改 `k^2.2`），
+  实测 ±6.6% → ±8.9%。**看起来像取舍的东西，先问它是不是键错了量。**
+
+三、**逐帧对照要跑满 270 帧**（`replay.html`）。它把素材逐帧提取出来的聚合度与三个簇色
+逐帧喂进渲染器，再用**与提取器逐行相同**的代码读回七项度量。判据（去掉素材前 15 帧的
+淡入相，252 帧）：
+
+| 度量 | 当前 | 不许退过 |
+|---|---|---|
+| 等效半径 平均绝对差 | 0.044 | 0.055 |
+| 归一化能量形状 平均绝对差 | 0.150 | 0.20 |
+| 核亮度比 平均绝对差 | 0.157 | 0.22 |
+| 横向梯度占比 平均绝对差 | 0.108 | 0.16 |
+| 加权 RGB 质心 平均距离 | 80 | 110 |
+
+```powershell
+# 前置：素材帧解出来放 .vox-ref/（gitignore），再把 timeline.json 复制进 desktop/
+node .vox-ref/timeline.mjs                       # 270 帧 → .vox-ref/timeline.json
+Copy-Item .vox-ref/timeline.json desktop/vox-timeline.json
+# 浏览器打开 http://localhost:5173/replay.html ，读 window.__REPLAY__.result
+```
+
+**新增任何「贴合度」标量，必须同时给并排渲染**（`side.html`，12 格：上排素材、
+下排复刻、同尺寸同裁切）。这条规则来自一次真实的错：脊线含量靠给花瓣描一道白边就能
+对上素材，而并排渲染出来是一圈白色线框，读作矢量花瓣（见 AI_STATES 第 1.4 节）。
+
+四、七格对照页要在**深浅两种桌面底 × 两档 DPR** 上看：
+
+```powershell
+& "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" `
+  --headless=new --disable-gpu --hide-scrollbars `
+  --user-data-dir="$env:TEMPox-edge-shot" `
+  --window-size=1240,940 --virtual-time-budget=5000 `
+  --screenshot="$PWD\.vox-breath-final.png" `
+  "http://localhost:5173/preview.html"
+
+# 2× DPR
+& "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" `
+  --headless=new --disable-gpu --hide-scrollbars `
+  --user-data-dir="$env:TEMPox-edge-2x" `
+  --window-size=640,700 --force-device-scale-factor=2 --virtual-time-budget=5000 `
+  --screenshot="$PWD\.vox-breath-2x.png" `
+  "http://localhost:5173/preview.html"
+```
+
+`preview.html` 从 CSS 读颜色、用 `CorollaBreath` 画图，和生产同一条链路，所以它不会
+在配色上撒谎。三格 = 深色桌面（六态 + 闸门）· 浅色桌面（同上）· 面板与确认卡。
+加 `?anim` 看动效。截图落在 `.vox-*.png`（已在 `.gitignore` 内）。
+
+四、反模式检测器要跑，而且要确认它没有降级：
+
+```bash
+IMPECCABLE_NO_TELEMETRY=1 node ~/.claude/skills/impeccable/scripts/detect.mjs src index.html preview.html
+```
+
+零输出 = 零命中。输出里若带 `DEGRADED - HTML parser modules unavailable`，
+结论是**漏报而不是干净**，先把 `htmlparser2` / `css-select` / `css-tree` / `domutils` 装回去。
+
 ## Tauri/Rust 改动
 
 适用时机：修改 `desktop/src-tauri/`、窗口属性、透明度、always-on-top、skip-taskbar 或系统 API 后。
@@ -361,7 +728,7 @@ Vite 应使用 `http://localhost:<port>`，不要把 `127.0.0.1` 作为视觉验
 ```powershell
 Push-Location desktop/src-tauri
 cargo check
-cargo test        # 命中区几何与反序列化 8 项
+cargo test        # 命中区几何、JS 字符串转义与信封反序列化 15 项
 Pop-Location
 ```
 
@@ -427,4 +794,4 @@ rg "TODO|FIXME|release blocker|not verified" core vox_plugin desktop docs tests 
 - 前端修改：`npm run build`；窗口属性修改再加 `cargo check` 和 Windows 实机验收。
 - 模型或依赖变更：记录版本、来源、归档校验结果到 `THIRD_PARTY_NOTICES.md` 和 `docs/research/prototype-results.md`。
 
-每个阶段收尾一律跑全量 `.\.venv\Scripts\python.exe -m pytest tests -q --basetemp .pytest-run`（当前基线 **669 passed, 3 skipped**），不用单文件绿灯代替全量。
+每个阶段收尾一律跑全量 `.\.venv\Scripts\python.exe -m pytest tests -q --basetemp .pytest-run`（当前基线 **1009 passed, 3 skipped**），不用单文件绿灯代替全量。

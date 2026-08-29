@@ -75,6 +75,17 @@ class VoicePlugin:
     last_reply: str | None = None
     rejections: int = 0
     last_rejection: dict | None = None
+    #: Who the voiceprint gate verified on the most recent accepted wake, as
+    #: reported by ``capture.on_verified``. ``None`` is the honest default and it
+    #: means ``shell.run`` is refused.
+    #:
+    #: This is the one piece of state the plugin is allowed to hold about identity
+    #: and it is *received*, never invented -- the capture layer runs the gate, so
+    #: it is the only layer that knows. It deliberately does not travel in any
+    #: event: events fan out to every log and transport, and a speaker name is
+    #: personal data with no diagnostic value that ``score`` does not already
+    #: carry.
+    verified_speaker: str | None = None
     memory_writer: Any = None
     memory_recaller: Any = None
     tools: Any = None
@@ -285,7 +296,9 @@ class VoicePlugin:
         self.tts = tts
         return {"tts_attached": tts is not None}
 
-    def attach_capture(self, capture: Any = None, *, on_recognized: Any = None) -> dict:
+    def attach_capture(
+        self, capture: Any = None, *, on_recognized: Any = None, on_wake: Any = None
+    ) -> dict:
         """Wire a microphone capture in and point its callbacks here.
 
         The capture's ``on_wake`` / ``on_reject`` are (re)pointed at this plugin,
@@ -293,19 +306,44 @@ class VoicePlugin:
         caller still chooses the capture (KWS provider, verifier, device); the
         plugin only owns the state machine the hits drive.
 
+        ``on_verified`` is pointed at ``set_verified_speaker``, which is how the
+        gate's answer to *who spoke* arrives. Before this existed the identity
+        stopped at the capture layer and callers filled in a constant, so
+        ``shell.run``'s one credential was a string literal. Detaching (passing
+        ``None``) clears it, because a runtime with no microphone has no verified
+        speaker.
+
         ``on_recognized`` is where transcribed speech lands. It defaults to
         ``submit_text``, which walks the state machine and the memory write but
         does **not** dispatch -- a caller that wants the whole turn (dispatch,
         answer, TTS) passes its own, which is what ``VoiceRuntime`` does with
         ``say``. Defaulting to the dispatching path instead would make the
         plugin depend on a dispatcher it deliberately does not own.
+        ``on_wake`` 同理：默认就是 ``wake_detected``（状态机该走的那一步），调用方要在命中
+        之后**额外**做点什么（弹出唤醒球、应一声）就传自己的包装，在里面调 ``wake_detected``。
+        把「显示窗口」和「播确认音」放进这个类会让状态机知道桌面和扬声器的存在，而那是
+        ``VoiceRuntime`` 的知识。
         """
         self.audio_capture = capture
         if capture is not None:
-            capture.on_wake = self.wake_detected
+            capture.on_wake = on_wake or self.wake_detected
             capture.on_reject = self.wake_rejected
             capture.on_recognized = on_recognized or self.submit_text
+            capture.on_verified = self.set_verified_speaker
+        else:
+            self.verified_speaker = None
         return {"capture_attached": capture is not None}
+
+    def set_verified_speaker(self, speaker: str | None) -> None:
+        """Record the gate's verdict. Assignment only -- it must not be able to fail.
+
+        The capture layer calls this with ``None`` at the start of every wake
+        attempt and with a name only on acceptance, so this method never needs to
+        reason about staleness. Keeping it a plain assignment is what makes that
+        guarantee hold: anything that could raise here would leave the previous
+        speaker's identity standing on the failure path.
+        """
+        self.verified_speaker = speaker or None
 
     def run_tool(
         self,

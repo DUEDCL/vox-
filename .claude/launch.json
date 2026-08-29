@@ -6,6 +6,7 @@
       "runtimeExecutable": ".venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "http.server", "5178", "--bind", "127.0.0.1"],
       "port": 5178,
+      "autoPort": false,
       "url": "http://localhost:5178"
     },
     {
@@ -13,7 +14,15 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev", "--prefix", "desktop"],
       "port": 5173,
+      "autoPort": false,
       "url": "http://localhost:5173"
+    },
+    {
+      "name": "console",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["scripts/run_console.py", "--no-browser", "--no-token", "--no-orb"],
+      "port": 8899,
+      "autoPort": true
     }
   ]
 }

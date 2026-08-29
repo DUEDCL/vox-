@@ -1,5 +1,7 @@
 __pycache__/
 .pytest_cache/
+# pytest --basetemp 目录（例程里给每轮回归起独立名字，跑完可删）
+.pytest-*/
 .venv/
 desktop/node_modules/
 desktop/dist/
@@ -20,8 +22,29 @@ enrollment/
 # 前导斜杠是必须的：不带斜杠的 memory/ 会连 core/memory/ 的源码一起忽略。
 /memory/
 
+# Agent 的隔离工作目录：外部 agent（claude 等）在这里跑，而不是在仓库根 ——
+# 裸 CLI 会读工作目录里的 CLAUDE.md、跑 git status、glob 到源码，那些和用户那句话无关。
+# 它落下的临时文件是那些 agent 的产物，不是本仓库的内容。
+.agent-workspace/
+
 # 运行时产物与日志
 *.log
 .vite.pid
 .vox/
 tmp_proto/*.wav
+
+# 截图产物：唤醒球是透明置顶窗口，截它常常连桌面上别的窗口一起截进来
+# （标签栏、URL、文件名都算个人数据）。要留证据就手动挑一张改名提交，默认不进。
+.vox-*.png
+.vox-*.gif
+.vox-ref/
+# 资源画像的 CSV：一台机器的读数，结论要人写进 prototype-results.md 才算证据
+.vox-resource-profile.csv
+.vox-*.csv
+desktop/compare.html
+desktop/replay.html
+desktop/vox-timeline.json
+desktop/side.html
+desktop/f*.png
+desktop/picks12.json
+desktop/merge.html

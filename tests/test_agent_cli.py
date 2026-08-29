@@ -383,3 +383,124 @@ def test_a_real_batch_shim_receives_the_argument_intact(tmp_path, monkeypatch):
 
     assert spoken(chunks).strip() == '"hello & goodbye"'
     assert chunks[-1].error is None
+
+
+# --- prompt via stdin: the newline hazard the shim path cannot carry ----------
+
+STDIN_ECHO = "import sys; sys.stdout.write(sys.stdin.read())"
+STDIN_SHAPE = (
+    "import sys; data = sys.stdin.read(); lines = data.splitlines();"
+    " print(len(lines)); print(lines[-1]); print(len(sys.argv) - 1)"
+)
+
+
+def test_prompt_stdin_keeps_the_prompt_out_of_the_command_line():
+    adapter = agent(STDIN_ECHO, prompt_stdin=True)
+
+    assert adapter.build_argv("anything") == [sys.executable, "-c", STDIN_ECHO]
+
+
+def test_a_multiline_prompt_reaches_the_child_intact_over_stdin():
+    """The regression this option exists for.
+
+    A prompt with newlines is exactly what memory recall produces, and on Windows
+    the ``claude`` on PATH is a ``.cmd`` shim -- cmd.exe command lines cannot span
+    lines, so the child received only ``Context:`` and answered a request nobody
+    made. The turn still reported success, which makes it a silently wrong answer
+    rather than a failure. ``_CMD_UNSAFE`` refuses ``"`` and ``%`` for the same
+    reason; a newline is the same hazard, and stdin sidesteps the whole quoting
+    problem instead of adding a third refused character.
+    """
+    adapter = agent(STDIN_SHAPE, prompt_stdin=True)
+
+    chunks = list(
+        adapter.stream(task("the real question", context=("recalled one", "recalled two")))
+    )
+
+    lines = spoken(chunks).splitlines()
+    # Context: + two items + blank + the text
+    assert lines[0] == "5"
+    assert lines[1] == "the real question"
+    # ...and nothing was passed on the command line
+    assert lines[2] == "0"
+    assert chunks[-1].error is None
+
+
+def test_stdin_is_closed_so_a_child_that_reads_to_eof_finishes():
+    """Not closing it is a hang, and a hang arrives as a timeout -- which reads as
+    "this agent is slow" rather than "we left the pipe open"."""
+    adapter = agent(STDIN_ECHO, prompt_stdin=True, timeout_s=15.0)
+
+    chunks = list(adapter.stream(task("done reading")))
+
+    assert "done reading" in spoken(chunks)
+    assert chunks[-1].error is None
+
+
+def test_the_default_still_passes_the_prompt_as_an_argument():
+    """``prompt_stdin`` is opt-in: an agent that only accepts argv must not change."""
+    adapter = agent(ECHO_PROMPT)
+
+    assert adapter.build_argv("p") == [sys.executable, "-c", ECHO_PROMPT, "p"]
+    assert spoken(list(adapter.stream(task("plain")))).strip() == "plain"
+
+
+def test_prompt_stdin_and_a_placeholder_are_refused_together():
+    """Both would mean the prompt is in two places, or that one of them is empty."""
+    with pytest.raises(CliAgentError, match="prompt_stdin"):
+        CliAgentAdapter(
+            name="mock",
+            command=sys.executable,
+            args=("-c", ECHO_PROMPT, PROMPT_PLACEHOLDER),
+            prompt_stdin=True,
+        )
+
+
+# --- where the agent runs, which decides what it can see ----------------------
+
+
+def test_a_relative_agent_cwd_resolves_against_the_repo_not_the_process():
+    """A bare CLI reads the ``CLAUDE.md``, the git state and whatever it globs in its
+    working directory. Resolving against the process cwd would make "where Vox was
+    started from" change the agent's field of view, which is not a property of the
+    launcher."""
+    from pathlib import Path
+
+    from core.agents.registry import build_adapter
+    from core.tools.policy import workspace_root
+
+    adapter = build_adapter(
+        {"name": "a", "kind": "cli", "command": sys.executable, "cwd": ".agent-workspace"}
+    )
+
+    assert Path(adapter.cwd).is_absolute()
+    assert Path(adapter.cwd) == workspace_root() / ".agent-workspace"
+
+
+def test_an_absolute_agent_cwd_is_left_alone(tmp_path):
+    from pathlib import Path
+
+    from core.agents.registry import build_adapter
+
+    adapter = build_adapter(
+        {"name": "a", "kind": "cli", "command": sys.executable, "cwd": str(tmp_path)}
+    )
+
+    assert Path(adapter.cwd) == tmp_path
+
+
+def test_the_shipped_claude_entry_does_not_run_in_the_repo_root():
+    """The regression: with no ``cwd`` the child inherits Vox's, which is the repo
+    root -- and a bare ``claude`` there answers about *this project* rather than about
+    what the user said. Observed as "你好" coming back as a Vox status report."""
+    from pathlib import Path
+
+    from core.agents.registry import build_adapter, load_agents_config
+    from core.tools.policy import workspace_root
+
+    entries = {entry["name"]: entry for entry in load_agents_config()["agents"]}
+    adapter = build_adapter(entries["claude"])
+
+    assert adapter.cwd is not None, "the shipped claude entry must pin a working directory"
+    assert Path(adapter.cwd) != workspace_root()
+    assert workspace_root() in Path(adapter.cwd).parents

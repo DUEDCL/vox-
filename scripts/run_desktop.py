@@ -20,10 +20,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from core.env_file import load_env_file
 from vox_plugin.runtime import VoiceRuntime
 
 
 def main() -> int:
+    # 密钥只从环境变量读，.env 是给这一个进程树补变量的地方。打印名字不打印值。
+    loaded = load_env_file()
+    if loaded:
+        print(f"env: 从 .env 读到 {', '.join(loaded)}")
     runtime = VoiceRuntime()
     report = runtime.start()
     print("Vox runtime")

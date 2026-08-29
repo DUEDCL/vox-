@@ -105,6 +105,18 @@ class DispatchResult:
         return "".join(chunk.text for chunk in self.chunks if chunk.kind == "text")
 
 
+def _as_mapping(value: Any) -> dict[str, Any]:
+    """安全地把一个可能根本不是 Mapping 的东西变成 dict。
+
+    日志的参数在**调用 ``_detail`` 之前**就求值了，所以这一步不能抛 —— ``_detail`` 内部的
+    try 保护不到它。而调用方给的 ``outcome`` 不一定是真的 ``ToolResult``（测试里是 Mock，
+    ``dict(Mock().audit)`` 会炸）。日志绝不能改变一轮的结果，包括不能因为构造它的参数。
+    """
+    if isinstance(value, Mapping):
+        return dict(value)
+    return {}
+
+
 class Dispatcher:
     """Intent → tool or agents → merged stream.
 
@@ -124,6 +136,7 @@ class Dispatcher:
         tool_runner: Any = None,
         memory_recaller: Any = None,
         on_event: Callable[[dict[str, Any]], None] | None = None,
+        on_detail: Callable[..., None] | None = None,
     ) -> None:
         self.router = router
         self.aggregator = aggregator
@@ -131,8 +144,23 @@ class Dispatcher:
         self.tool_runner = tool_runner
         self.memory_recaller = memory_recaller
         self._on_event = on_event
+        #: 「给人看的运行细节」出口，签名 ``(source, message, level=..., **fields)``。
+        #:
+        #: 和 ``on_event`` 分工在**扇出面**上，不在详细程度上：事件会到球、到传输、到每个
+        #: 外部消费者，所以它不带文本和参数；这条只到本机控制台的日志视图，所以它带 ——
+        #: 而「``fs.read`` 收到的 path 到底是什么」只有带参数才答得出。
+        self._on_detail = on_detail
         #: Event delivery is a side channel and must not change a turn result.
         self.sink_failures = 0
+
+    def _detail(self, source: str, message: str, **fields: Any) -> None:
+        """写一条运行细节。吞掉一切异常 —— 日志失败不能改变一轮的结果。"""
+        if self._on_detail is None:
+            return
+        try:
+            self._on_detail(source, message, **fields)
+        except Exception:  # noqa: BLE001 - a log sink is never load-bearing
+            self.sink_failures += 1
 
     # -- public --------------------------------------------------------------
 
@@ -146,6 +174,15 @@ class Dispatcher:
         """Run one turn to completion. The blocking, materialised path."""
         started = time.monotonic()
         intent = self.resolve(task.text)
+        self._detail(
+            "intent",
+            f"{task.text[:80]} -> {intent.kind}" + (f" / {intent.tool}" if intent.tool else ""),
+            kind=intent.kind,
+            tool=intent.tool or "",
+            arguments=dict(intent.arguments or {}),
+            confidence=intent.confidence,
+            tool_runner=self.tool_runner is not None,
+        )
         if intent.kind == "tool" and self.tool_runner is not None:
             return self._run_tool(task, intent, started, speaker)
         return self._run_agents(self._recall_context(task), adapters or {}, started)
@@ -303,6 +340,22 @@ class Dispatcher:
                 error=None if outcome.ok else (outcome.error or "tool failed"),
             )
         )
+        # 工具跑完了，把参数和结果记进运行日志 —— 「route=tool ok=false 0ms」这种报告缺的
+        # 就是这两样：哪个 path、被谁拒的。事件契约不带参数（它扇出到每个通道），所以这条
+        # 走日志。
+        self._detail(
+            "tool",
+            f"{intent.tool} {'ok' if outcome.ok else '失败：' + (outcome.error or 'tool failed')}",
+            level="info" if outcome.ok else "error",
+            tool=intent.tool,
+            arguments=dict(intent.arguments or {}),
+            ok=outcome.ok,
+            error=outcome.error or "",
+            needs_confirmation=outcome.needs_confirmation,
+            elapsed_ms=self._ms_since(started),
+            output_chars=len(outcome.output or ""),
+            audit=_as_mapping(getattr(outcome, "audit", None)),
+        )
         return DispatchResult(
             route="tool",
             chunks=tuple(chunks),
@@ -336,6 +389,21 @@ class Dispatcher:
         collected = tuple(self._stream_agents(task, plan, available, started))
         terminal = collected[-1] if collected else None
         ok = terminal is not None and terminal.kind == "done" and not terminal.error
+        self._detail(
+            "agent",
+            f"{plan.mode} → {', '.join(name for name, _ in available)}"
+            + ("" if ok else f"（失败：{terminal.error if terminal else 'no chunks'}）"),
+            level="info" if ok else "error",
+            mode=plan.mode,
+            agents=[name for name, _ in available],
+            reason=plan.reason,
+            ok=ok,
+            error=(terminal.error if terminal else "") or "",
+            elapsed_ms=self._ms_since(started),
+            # 有多少个 chunk 到了：一个「成功但零 chunk」的回合看起来和正常的一样。
+            chunks=len(collected),
+            context_lines=len(task.context or ()),
+        )
         return DispatchResult(
             route="agent",
             chunks=collected,

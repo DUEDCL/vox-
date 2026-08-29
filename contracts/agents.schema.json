@@ -24,6 +24,7 @@
         "output": {"type": "string", "enum": ["text", "jsonl"]},
         "cwd": {"type": "string", "minLength": 1},
         "env_passthrough": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "prompt_stdin": {"type": "boolean"},
         "url": {"type": "string", "minLength": 1},
         "model": {"type": "string", "minLength": 1},
         "capabilities": {"type": "array", "items": {"type": "string", "minLength": 1}},

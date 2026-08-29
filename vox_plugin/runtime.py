@@ -28,6 +28,7 @@ explicitly, so a caller that wants neither builds a plugin instead of this.
 from __future__ import annotations
 
 import queue
+import threading
 import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
@@ -76,6 +77,18 @@ class VoiceRuntime:
     with_desktop: bool = True
     with_memory: bool = True
     visible: bool = True
+    #: 唤醒确认音库。``None`` = 不应答（``attach_acks`` 没被调用，或者配置里清空了）。
+    #: 和 TTS、工具、记忆同款：opt-in，不装就没有这个行为。
+    acks: Any = None
+    #: 运行日志（``core/console/logbook.Logbook``）。``None`` = 不记。
+    #:
+    #: 和事件流分工在**扇出面**：事件到球、到传输、到每个消费者，所以不带参数；这份只到
+    #: 本机控制台的日志视图，所以带 —— 而「工具收到的 path 是什么」只有带参数才答得出。
+    logbook: Any = None
+    #: 回合结束到收回唤醒球之间等多久（秒）。0 或负数 = 不自动收。
+    hide_after_s: float = 10.0
+    #: 收球的定时器。每次回合结束重置，所以连着说话时球不会中途消失。
+    _hide_timer: Any = field(default=None, init=False, repr=False)
     plugin: VoicePlugin = field(default_factory=VoicePlugin)
     bridge: DesktopBridge | None = None
     dispatcher: Dispatcher | None = None
@@ -103,6 +116,25 @@ class VoiceRuntime:
     _active_task_id: str | None = field(default=None, init=False, repr=False)
 
     # ------------------------------------------------------------------- wiring
+
+    @property
+    def effective_speaker(self) -> str | None:
+        """Who this turn is authorised as. The gate wins whenever there is one.
+
+        With a microphone attached, ``plugin.verified_speaker`` is the only answer
+        -- including when it is ``None``, which is what a rejected or ungated wake
+        leaves standing. The constructor's ``speaker`` is *not* consulted there:
+        that is exactly the substitution that made ``shell.run``'s credential a
+        string literal in the acceptance script.
+
+        Without a microphone the constructor value stands. That path is a caller
+        asserting it verified the user some other way -- a typed session on a
+        machine its owner is already logged into -- and it is the pre-existing
+        behaviour of this class, unchanged.
+        """
+        if self.plugin.audio_capture is not None:
+            return self.plugin.verified_speaker
+        return self.speaker
 
     def on_event(self, event: Mapping[str, Any]) -> None:
         """The single sink. Five producers, one shape, one line to the orb."""
@@ -165,6 +197,7 @@ class VoiceRuntime:
                 tool_runner=self.tool_runner,
                 memory_recaller=self.memory_recaller,
                 on_event=self.on_event,
+                on_detail=self.log,
             )
 
             self.plugin.on_event = self.on_event
@@ -276,12 +309,14 @@ class VoiceRuntime:
         self.plugin.submit_text(text)
         self.turns += 1
         task = Task(id=f"t-{self.turns}", text=text, session_id=self.session_id)
+        self.log("turn", f"第 {self.turns} 轮：{text[:120]}", turn=self.turns, text=text)
         self._active_task_id = task.id
+        speaker = self.effective_speaker
         try:
             try:
-                result = self.dispatcher.dispatch(task, self.adapters, speaker=self.speaker)
+                result = self.dispatcher.dispatch(task, self.adapters, speaker=speaker)
                 if result.needs_confirmation:
-                    result = self._confirm_and_retry(task, result)
+                    result = self._confirm_and_retry(task, result, speaker=speaker)
             except Exception as exc:  # noqa: BLE001 - the turn must be recoverable
                 result = DispatchResult(
                     route="none",
@@ -309,7 +344,47 @@ class VoiceRuntime:
                 ok=False,
                 needs_confirmation=result.needs_confirmation,
             )
+        # 回合走完了：起倒计时收球。失败路径不走这里 —— 那几条上面已经 return，
+        # 而一个报错之后立刻消失的球会让人以为是它崩了。
+        self._schedule_hide()
+        self.log(
+            "turn",
+            f"第 {self.turns} 轮完成：route={result.route} ok={result.ok} {result.elapsed_ms}ms",
+            level="info" if result.ok else "error",
+            turn=self.turns,
+            route=result.route,
+            ok=result.ok,
+            tool=result.tool or "",
+            agents=list(result.agents or ()),
+            reason=result.reason or "",
+            elapsed_ms=result.elapsed_ms,
+            answer=(result.text or "")[:200],
+        )
         return result
+
+    def log(self, source: str, message: str, **fields: Any) -> None:
+        """往运行日志写一条。没装 logbook 就什么都不做。
+
+        吞掉一切异常：这是个调试通道，它失败绝不能改变一轮的结果。
+        """
+        if self.logbook is None:
+            return
+        try:
+            self.logbook.write(source, message, **fields)
+        except Exception:  # noqa: BLE001 - a log sink is never load-bearing
+            pass
+
+    def attach_acks(self, library: Any) -> dict[str, Any]:
+        """装上唤醒确认音。opt-in：不调用就不会有任何声音从唤醒这一步发出来。
+
+        预生成在这里做（``ensure()``），不留到唤醒那一刻 —— 本机合成一句要 500–900 ms，
+        而那一刻正是最不该等的时候。
+        """
+        self.acks = library
+        if library is None:
+            return {"acks_attached": False}
+        ready = library.ensure()
+        return {"acks_attached": True, "cached": len(ready), "failed": dict(library.failed)}
 
     def attach_microphone(self, capture: Any) -> dict[str, Any]:
         """Point a capture at this runtime so spoken requests drive real turns.
@@ -319,9 +394,73 @@ class VoiceRuntime:
         turn, on the caller thread. Doing the turn inline would hold the audio
         callback for the whole dispatch plus TTS playback -- and a held callback
         drops frames, which is indistinguishable from a bad recognizer.
+
+        ``on_wake`` 走一层包装（``_woken``）：状态机那一步照旧，额外做的两件事是弹出唤醒球
+        和应一声 —— 两件都在另一个线程上，理由和上面同一条（音频回调不能被占住）。
         """
-        report = self.plugin.attach_capture(capture, on_recognized=self.utterances.put)
+        report = self.plugin.attach_capture(
+            capture, on_recognized=self.utterances.put, on_wake=self._woken
+        )
         return report
+
+    def _woken(self, keyword: str, score: float | None = None) -> Any:
+        """唤醒命中：状态机先走，然后弹球 + 应一声。
+
+        返回值仍然是 ``wake_detected`` 的事件列表 —— capture 靠它判断这次唤醒被接受了
+        没有（被拒绝的唤醒走的是 ``on_reject``，根本不到这里）。
+        """
+        events = self.plugin.wake_detected(keyword, score)
+        self.log("wake", f"命中「{keyword}」", keyword=keyword, score=score)
+        threading.Thread(target=self._greet, daemon=True, name="vox-greet").start()
+        return events
+
+    def _greet(self) -> None:
+        """把球显示出来，再应一声。两个都吞异常：欢迎动作失败绝不能让唤醒失败。
+
+        **已知缺口**：应答音是从扬声器出来的，而识别器此刻已经开着，所以「嗯哼」可能被采进
+        转写的开头。正确的修法是让 capture 在播放期间不喂识别器（一个静音窗口），那要改
+        采集层；现在的取舍是宁可多一句噪声，也不要让人以为没听见而重复喊 —— 重复喊的第二遍
+        同样会进转写，而且更长。
+        """
+        self._cancel_hide()
+        if self.bridge is not None:
+            try:
+                self.bridge.set_visible(True)
+            except Exception:  # noqa: BLE001 - 球是增强，不是前提
+                pass
+        if self.acks is not None:
+            self.acks.play()
+
+    def _cancel_hide(self) -> None:
+        timer = self._hide_timer
+        self._hide_timer = None
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _schedule_hide(self) -> None:
+        """回合结束后过一会儿把球收回去。
+
+        不立刻收：连续对话模式下说完会回 LISTENING 等下一句，球在那几秒里是「我还在听」的
+        唯一可见信号。也不永远留着：待机时桌面上不该有个常驻的球。每次新回合重置倒计时，
+        所以连着说话时它不会中途消失。
+        """
+        self._cancel_hide()
+        if self.bridge is None or self.hide_after_s <= 0:
+            return
+
+        def hide() -> None:
+            try:
+                self.bridge.set_visible(False)
+            except Exception:  # noqa: BLE001
+                pass
+
+        timer = threading.Timer(self.hide_after_s, hide)
+        timer.daemon = True
+        self._hide_timer = timer
+        timer.start()
 
     def pump(self, *, timeout: float | None = None) -> DispatchResult | None:
         """Run one queued utterance as a full turn. ``None`` when none arrived.
@@ -335,13 +474,19 @@ class VoiceRuntime:
             return None
         return self.say(text)
 
-    def _confirm_and_retry(self, task: Task, result: DispatchResult) -> DispatchResult:
+    def _confirm_and_retry(
+        self, task: Task, result: DispatchResult, *, speaker: str | None = None
+    ) -> DispatchResult:
         """Show the command on the orb, and re-submit only on a real approval.
 
         The dispatcher does not retry itself and must not: a dispatcher that can
         confirm on the user's behalf makes all four of P4's layers decorative.
         Every non-approval -- no orb, no answer, timeout, denial -- leaves the
         original ``needs_confirmation`` result standing.
+
+        ``speaker`` is passed in rather than re-read so the retry authorises as the
+        same identity the original attempt did. Re-reading could pick up a
+        different verdict from a wake that landed while the card was on screen.
         """
         request = self._pending_confirm
         self._pending_confirm = None
@@ -368,7 +513,7 @@ class VoiceRuntime:
             confirmed,
             # ``confirmed`` is the user's click carried forward, never a default.
             Intent(kind="tool", tool=result.tool, arguments={"command": command, "confirmed": True}),
-            speaker=self.speaker,
+            speaker=speaker,
         )
 
     def _reach_listening(self) -> None:
@@ -490,6 +635,11 @@ class VoiceRuntime:
         self.plugin.paused = False
         self.plugin.last_turn_id = None
         self.plugin.last_reply = None
+        # A closed runtime holds no verified identity. The capture attachment is
+        # kept (a later start() reuses the same configured microphone), but the
+        # verdict it produced does not survive the shutdown -- the next wake is
+        # what re-establishes it.
+        self.plugin.verified_speaker = None
         self.plugin.machine.state = VoiceState.IDLE
         self._pending_confirm = None
         self._active_task_id = None
@@ -518,7 +668,8 @@ class VoiceRuntime:
         """Counts and readiness. No file contents, no command text, no vectors."""
         return {
             "started": self._started,
-            "speaker_verified": self.speaker is not None,
+            "speaker_verified": self.effective_speaker is not None,
+            "gate_source": "microphone" if self.plugin.audio_capture is not None else "caller",
             "desktop": self.bridge.describe() if self.bridge is not None else None,
             "tools": sorted(self.tool_runner.tools) if self.tool_runner else [],
             "agents": sorted(self.adapters),

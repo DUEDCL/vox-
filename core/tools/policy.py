@@ -57,6 +57,32 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "blocked_domains": [],
         "max_results": 5,
         "snippet_chars": 280,
+        # Backend selection (see core/tools/search_backends.py). Both off by
+        # default, which is what keeps "the default install talks to nobody" true.
+        # A self-hosted SearxNG on loopback wins whenever one is configured.
+        "searx_url": "",
+        "allow_internet": False,
+        "timeout_s": 8,
+        # ``web.open``：把地址交给默认浏览器，不抓结果回来。默认开着，因为它不出网、
+        # 不下载、不回传 —— 动作就只是「让浏览器打开一个页面」。
+        "open_enabled": True,
+        # ``{q}`` 是编码后的查询词。必应不需要 JS 就能出结果页。
+        "open_search_url": "https://www.bing.com/search?q={q}",
+    },
+    # ``app.open``：语音能启动哪些本机应用。
+    #
+    # **白名单，不是搜索**。能启动任意可执行文件等于代码执行，而这条路的输入是语音转写 ——
+    # 「打开记事本」和「打开记账本」在一个 14M 的识别器上是同一个音。所以这里是显式的
+    # 「说出来的名字 → 可执行文件绝对路径」映射，表里没有的一律拒绝。
+    #
+    # entries 默认是空的：路径是每台机器自己的事，写死在代码里的路径在别人机器上是错的。
+    # 控制台的「技能」那一栏会列出配了但文件不在的条目。
+    "apps": {
+        "enabled": True,
+        "entries": {},
+        # 「放点音乐」这类泛指开哪个。空 = 报错而不是在白名单里挑一个：装了三个播放器的
+        # 机器上「挑一个」是抽奖，而抽错的那次用户还得自己去关。
+        "default_music": "",
     },
     "shell": {
         "enabled": False,
@@ -233,9 +259,20 @@ def refuse(tool: str, reason: str, **audit: Any) -> ToolResult:
 class DefaultToolPolicy:
     """The shipped ``ToolPolicy``. Decides only -- it never runs anything."""
 
-    def __init__(self, config: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        config: Mapping[str, Any] | None = None,
+        *,
+        mcp_config: Mapping[str, Any] | None = None,
+    ) -> None:
         self.config = dict(config) if config is not None else load_tools_config()
         self.roots = sandbox_roots(self.config)
+        #: MCP servers, injected rather than read here. It lives in its own file
+        #: (``config/mcp.toml``) because its shape is a list of subprocesses rather
+        #: than a set of switches, and passing it in keeps this class testable
+        #: without a second config file on disk. ``None`` means "no MCP", which is
+        #: the closed answer.
+        self.mcp_config = dict(mcp_config) if mcp_config is not None else None
         #: Refusal counters by reason, for ``describe()``. No arguments are kept.
         self.refusals: dict[str, int] = {}
 
@@ -246,6 +283,16 @@ class DefaultToolPolicy:
     def check(self, request: ToolRequest) -> ToolResult | None:
         """``None`` to allow; a refusing ``ToolResult`` to deny."""
         tool = request.tool
+        # MCP tools are named ``mcp.<server>.<tool>`` and are checked here, by the
+        # same gate, for the reason red line 2 gives: a remote tool must not reach
+        # a capability the user's own voice could not. They are not in
+        # ``TOOL_NAMES`` because the set is discovered at runtime from whichever
+        # servers are configured -- the switch that governs them is in the config,
+        # not in a frozenset.
+        if tool.startswith("mcp."):
+            if request.origin not in ORIGINS:
+                return self._refuse(tool, "unknown origin")
+            return self._check_mcp(request)
         if tool not in TOOL_NAMES:
             return self._refuse(tool, "unknown tool")
         if request.origin not in ORIGINS:
@@ -260,6 +307,53 @@ class DefaultToolPolicy:
             return self._check_web_search(request, settings)
         if tool == "shell.run":
             return self._check_shell_run(request, settings)
+        return None
+
+    def _check_mcp(self, request: ToolRequest) -> ToolResult | None:
+        """Decide one ``mcp.<server>.<tool>`` request.
+
+        Confirmation is the default rather than the exception, which is the
+        opposite of every built-in tool but the same as ``shell.run``. The reason is
+        the same too: an MCP tool's blast radius is whatever its author gave it, so
+        the starting assumption cannot be "read-only".
+
+        Refusals deliberately say ``unknown tool`` for a server that is absent,
+        disabled, or misspelled. Distinguishing them would let a caller enumerate
+        which servers this machine has configured.
+        """
+        tool = request.tool
+        config = self.mcp_config
+        if not config or not config.get("enabled", False):
+            return self._refuse(tool, "mcp tools are disabled")
+        parts = tool.split(".")
+        if len(parts) != 3 or not parts[1] or not parts[2]:
+            return self._refuse(tool, "unknown tool")
+        _, server_name, remote = parts
+        server = next(
+            (
+                entry
+                for entry in config.get("servers", ())
+                if getattr(entry, "name", None) == server_name and getattr(entry, "enabled", False)
+            ),
+            None,
+        )
+        if server is None:
+            return self._refuse(tool, "unknown tool")
+        allow = tuple(getattr(server, "allow", ()) or ())
+        if allow and remote not in allow:
+            return self._refuse(tool, "tool is not on the allow-list")
+        auto = tuple(getattr(server, "auto_allow", ()) or ())
+        if config.get("require_confirmation", True) and remote not in auto:
+            if request.arguments.get("confirmed") is not True:
+                # ``is True`` and not truthiness: ``"confirmed": "no"`` is a truthy
+                # string, and that exact bug was caught once already in shell.run.
+                return ToolResult(
+                    tool=tool,
+                    ok=False,
+                    error="confirmation required",
+                    needs_confirmation=True,
+                    audit={"decision": "confirm", "server": server_name, "remote": remote},
+                )
         return None
 
     def _check_fs_read(

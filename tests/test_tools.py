@@ -478,8 +478,16 @@ def test_runner_describe_counts_without_naming_arguments(runner, tmp_path):
 
 
 def test_open_tools_leaves_the_shell_unregistered_while_it_is_off(config):
+    """``shell.run`` 不在里面，而「简单的事平台自己做」那几个在。
+
+    断言的是 ``shell.run`` 的缺席和其余的在场，不是一个精确的集合 —— 加一个不碰文件、
+    不出网的工具（``time.now``）不该让这条测试变红，而 ``shell.run`` 溜进来必须。
+    """
     tools = open_tools(config)
-    assert tools.describe()["registered"] == ["fs.read", "web.search"]
+
+    registered = tools.describe()["registered"]
+    assert "shell.run" not in registered
+    assert {"fs.read", "web.search", "time.now", "app.open", "web.open"} <= set(registered)
 
 
 def test_open_tools_registers_the_shell_once_it_is_on(config):

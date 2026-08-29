@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Vox — 六态花冠呼吸对照</title>
+<style>
+  /* 只是对照页的版面。球本身的颜色与几何全部来自 src/style.css 与 src/core.ts,
+     这里一个色值都不重复写 —— 否则这页就会开始撒谎。
+     !important 是因为 style.css 由 vite 后注入,它给 body 的满屏 grid 与 transparent
+     底色是为透明窗口准备的,在对照页里要让位。 */
+  html, body{ height:auto !important; overflow:auto !important; }
+  body{ display:block !important; margin:0; color:#dfe8ef;
+        font:14px 'Segoe UI Variable Display','Segoe UI','Microsoft YaHei',sans-serif; }
+  .band{ padding:24px 20px; }
+  .band h2{ margin:0 0 14px; font-size:14px; font-weight:600; letter-spacing:.04em; opacity:.72; }
+  /* 两条底:唤醒球是透明置顶窗口,会叠在任何桌面上。
+     只在深色底上看是自欺 —— 浅色桌面上的可读性同样是验收项。 */
+  .dark{ background:radial-gradient(120% 120% at 20% 10%,#2b3a4a,#131a22 45%,#0a0d12); }
+  .light{ background:linear-gradient(135deg,#eef1f5,#cfd8e3 60%,#aab6c4); color:#1a2430; }
+  .row{ display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap; }
+  .cell{ display:grid; justify-items:center; gap:9px; }
+  .orb{ position:relative; width:148px; height:148px; border-radius:50%;
+        box-shadow:0 0 26px var(--glow), 0 0 62px var(--glow-far); }
+  .orb canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+  .cell b{ font-weight:600; letter-spacing:.04em; font-size:14px; }
+  /* state 键名用等宽:它是代码标识符,不是给用户看的文案。UI 文案统一中文 */
+  .cell code{ font:9.5px 'Cascadia Mono',Consolas,monospace; letter-spacing:.1em; opacity:.5; }
+  .cell i{ font-style:normal; font-size:10px; opacity:.62; max-width:150px; text-align:center; }
+</style>
+</head>
+<body>
+  <div class="band dark">
+    <h2>深色桌面</h2>
+    <div class="row" id="rowDark"></div>
+  </div>
+  <div class="band light">
+    <h2>浅色桌面</h2>
+    <div class="row" id="rowLight"></div>
+  </div>
+  <!-- 活的一带。上面两带每格**钉在一个态上、只画一帧**（截图要可复现比对），
+       所以凡是活在时间里的东西在那里一律看不见：呼吸、晃动、液面涟漪的旋转、
+       自转、环的公转，以及**只在切态时才存在的成环过程**（上面的格子永远不切态，
+       `ring` 取的是目标值，所以环一直是成形的）。
+       这一带自己切态、自己按 main.ts 同一条式子插值，所以它是活的。 -->
+  <div class="band dark" style="border-top:1px solid rgba(255,255,255,.09)">
+    <h2>活的：自动切态（呼吸 / 晃动 / 涟漪 / 成环过程 都在这里）</h2>
+    <div class="row" id="rowLive"></div>
+  </div>
+  <!-- 第三格:面板与确认卡。此前对照页只有球,面板与确认卡的取证等级停在 DOC
+       (只读代码),而确认卡是本产品唯一「点错了会有后果」的界面。
+       这一格**不需要深浅两条底**:面板与卡的背景是不透明的深色玻璃,桌面底色
+       只能透过 backdrop-filter 影响一点点;球需要两条底,因为球是半透明的。 -->
+  <div class="band dark" style="border-top:1px solid rgba(255,255,255,.09)">
+    <h2>面板与确认卡</h2>
+    <section id="panel" style="display:grid;opacity:1;transform:none">
+      <div id="reply">已经读完 README.md 了，一共 42 行，讲的是这个项目怎么起手。<span class="caret"></span></div>
+      <div id="confirm">
+        <p class="confirm-head" id="confirm-title">需要确认才能执行</p>
+        <pre id="confirm-cmd" tabindex="0">git push --force origin main</pre>
+        <p id="confirm-reason">shell.run · 来自 voice</p>
+        <div class="confirm-actions">
+          <button id="confirm-deny" type="button">拒绝</button>
+          <button id="confirm-allow" type="button">执行</button>
+        </div>
+      </div>
+    </section>
+  </div>
+<script type="module">
+import './src/style.css';
+import { CorollaBreath, bloomLevel, ringLevel } from './src/core.ts';
+
+/* 七个格子 = 六态 + 闸门。闸门不是第七个状态,它是叠在 thinking 上的一层,
+   所以它复用 state 并额外带 data-confirm —— 与生产里的真实结构一致。 */
+const CASES = [
+  ['idle',      {},                      '待机', '6 片半聚合(0.52)、呼吸最浅一档(0.08)'],
+  ['listening', {amplitude: .85},        '聆听', '**呼吸最深(0.20)**、白核最亮、**只有这一态轮廓真的胀缩** ±6%'],
+  ['thinking',  {lanes: 3},              '思考', '6 片**同形同大、角距恒 60°**的弧形透镜片在环绕(ring=1)、长轴沿切向、**青→磁沿环渐变**;中心让空'],
+  ['speaking',  {amplitude: .8},         '回复', '6 片透叠、呼吸 0.11;性格在**逐句吐纳**(tts.chunk 驱动,尚未接线)'],
+  ['cancelled', {},                      '取消', '散开到 0.26、**无白热核**;仍在呼吸但最浅(0.035)'],
+  ['error',     {},                      '异常', '**一侧被拉长**(skew 0.22) + **心跳漏拍**(每 6 秒压到 0.12 倍)'],
+  ['thinking',  {gated: true, lanes: 2}, '闸门', '**形态冻住**(不自转、不成环、轮廓不缩放)但**亮度仍在呼吸**(0.05);无任何描边'],
+];
+function build(row) {
+  return CASES.map(([state, opt, label, desc]) => {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    const box = document.createElement('div');
+    box.className = 'orb';
+    box.dataset.state = state;
+    if (opt.gated) box.dataset.confirm = 'true';
+    const cv = document.createElement('canvas');
+    box.appendChild(cv);
+    // 前表面反光已删(第九代):素材实测边界上既没有亮描边也没有镜面斑,
+    // 球的边界由 core.ts 的液面轮廓 + 流动带承担,DOM 侧只剩 canvas
+    const name = document.createElement('b');
+    name.textContent = label;
+    const key = document.createElement('code');
+    key.textContent = opt.gated ? 'gated' : state;
+    const note = document.createElement('i');
+    note.textContent = desc.replace(/\*\*/g, '');
+    cell.append(box, name, key, note);
+    row.appendChild(cell);
+    // 颜色从 CSS 读,与生产同一条链路;这页因此能证明配色真的落到了光团上
+    const s = getComputedStyle(box);
+    const pick = (k) => s.getPropertyValue(k).trim();
+    const frame = {
+      state,
+      t: 1.4,
+      amplitude: opt.amplitude ?? 0.35,
+      lanes: opt.lanes ?? 1,
+      gated: !!opt.gated,
+      palette: {
+        core: pick('--lum-core'), mid: pick('--lum-mid'), far: pick('--lum-far'),
+        alt: pick('--lum-alt'),
+        glass: pick('--glass'), edge: pick('--edge'),
+      },
+      bloom: 0,
+      pulse: 0,
+    };
+    // 静态对照页画的是每态的**目标**聚合度:生产里它是插值逼近的,终点就是这个值
+    frame.bloom = bloomLevel(frame);
+    return { core: new CorollaBreath(cv), frame };
+  });
+}
+
+const cells = [
+  ...build(document.getElementById('rowDark')),
+  ...build(document.getElementById('rowLight')),
+];
+
+/* 上面两带默认画固定相位的一帧:截图因此可复现比对。要让它们也动起来加 ?anim。 */
+let t = 1.4;
+function paint() {
+  for (const c of cells) {
+    c.core.resize(148);
+    c.core.draw({...c.frame, t});
+  }
+}
+paint();
+const ANIM = new URLSearchParams(location.search).has('anim');
+
+/* ============ 活的一带 ============
+   四条时间线,各自证明一件**在静态格子里不存在**的事。
+   插值用与 main.ts **逐字相同**的两条式子(0.12 / 0.07),所以这里看到的过程
+   就是真机上的过程,不是为了好看另调的一套。 */
+const LIVE = [
+  { seq: [['idle', 1], ['thinking', 1], ['idle', 1]], hold: 2.4, amp: 0.35,
+    label: '成环过程', desc: 'idle ⇄ thinking：6 片散成一圈弧形透镜片再收回（ring 0→1→0，成环 0.10/帧、收回 0.15/帧）' },
+  { seq: [['listening', 1], ['thinking', 3], ['speaking', 1]], hold: 2.4, amp: 0.85,
+    label: '多路分组', desc: '角距恒 60°（等距是硬要求）；路数不再用角距编码，只留在指纹里' },
+  { seq: [['idle', 1]], hold: 999, amp: 0.35,
+    label: '待机微动', desc: '不切态：呼吸 + 晃动 + 液面涟漪。六态共用一条 4 秒心跳（1.57 rad/s）' },
+  { seq: [['speaking', 1]], hold: 999, amp: 0.9,
+    label: '呼吸最大', desc: '不切态：回复的呼吸 0.11。**幅度不再吃音量** —— 契约没有连续音量事件' },
+];
+
+function buildLive(row) {
+  return LIVE.map((L) => {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    const box = document.createElement('div');
+    box.className = 'orb';
+    box.dataset.state = L.seq[0][0];
+    const cv = document.createElement('canvas');
+    box.appendChild(cv);
+    const name = document.createElement('b');
+    name.textContent = L.label;
+    const key = document.createElement('code');
+    const note = document.createElement('i');
+    note.textContent = L.desc;
+    cell.append(box, name, key, note);
+    row.appendChild(cell);
+    return { core: new CorollaBreath(cv), box, key, L, i: 0, bloom: 0.52, ring: 0, tSwitch: 0 };
+  });
+}
+const live = buildLive(document.getElementById('rowLive'));
+
+/* 颜色必须在**切态之后**重读:它是 CSS 的唯一来源,而 data-state 一变值就变了。
+   与 main.ts 的 readPalette() 同一个做法 —— 每帧读太贵,只在切态时读一次。 */
+function livePalette(box) {
+  const s = getComputedStyle(box);
+  const pick = (k) => s.getPropertyValue(k).trim();
+  return { core: pick('--lum-core'), mid: pick('--lum-mid'), far: pick('--lum-far'),
+           alt: pick('--lum-alt'), glass: pick('--glass'), edge: pick('--edge') };
+}
+for (const c of live) c.palette = livePalette(c.box);
+
+function liveStep(now) {
+  for (const c of live) {
+    const [state, lanes] = c.L.seq[c.i];
+    if (c.L.seq.length > 1 && now - c.tSwitch >= c.L.hold) {
+      c.tSwitch = now;
+      c.i = (c.i + 1) % c.L.seq.length;
+      c.box.dataset.state = c.L.seq[c.i][0];
+      c.palette = livePalette(c.box);
+    }
+    const cur = c.L.seq[c.i];
+    const probe = { state: cur[0], t: now, amplitude: c.L.amp, lanes: cur[1],
+                    gated: false, palette: c.palette, bloom: c.bloom, ring: c.ring, pulse: 0 };
+    // main.ts 的两条式子,逐字相同
+    c.bloom += (bloomLevel(probe) - c.bloom) * 0.12;
+    c.ring += (ringLevel(probe) - c.ring) * 0.07;
+    probe.bloom = c.bloom;
+    probe.ring = c.ring;
+    c.core.resize(148);
+    c.core.draw(probe);
+    c.key.textContent = `${cur[0]}${cur[1] > 1 ? ' ×' + cur[1] : ''} · ring ${c.ring.toFixed(2)} · bloom ${c.bloom.toFixed(2)}`;
+  }
+}
+
+let T = 1.4;
+(function loop() {
+  T += 0.016;
+  if (ANIM) { t = T; paint(); }
+  liveStep(T);
+  requestAnimationFrame(loop);
+})();
+window.__PREVIEW_READY__ = true;
+</script>
+</body>
+</html>

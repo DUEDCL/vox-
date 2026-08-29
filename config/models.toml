@@ -1,0 +1,80 @@
+# 模型方案（多套并存，控制台的「模型配置」那一栏读写本文件）
+#
+# 可用环境变量覆盖本文件位置：VOX_MODELS_CONFIG
+#
+# ## 为什么是「多套方案」而不是三个字段
+#
+# 一套 ASR/TTS/LLM 的组合叫一个 profile。留多套的理由很实际：本机跑一套（离线、
+# 隐私最好、慢），云端跑一套（快、要联网），换服务商时不必把上一套的端点抹掉再
+# 手抄回来 —— 上一版控制台就是三个空输入框，换回去要重新查一遍文档。
+#
+# `active` 指向当前生效的那一套。切换只改这一行。
+#
+# ## 这里永远不写密钥
+#
+# 与 config/agents.toml 同一条规矩：只写**环境变量名**（`key_env`），值一律从环境
+# 变量读。写进本文件的 key 会进版本库、进日志、进事件流 —— 三处都不该有它。
+# 校验层面也会拦：形似密钥的值（长随机串、`sk-` 前缀）直接报错而不是被忽略。
+#
+# ## provider 与 base 的关系
+#
+# `provider` 是 core/console/providers.py 那张预设表里的 slug，填了它就不用写
+# `base`/`proto`（从预设取）。`provider = "custom"` 时三项都要自己写。
+# 预设里的端点**抄自各家文档，本项目没有复验**；控制台上那颗「探一下」按钮才是
+# 判据（它真的发一次 GET {base}/models，401/403 是好结果，404 是路径拼错了）。
+
+active = "local"
+
+# ---------------------------------------------------------------- 本机（默认）
+# 三条红线的第一条：唤醒、VAD、TTS、声纹全部本机执行。这一套不联网。
+[profiles.local]
+label = "全本机（离线）"
+
+[profiles.local.asr]
+provider = "sherpa-local"
+model = "zipformer-zh-14M"
+
+[profiles.local.tts]
+provider = "sherpa-local"
+model = "vits-zh-single"
+
+# 本机 LLM 走 Ollama。明文 HTTP 只许回环地址 —— 与 EvoX 桥接同一条约束。
+[profiles.local.llm]
+provider = "ollama"
+model = "qwen2.5:7b"
+
+# ---------------------------------------------------------------- 云端 LLM
+# 语音仍然本机（红线不动），只有 LLM 出网。这是最常用的一套。
+[profiles.cloud-llm]
+label = "本机语音 + 云端 LLM"
+
+[profiles.cloud-llm.asr]
+provider = "sherpa-local"
+model = "zipformer-zh-14M"
+
+[profiles.cloud-llm.tts]
+provider = "sherpa-local"
+model = "vits-zh-single"
+
+[profiles.cloud-llm.llm]
+provider = "deepseek"
+model = "deepseek-chat"
+key_env = "VOX_LLM_KEY"
+
+[profiles.test]
+label = "test"
+
+[profiles.test.asr]
+provider = "sherpa-local"
+model = "zipformer-zh-14M"
+
+[profiles.test.tts]
+provider = "openai"
+model = "vits-zh-single"
+
+[profiles.test.llm]
+provider = "custom"
+model = "claude-opus-5"
+base = "https://api.justwoker.icu/v1"
+proto = "openai"
+key_env = "VOX_LLM_KEY"

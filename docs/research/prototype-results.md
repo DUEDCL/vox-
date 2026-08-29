@@ -411,6 +411,54 @@ Result: **600 passed, 3 skipped**, identical in a clean shell and under `PYTHONU
 - Tests: new `tests/test_speaker_hardening.py` (14 cases); existing groups updated where silence inputs now stop at the quality gate by design. Speaker+privacy+hardening group **44 passed**.
 - Level: **AUTO**. Real-voice pass/rejection rates and replay behaviour remain REAL-MIC (P10) and are NOT claimed here.
 
+## Session 2026-08-26 (standing-wave orb — Canvas 2D production renderer, FR-6.5)
+
+The fluid-glass core (two counter-rotating gradient blobs behind a double inset-shadow shell) plus
+eyes, blush and blink cycles were replaced by a **standing-wave core**: `desktop/src/core.ts` draws
+one wave whose amplitude tracks the real `--amplitude` signal and whose **topology encodes state**.
+Motivation is recorded in `THIRD_PARTY_NOTICES.md`: the removed layer credited its recipe to
+`kkclaw`, whose licence this repo records inconsistently (in-file "MIT" vs `docs/handoff.md`
+"Claw Desktop Pet License, resale prohibited") and whose checkout is no longer on disk.
+
+### Waveform geometry — AUTO (deterministic, `render_core_to_text()` at fixed t = 1, R = 74)
+
+| State | Arc length | Bounding box | Samples | Closed |
+|---|---:|---|---:|---|
+| idle | 115.61 | 115.44 × 4.79 | 97 | no |
+| listening | 204.28 | 115.44 × 44.39 | 97 | no |
+| thinking | 310.56 | 88.79 × 59.20 | 193 | yes |
+| speaking | 211.03 | 115.44 × 36.69 | 97 | no |
+| cancelled | 128.06 | 115.44 × 22.30 | 97 | no |
+| error | 166.67 | 115.44 × 31.08 | 97 | no |
+
+Six distinct arc lengths and six distinct heights: **a still frame identifies the state**, so FR-6.6
+degradation no longer depends on animation. Lissajous knot multiplicity tracks the dispatch fan-out
+(`task.progress.payload.agents.length`): lanes 1→4 give arc lengths 310.56 / 535.57 / 758.41 /
+981.43 while the bounding box stays 88.79 × 59.20 — which is exactly why the fingerprint carries arc
+length and not just the box.
+### Colour pipeline and layout — AUTO (live page: computed styles + canvas pixel reads)
+
+- Bitmap 296×296 for a 148 px element at DPR 2; `resize()` reopens the bitmap when DPR changes.
+- Brightest canvas pixels per state equal the CSS `--wave` value exactly: listening rgb(60,224,207) = `#3ce0cf`, thinking rgb(140,124,255) = `#8c7cff`, speaking rgb(111,228,255) = `#6fe4ff`, cancelled rgb(125,134,143) = `#7d868f`, error rgb(255,95,74) = `#ff5f4a`; gated rgb(255,181,87) ≈ `#ffb454` (the amber rim stroke blends in). CSS is the single source of colour and it demonstrably reaches the raster.
+- Opaque fill ratio 0.787 ≈ π/4 — the cavity fills the circle and nothing escapes the clip.
+- `#orb` layout box stays 148×148 and `#core` is `pointer-events:none`, so the front-end-measured hit region is unchanged: circle r = 82 (74 + 8 px float margin); the confirm card adds a 340×137 rect and grows the window 199 → 344 px.
+- FR-6.4: listening glow radius measured 31.12 px at amplitude 0.12 and 54 px at 1.0 (`28 + amp*26`).
+- Build: `tsc && vite build` clean. CSS 13.08 → 7.22 kB, JS 8.77 → 11.88 kB (renderer added, fluid/eye/blush CSS removed). `preview.html` stays out of `dist/`.
+
+### Visual capture — AUTO (headless Chromium/Edge, DPR 1)
+
+`desktop/preview.html` renders the six states plus the gated overlay twice — on a dark and on a light
+desktop backdrop. A transparent always-on-top orb lands on arbitrary wallpaper, so checking only the
+dark case would be self-deception. Captured with
+`msedge --headless=new --disable-gpu --screenshot --window-size=1200,560`.
+
+Environment note: the in-app Browser preview pane **cannot** screenshot here ("the pane is not
+displayed, so the page is not compositing frames"), so visual evidence goes through headless Edge.
+Computed styles and canvas pixel reads do work in the pane and produced the numbers above.
+
+**Not** verified in this session: real WebView2 transparent compositing, DPI 125 / 150 / 175 %,
+multi-monitor, RDP software-render fallback, and the ≥30 min resource profile. All remain REAL-WIN (P10).
+
 ## Not yet verified
 
 - Speaker gate on this host's microphone: own-voice pass rate, another person's rejection, recorded-replay behaviour (the gate does **not** claim replay resistance — ADR 002 「局限」).
@@ -419,8 +467,84 @@ Result: **600 passed, 3 skipped**, identical in a clean shell and under `PYTHONU
 - Real streaming first-token latency.
 - Separate always-on-top, skip-taskbar wake window (defined and compiling, not visually accepted).
 - Wake-orb click-through, shadow suppression, drag, and DPI conversion at 125% / 150% / 175% — all SIM/AUTO only, REAL-WIN pending (P10).
-- The Python→desktop event path. `main.rs` has no `emit` and the frontend listens to DOM `CustomEvent`s; nothing in Python drives the orb yet.
-- A real external agent completing one turn (REAL-AGENT). **Attempted 2026-08-16 and blocked** by nested-invocation login state — see the session note above.
+- A real external agent completing one turn (REAL-AGENT). **Attempted 2026-08-16 and 2026-08-24, blocked** on all three backends — see the session note above. `scripts/acceptance/probe_agents.py` is the retry.
+- A third-party MCP server completing one `tools/call` (the client is SIM only — the tests drive an in-process fake server).
+- Browser microphone capture in the console: the recording path is asserted end to end with synthesised WAV, but no clip has been recorded through a real `getUserMedia` grant.
+
+## 2026-08-28 —— 控制台、MCP、语音入口（AUTO + 真实模型 + SIM）
+
+| 项 | 实测 | 等级 |
+|---|---|---|
+| 全量回归 | **924 passed, 3 skipped** in 39.4 s（干净 shell，`env \| grep PYTHON` 为空） | AUTO |
+| 语音契约 SHA-256 | `4f60b6124dcb9704624a0606f411981d0bf572de22fcf4a25fad133bd3c75de5`（**不变**） | AUTO |
+| TTS 真实合成 | 「控制台测试完成」→ 44100 Hz / 6041 采样点 / **243 ms**（`play=false`，不需要输出设备） | AUTO + 真实模型 |
+| 就绪清单（本机） | wake ok / asr ok / tts ok / speaker `model=ok enrolled=0` | AUTO |
+| 控制台页面 | 九个区块全部渲染，`preview_console_logs` **零输出** | SIM |
+| 控制台隐私 | `/api/state` 的 JSON 里搜不到 `token` / `voiceprint` / `embedding` / `vector` | AUTO |
+| 一轮真实工具调用 | `POST /api/text {"text":"读一下 README.md"}` → `route=tool ok=true`，3511 字 | AUTO |
+| 安全边界拒绝（实打 HTTP） | `mcp.require_confirmation` → 403 · `agents[0].command` → 403 · `../escape.md` → 400 · 私钥形状文本 → 403 | AUTO |
+| 进程计数器 | RSS **42.25 MB** / CPU 0.28 s（`ctypes` 走 `GetProcessMemoryInfo`/`GetProcessTimes`） | AUTO |
+| 模型体积（本机） | 总 **597 MB**；三个 `.tar.bz2` 归档 **261 MB** 可删；净 **336 MB**（KWS 36 / ASR 78 / TTS 183 / 声纹 38 / VAD 2.3） | AUTO |
+
+一个被修掉的真缺陷：`SqliteMemoryStore` 的连接懒建且绑在第一个查询的线程上，第二个线程
+抛 `sqlite3.ProgrammingError`。控制台是多线程的，所以症状是「保存档案成功，紧接着删除
+档案 sync 失败」—— 读起来像调用方的 bug 而不是线程设计问题。修法 `check_same_thread=False`
+加一把 `RLock`（**必须可重入**，`write()` 会调 `connection`，两者都取锁）。7 例真线程测试。
+
+一个被发现但没修的：`VoxCordAdapter().load()` 报 `import failed: No module named 'voxcord_core'`
+—— `D:\program\voxcord` **在**本机，是适配器的 sys.path 拼装与它的实际布局不匹配。那 2 个
+skip 掩盖的是一个缺陷，不是在报告「本机没这个可选依赖」。理由见 `docs/backlog.md` B1。
+
+**这一轮没有关掉任何 REAL 级阻塞项。** 做的是把它们从「一堆命令」变成「一条命令」：
+`run_console.py`（看缺什么并补齐）· `run_voice.py`（说话）· `probe_agents.py`（REAL-AGENT
+重试）· `resource_profile.py`（30 分钟画像，可无人值守启动但结论要人写）。
+
+
+## 2026-08-28（第二轮）—— 控制台第二版界面 + 模型配置（AUTO + SIM，含两个真缺陷）
+
+界面来源是使用者在 Open Design 里做的 `vox-console-v2.html`（2668 行，单文件内联，
+零外部资源：`<link>` 0 个、`<img>` 0 个、`@font-face` 0 个），验收后装进
+`core/console/static/index.html`。它引用三个当时**还不存在**的端点，本轮补齐。
+
+| 项 | 实测 | 等级 |
+|---|---|---|
+| 全量回归 | **1009 passed, 3 skipped** in 36.3 s（干净 shell） | AUTO |
+| 新增测试 | 模型方案 60 · 控制台 82→**103** · 配置编辑 29→**33** | AUTO |
+| 九个视图 | 全部吃到真实读数（就绪 3/4 · 工具 2 + agent 1 · claude 可用 · MCP 三层全关 · 安全边界只读那几个键）；`preview_console_logs` **零输出** | SIM |
+| `#models-degraded` | hidden —— 即 `/api/models` 真的通了，页面没退到出厂后备表 | SIM |
+| 宽版布局（1440px，Edge headless） | 236px 侧栏 + 正文，读数砖/就绪板/色带/告警四块齐全 | SIM |
+| 横向溢出 | 835px 与 1440px 两个宽度 `scrollWidth == clientWidth` | SIM |
+| 极光（WebGL2） | 240 fps（预览面板），headless 下也拿到 GL2；`prefers-reduced-motion`、后台、非总览页时不跑 | SIM |
+| **写入幂等** | 页面上点「保存方案」不改任何值 → `config/models.toml` SHA-256 `ce651c54…` **不变** | AUTO |
+| 单行 diff | 改一个模型名 → 只有那一行变（2451 → 2449 字节）；改回来 → 回到原哈希 | AUTO |
+| 端点探测（本机） | `GET http://127.0.0.1:11434/v1/models` → **真的发出了请求**，`WinError 10061 拒绝连接`（2065 ms 后放弃，502） | AUTO（真实套接字） |
+| 端点探测（拒绝路径） | 非回环明文 HTTP、URL 带凭据、`file://` 三条在**建立套接字之前**被拒（400） | AUTO |
+| 密钥形状拒绝 | `key_env = "sk-live-0123456789abcdef"` → 400，文件字节不变 | AUTO |
+| 云端服务商探测 | **没试过**（19 条预设端点抄自各家文档，本项目一次都没打通过） | 未验证 |
+
+**两个真缺陷，一个是本轮引入的、一个是既有的**：
+
+1. **预设端点被复制进配置文件**（本轮引入，已修）。页面为了显示会把预设的
+   `base`/`proto`/`key_env` 填进输入框，保存时一并送来。第一版实现照写 —— 结果「打开页面
+   点一次保存」凭空长出四行，全是 `providers.py` 里已有的值，而且将来改预设表改不到它。
+   修法：写侧丢掉「与预设相同且文件里本来没有」的字段；`custom` 除外；文件里已有该键时
+   照写（好让「切回预设」更新那一行，而不是留下陈旧的覆盖值）。
+2. **保存任何配置都会重写整个文件的行尾**（既有缺陷，已修）。`config_edit` 用
+   `read_text` 读、`write_text` 写：前者把 `\r\n` 归一成 `\n`，后者在 Windows 上又翻译
+   回去。**git 里看不见这件事**（本仓库 `core.autocrlf=true`，提交时归一化），所以代价不是
+   diff 噪音，而是：一次「什么都没改的保存」会让文件的 SHA-256 变掉 —— 而上面那条「写入
+   幂等」正是靠哈希取证的。发现方式也正是它：保存前后各算一次哈希，2451 → 2603 → 2513，
+   第二跳纯粹是行尾。修法：行尾从字节里探、写入用 `newline=""`。LF 与 CRLF 各两条测试。
+
+**一个渲染缺陷**（已修）：`.shell` 的 `align-items:flex-start` 是给横排布局的，转成竖排
+（≤1080px）之后交叉轴变成宽度，侧栏与正文各自缩到内容宽 —— 侧栏内容是九个 nowrap 链接、
+量出来 1026px，于是把 835px 的页面撑到 1043px，而 `nav` 的 `overflow-x:auto` 因为拿不到
+确定宽度永远不生效。加 `align-items: stretch` 后 820 = 820，nav 自己滚。
+
+**这一轮同样没有关掉任何 REAL 级阻塞项。** `config/models.toml` 现在能读能写能探端点，
+但**没有任何运行时代码按它组装模型** —— 语音栈仍由 `voice.toml` + 四个环境变量决定。
+所以 `active` 目前只是一个被记录的意图（`docs/backlog.md` B7）。
+
 
 ## Blockers
 

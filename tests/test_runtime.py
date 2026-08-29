@@ -94,7 +94,48 @@ def test_attach_microphone_only_enqueues_on_the_audio_thread():
     assert dispatcher.calls == []
     assert runtime.utterances.qsize() == 1
     # The wake callbacks are pointed at the plugin too, so barge-in still works.
-    assert capture.on_wake == runtime.plugin.wake_detected
+    # 现在中间隔了一层 ``_woken``：状态机那一步照旧，额外做的是弹球 + 应一声。
+    assert capture.on_wake == runtime._woken
+    assert capture.on_reject == runtime.plugin.wake_rejected
+
+
+def test_the_wake_wrapper_still_walks_the_state_machine():
+    """包装层不能把状态机那一步弄丢：capture 靠 ``wake_detected`` 的返回值判断这次唤醒
+    被接受了没有，而球和应答音都是**之后**才发生的事。"""
+
+    class StubCapture:
+        def __init__(self) -> None:
+            self.on_wake = None
+            self.on_reject = None
+            self.on_recognized = None
+
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+    runtime._started = True
+    runtime.plugin.start()
+    capture = StubCapture()
+    runtime.attach_microphone(capture)
+
+    events = capture.on_wake("你好问问", 0.91)
+
+    kinds = [event["type"] for event in events]
+    assert kinds == ["wake.detected", "state.changed"]
+    assert runtime.plugin.machine.state.value == "listening"
+
+
+def test_greeting_never_raises_when_there_is_no_bridge_and_no_acks():
+    """欢迎动作失败绝不能让唤醒失败 —— 无头运行（没有球、没有应答音）是支持的模式。"""
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+
+    runtime._greet()  # 不抛就是通过
+
+
+def test_a_hide_timer_is_not_started_without_a_bridge():
+    """没有球就没有要收的东西。起一个空转的定时器只会在测试里留下一个活线程。"""
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+
+    runtime._schedule_hide()
+
+    assert runtime._hide_timer is None
 
 
 def test_pump_runs_one_queued_utterance_as_a_turn():

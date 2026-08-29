@@ -34,6 +34,23 @@ blocked_domains = []
 max_results = 5
 snippet_chars = 280
 
+# 后端选择。**两个都默认关**,不填就还是「没有后端」——`web.search` 如实
+# 报 no search backend is configured,出厂行为不变。详见
+# core/tools/search_backends.py 的文件头。
+#
+# 自建 SearxNG 实例(推荐):零 key、零第三方,查询不出本机。填它就优先用它。
+# 明文 HTTP 只许回环地址,带凭据的 URL 直接拒 —— 与会话桥接同款校验。
+# 实例的 settings.yml 里 search.formats 必须含 json,否则 SearxNG 回 403。
+searx_url = ""
+
+# 兜底:DuckDuckGo 的无 key HTML 端点。它**是**一次对外网络请求 ——
+# 打开等于每次 web.search 都出本机。所以它有一个自己的开关,而且叫这个名字。
+# 只在 searx_url 为空时才会被用到。
+allow_internet = true
+
+# 单次检索超时(秒)。两个后端共用。
+timeout_s = 8
+
 [shell]
 # **默认关闭**。要用就自己打开,并且自己维护下面的白名单。
 # 「语音说一句话就能在本机执行命令」是本项目最大的攻击面。
@@ -51,3 +68,25 @@ require_verified_speaker = true
 
 timeout_s = 20
 max_output_bytes = 20000
+
+# ---------------------------------------------------------------- 本机应用
+#
+# app.open 能启动哪些应用。**白名单，不是搜索**：能启动任意可执行文件等于代码执行，
+# 而这条路的输入是语音转写 —— 「打开记事本」和「打开记账本」在一个 14M 的识别器上是
+# 同一个音。所以这里是显式的「说出来的名字 → 可执行文件绝对路径」映射。
+#
+# 键会自动展开变体：配了「网易云音乐」，说「打开网易云」也开得起来（剥掉「音乐」
+# 「播放器」「客户端」这类尾巴）。精确匹配永远优先。
+#
+# 下面这三条是 2026-08-29 从本机注册表的 DisplayIcon 字段读出来的实际安装位置。
+# 换了安装位置就改这里 —— 文件不在时 app.open 会明确说「配了但文件不在」，不会静默失败。
+[apps]
+enabled = true
+
+# 「放点音乐」「来首歌」这类泛指开哪个。空的话这类请求会报错而不是随便挑一个。
+default_music = "网易云音乐"
+
+[apps.entries]
+"网易云音乐" = "D:/Music/CloudMusic/cloudmusic.exe"
+"酷狗音乐" = "D:/recreation/KGMusic/KuGou.exe"
+"洛雪音乐" = "D:/recreation/lxmusic/lx-music-desktop/lx-music-desktop.exe"

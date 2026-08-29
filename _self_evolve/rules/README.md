@@ -2,9 +2,8 @@
 
 当前规则来源：
 
-- `AGENTS.md`
-- `.ai/CONTRACT.md`
-- `.claude/CLAUDE.md`
+- `CLAUDE.md`（仓库入口 + 单干流程）
+- `.claude/CLAUDE.md`（本项目硬约束）
 - `core/`、`desktop/`、`tests/` 目录现有约束
 
 后续按任务路径新增细分规则，避免重复或覆盖项目既有安全边界。

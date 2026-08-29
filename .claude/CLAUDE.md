@@ -14,46 +14,108 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **669 passed, 3 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1009 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
 | `core/audio/`(除 speaker) | `pytest tests/test_provider_adapter.py tests/test_sherpa_provider.py -q` | 全绿 |
+| `core/audio/config.py` `config/voice.toml` | `pytest tests/test_voice_config.py -q` | **20 passed** |
+| `vox_plugin/voice_stack.py` | `pytest tests/test_voice_assembly.py -q` | **16 passed** |
 | `core/audio/speaker.py` `ring.py` `capture.py` | `pytest tests/test_speaker.py tests/test_speaker_privacy.py tests/test_speaker_hardening.py -q` | **44 passed**（**不需要声纹模型**） |
+| 声纹身份接线（capture→plugin→runtime） | `pytest tests/test_speaker_identity.py -q` | **15 passed** |
 | 声纹阈值或判别力 | `pytest tests/integration/test_speaker_model.py -q` | 5 passed（缺模型时 5 skipped） |
 | TTS 合成（需模型） | `pytest tests/integration/test_tts_model.py -q` | 4 passed（缺模型时 2 skipped） |
 | `core/tools/` | `pytest tests/test_tools.py tests/test_tool_security.py -q` | **123 passed, 1 skipped**（skip 是符号链接越界，本账户无权建链接） |
-| `core/memory/` | `pytest tests/test_memory.py -q` | **65 passed** |
+| `core/tools/search_backends.py` | `pytest tests/test_search_backends.py -q` | **35 passed**（不打真网络） |
+| `core/tools/mcp.py` `config/mcp.toml` `contracts/mcp.schema.json` | `pytest tests/test_mcp.py -q` | **51 passed**（假 server，SIM） |
+| `core/config_edit.py` | `pytest tests/test_config_edit.py -q` | **33 passed** |
+| `core/models_config.py` `config/models.toml` `core/console/providers.py` | `pytest tests/test_models_config.py -q` | **60 passed**（不打真网络） |
+| `core/console/` `core/console/static/index.html` | `pytest tests/test_console.py -q` + **控制台渲染取证**（`preview_start console` → snapshot → 截图；宽版走 Edge headless） | **103 passed** + 页面无 console 错误 |
+| `core/memory/` | `pytest tests/test_memory.py tests/test_memory_threads.py -q` | **65 + 7 passed** |
 | 工具/记忆与语音路径接线 | `pytest tests/test_memory.py tests/test_plugin_tools.py -q` | **87 passed** |
 | `core/agents/` `config/agents.toml` | `pytest tests/test_agent_contract.py tests/test_agent_cli.py tests/test_agent_evox.py tests/test_agent_acp.py tests/test_agent_http.py -q` | 全绿（contract 14 + cli 28 + evox 17 + acp 12 + http 9） |
 | `core/dispatch/` | `pytest tests/test_router.py tests/test_dispatcher.py tests/test_aggregator.py tests/test_intent.py tests/test_breaker.py -q` | **159 passed**（router 30 + dispatcher 37 + aggregator 20 + intent 54 + breaker 18） |
 | `core/session_bridge.py` | `pytest tests/test_session_bridge.py tests/test_plugin_tools.py -q` | 全绿 |
 | `desktop/src/` | `cd desktop && npm run build` | tsc + vite 通过 |
+| `desktop/src/core.ts`（花冠） | 上面那条 + **逐帧对照（`replay.html`，270 帧）** + 12 格并排渲染（`side.html`）+ **动效包络实测（须预热 140 帧）** + 八格对照页 + **成环过程 `merge.html`**（例程见 `docs/routines.md`） | 八态十元组指纹互不相同（零重复）、深浅两底 × 1×/2× 都可读、三个呼吸态稳态能量摆动 ≥1.8×、逐帧等效半径平均绝对差 ≤0.05、能量形状 ≤0.16 |
 | `desktop/src-tauri/` | `cd desktop/src-tauri && cargo check && cargo test` | 零警告 + **15 passed** + **须实机验收** |
 
 必须用隔离环境的 `.venv\Scripts\python.exe`，不用系统 Python（系统环境没装 sherpa-onnx / soundfile）。
 
 全量的 3 个 skip 构成固定：**2 个 VoxCord**（`test_provider_adapter.py`，同一个 marker，只会同时跳）+ **1 个符号链接**（`test_tool_security.py`，本账户无权建链接）。skip 数会随环境变化（VoxCord、模型是否存在），**passed 数下降才是回归**。
 
+**VoxCord 那 2 个 skip 掩盖了一个缺陷，不是在报告「本机没这个可选依赖」** —— `D:\program\voxcord` **在**本机（monorepo，`packages/voxcord_core`）。实测 `VoxCordAdapter().load()` 报 `import failed: No module named 'voxcord_core'`：适配器往 `sys.path` 加的是 `packages/voxcord_core` 与 `.../lib`，而真实模块在 `.../lib/audio_engine/`，顶层名 `voxcord_core` 只有 `pip install -e .` 之后才存在。文档里此前写的「voxcord 不存在」是错的事实陈述（结论碰巧对）。不修的理由与修的前提见 `docs/backlog.md` B1。
+
 **基线必须在干净 shell 里记。** 2026-08-16 查出 `599 passed, 2 skipped` 这个数字记错了：它是在设了 `PYTHONUTF8`（或 `PYTHONIOENCODING`）的 shell 里跑出来的，干净 shell 下当时是 `1 failed, 597 passed`。一个结果取决于环境变量的测试等于没有基线 —— 详见 `core/agents/acp.py` 的 `_UTF8_ENV`。记基线前先 `env | grep PYTHON` 确认是空的。
 
 ## 当前阶段
 
-Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事件契约、P3 记忆系统、P4 本地工具与安全门、P5 agent 适配器、P6 派发/路由/汇总、P7 ACP/HTTP 适配器已落地（P8 唤醒球 UI 也已到 AUTO+SIM 级），「Python→桌面事件通道」已接线到代码级（cargo test 15 passed、npm build 通过），下一步 P9/P10 真机验收。十阶段划分与 11 项发布阻塞项见 `docs/project-overview.md` 第 5、6 节。
+Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事件契约、P3 记忆系统、P4 本地工具与安全门、P5 agent 适配器、P6 派发/路由/汇总、P7 ACP/HTTP 适配器、P8 唤醒球 UI 与事件通道已落地。**本轮新增（2026-08-28）**：语音生产入口 + 配置化、声纹已验身份接线、`web.search` 两级后端、TOML 行级写入器、**本机 web 控制台**（ADR 006）、**MCP 工具接入**（ADR 007）、无人值守验收脚本、**控制台第二版界面（九视图）+ 模型配置模块**（ADR 006 第 8、9 节）。下一步 P9/P10 真机验收。十阶段划分与发布阻塞项见 `docs/project-overview.md` 第 5、6 节。
 
-决策记录：ADR 001 语音栈 · ADR 002 声纹准入 · ADR 003 agent 接入 · ADR 004 记忆 · ADR 005 派发与工具门。
+决策记录：ADR 001 语音栈 · ADR 002 声纹准入 · ADR 003 agent 接入 · ADR 004 记忆 · ADR 005 派发与工具门 · **ADR 006 本地控制台** · **ADR 007 MCP 工具**。识别但故意没做的技术债见 `docs/backlog.md`。
+
+三个入口：`scripts/run_console.py`（控制台，浏览器里补齐配置）· `scripts/run_voice.py`（说话）· `scripts/run_desktop.py`（打字）。
+
 
 **未实现，不要假设存在**：
-- `web.search` 的**真实后端** —— 平台不自带（每个托管搜索 API 都是带 key 的云依赖），未注入时工具报 `no search backend is configured`
+- **`config/models.toml` 没有读侧** —— 控制台能读能写能探端点（`core/models_config.py` + 三个 API），但**没有任何运行时代码按它组装模型**：语音栈仍然由 `config/voice.toml` + 四个环境变量（`VOX_*_MODEL_DIR`）决定，LLM 仍然由 `config/agents.toml` 的 agent 决定。所以 `active` 现在只是一个被记录的意图，改它不改变任何行为 —— 也正因为如此控制台不提供切换 `active` 的按钮（`docs/backlog.md` B7）
+- **云端 ASR/TTS/LLM 一家都没接过** —— `providers.py` 那 19 条预设的端点抄自各家文档，**本项目一次都没打通过**。「探一下」按钮打本机 Ollama 时确实发出了请求（拿到连接被拒），打云端**没试过**
+- **第三方 MCP server 真实调用** —— `core/tools/mcp.py` 已实现（stdio JSON-RPC，三层默认关），但测试用的是进程内假 server，只算 **SIM**。没有任何真实 MCP server 通过它完成过一次调用
 - 真机说话打断是 REAL，需麦克风+扬声器在场（打断链路本身已通：`wake_detected` 在 SPEAKING/THINKING 先 `cancel()` 停 TTS + transport 再进 LISTENING）
-- Canvas 2D 生产渲染器（现在是 DOM + CSS，六态与动画都已落地）
 - 桌面侧的超时/重连（系统托盘已由 `build_tray` 实现：显示/隐藏/退出，Rust 侧建、不扩 IPC 面；真机点开未验）。传输层超时与重试已覆盖：CLI agent 有 120s 超时（错误 chunk）、桥接有 30s 超时 + 仅连接期重试（`attempts` 默认 1 关闭；超时/HTTP 错误永不自动重发——回合可能已执行，重试即重复）
 - 声纹**反欺骗**：门不防录音回放，这是已知缺口（ADR 002 局限），不是待办
 - 声纹**真机验收**：本人通过率、他人拒绝、回放实测都需你在场（P10）
-- 记忆**跨进程持久性**：Markdown 往返在同进程内已验，重启后仍未验（P10）
-- **真实外部 agent 跑通一轮** —— `cli.py` 的全部测试用 mock 子进程，只算 SIM；P9 REAL-AGENT 在本机三个后端均已尝试且受阻（2026-08-24）：`claude -p` Not logged in、`codex exec` 挂起无输出、`opencode run` 无法连接云端点——是「试过被挡」不是「没试」，恢复任一后端登录/网络后即可重试
+- 记忆**跨进程持久性**：双进程自动化实测已过（AUTO_MULTI_PROCESS）+ 多线程并发已过（真线程 7 例），重启后的人工确认仍未做（P10）
+- **真实外部 agent 跑通一轮** —— `cli.py` 的全部测试用 mock 子进程，只算 SIM；P9 REAL-AGENT 在本机三个后端均已尝试且受阻（2026-08-24）：`claude -p` Not logged in、`codex exec` 挂起无输出、`opencode run` 无法连接云端点——是「试过被挡」不是「没试」。恢复任一后端后跑 `scripts/acceptance/probe_agents.py` 即是重试
+- `scripts/fetch_models.py` 按需下载脚本 —— 形状已定（`docs/model-distribution.md` §2.5），代码未写
+- 三档分发物（代码档 / 最小可用档 74MB / 完整档 336MB）一档都没打包过，全是 DOC 级
 
 **已完成但容易记错的**：
+- **控制台第二版是侧栏 + 九个视图，不是一页十一块** —— `core/console/static/index.html`（2668 行，仍然单文件内联）。六个模块（模型配置 / 声纹 / 本机 Agent / 本人档案 / 技能与 MCP / 唤醒球）+ 运行态总览 + 只读的安全边界 + 调试。**页面上没有开麦克风的入口了**（`mic_start`/`mic_stop` 端点保留，因为 `run_console.py --voice` 还在调）—— 要开麦克风用 `--voice` 启动。声纹注册不受影响，它走浏览器 `getUserMedia`。刊头那块 WebGL2 极光是**读数的第三种编码**（能量随 `state`），不是装饰；拿不到 WebGL2 退静态渐变，减少动效/后台/非总览页时不跑
+- **模型配置的三个端点已实现，但预设端点未经复验** —— `GET/PUT /api/models` + `POST /api/models/probe`，loader 与写入器在 `core/models_config.py`，预设表在 `core/console/providers.py`（11 LLM + 4 ASR + 4 TTS）。**「探一下」按钮才是判据**（401/403 = 主机在路径对只是没 key，404 = 路径拼错），这句话在 `providers.py` 注释和页面上各写了一次，别删
+- **预设值不许落盘** —— 页面为了显示会把预设的 `base`/`proto`/`key_env` 填进输入框，写回时这三项被丢掉（除非文件里本来就有那个键、或服务商是 `custom`）。这是**实测过的回归**：不这么做的话，打开页面点一次「保存方案」会凭空长出四行 `providers.py` 里已有的值 —— 一份将来改预设表改不到的副本
+- **`models.toml` 不在 `EDITABLE` 里，这是刻意的** —— 它由自己的端点写，带自己的白名单（`FIELDS` 五个字段名）。放进 `EDITABLE` 等于给同一个文件开第二道门而且校验更弱。它也是唯一允许**加键**的配置（它的表就是数据），走 `config_edit.set_section`，必须点名表名才够得到
+- **`config_edit` 现在保留行尾，这修的是一个真缺陷** —— `read_text` 把 `\r\n` 归一成 `\n`、`write_text` 在 Windows 上又翻译回去，所以控制台保存**任何**配置都会把整个文件的行尾重写一遍。**在 git 里看不见** —— 本仓库 `core.autocrlf=true`，提交时会归一化掉，所以代价不是 diff 噪音：它让一次「什么都没改的保存」也把文件的 SHA-256 换掉，而「零字节差异」正是配置写入唯一可自动化的取证判据（`docs/routines.md` 的写入取证一节）。行尾现在从字节里探、写入用 `newline=""`
+- **密钥形状的值整条拒绝** —— `models_config.looks_like_secret()`：`sk-`/`ghp_`/`AKIA`… 前缀，或 24 字符以上、大小写数字混合且无分隔符的串。规则**故意窄**（`claude-opus-4-20250514`、`qwen2.5:7b`、URL 都不能误伤，有 10 条反例测试）。`key_env` 另外必须形如 `VOX_LLM_KEY`
+- **探测是控制台唯一的出网动作，而且不带凭据** —— 一次 `GET {base}/models`、6 秒超时、**不跟随重定向**（跟了就是在报告另一台主机）、**只取状态码不读 body**。不带凭据正是 `401` 能被读成好结果的原因。明文 HTTP 只许回环、URL 带凭据拒绝 —— 这条规则在本仓库现在有**四份**实现（桥接 / HTTP agent / 检索后端 / 这里），不合并的理由见 `docs/backlog.md`
+- **`web.search` 有后端了，但出厂仍然关着** —— `core/tools/search_backends.py`：`SearxBackend`（自建 SearxNG 回环，零 key 零云，沿用桥接同款 URL 校验）优先，`DuckDuckGoBackend`（无 key HTML 抓取，**是**对外请求）兜底。两个都默认关：`searx_url = ""` + `allow_internet = false` → `open_search_backend()` 返回 `None`，工具继续报 `no search backend is configured`。**出厂行为一个字节没变**。坏的 `searx_url` **不 fallback 到外网**（那是"错的帮忙"）
+- **控制台是一份可操作清单，不是仪表盘** —— `core/console/`（标准库 `http.server`，零新依赖）+ 单文件前端（CSS/JS 内联，所以**每个请求包括页面本身都要 token**）。强制回环绑定（`0.0.0.0` 拒绝构造）、随机 token、`log_message` 被静默覆盖（默认实现会把带 token 的 URL 写进 stderr）。`--no-token` 只给预览工具用，会打印警告且 `describe()` 上报。ADR 006
+- **安全边界不可从网页改，而且仍然显示** —— 白名单在 `core/console/routes.py` 的 `EDITABLE`/`AGENT_EDITABLE`/`MCP_EDITABLE`。不可改的：`shell.enabled`/`allow`、`fs.roots`/`denied_*`、`speaker.require_verification`、`agents[N].command`/`args`/`cwd`/`url`/`env_passthrough`/`name`/`kind`、`mcp.require_confirmation`、`servers[N].allow`/`auto_allow`/`command`。**`command` 从网页可改等于远程代码执行**，回环绑定不改变这一点。藏起来更糟：想弄清"为什么这个 agent 在跑那条命令"需要看见那条命令
+- **控制台不确认 `shell.run` 也不确认 MCP** —— 确认面恰好一个，是唤醒球（FR-6.13）。控制台只报「有一个待确认」，连命令原文都不显示
+- **配置编辑是行级替换不是序列化** —— `core/config_edit.py`。`tomllib` 只读，序列化回去会删掉所有注释，而注释是承载理由的那一半（`speaker.toml` 解释了为什么阈值 0.5）。只能改**已存在**的键、只支持单行标量与内联数组（多行数组按名字拒绝）、写前用该配置自己的 loader 校验候选文件、原子替换。`scan()` 支持 `[[agents]]` 数组表并给出 `agents[0].enabled` 形式的键
+- **浏览器录声纹，音频只在内存** —— 前端 `AudioContext` 取 Float32 → 自己降采样 16 kHz（**盒式平均不是抽点**，抽点会把高频折回来而声纹吃的正是那段频谱）→ 自己写 WAV 头 → base64。后端只需标准库 `wave`，零新依赖。解出来的数组直接给 `enroll()`，字节从不落盘、从不进日志、从不进事件
+- **声纹已验身份现在真的到达授权判定了** —— 此前 `capture._authorise()` 拿到 `result.speaker` 却只把 `score` 传出去，验收脚本填了个 `speaker="owner"` 字符串常量。现在 capture 有 `on_verified` 回调 → `plugin.verified_speaker` → `runtime.effective_speaker`。**身份不进事件**（事件扇出到每个日志通道，`score` 已经是够用的诊断）。`_authorise()` 开头**无条件先清 None**，只在接受时设名字 —— 所以任何失败路径都留在 None（fail-closed），包括 `on_verified` 自己抛异常。**接了麦克风就只认门的答案**，构造参数 `speaker=` 只在没接麦克风时生效（打字模式）
+- **记忆库现在是线程安全的，这修的是一个真缺陷** —— `SqliteMemoryStore` 的连接是懒建的、绑在第一个查询的线程上，第二个线程访问抛 `sqlite3.ProgrammingError`。控制台是多线程的（HTTP 工作线程 + pump 线程 + 音频回调），所以症状是「保存档案成功、紧接着删除档案 sync 失败」，读起来像调用方的 bug。修法：`check_same_thread=False` + 一把 **`RLock`**（必须可重入：`write()` 会调 `connection`，两者都取锁）。7 例真线程测试
+- **语音栈的组装点是 `vox_plugin/voice_stack.py`** —— `open_voice_stack()` 按 `config/voice.toml` 建 KWS/ASR/TTS/声纹 + capture。**缺 TTS/ASR 降级并如实报告，缺声纹不降级**（那不是降级模式，是另一个产品；`capture.start()` 负责拒绝，这里不许塞 `require_verification=False` 绕过）。`readiness()` 是「还缺什么」的唯一答案，命令行与控制台读同一份
+- **模型路径走环境变量不进配置文件** —— `VOX_KWS_MODEL_DIR` / `VOX_ASR_MODEL_DIR` / `VOX_TTS_MODEL_DIR` / `VOX_VAD_MODEL`，默认落 `models/` 下固定目录名。理由与 `speaker.toml` 的 enrollment 路径同款：进版本控制的配置文件不该记录某台机器的磁盘布局。副作用是多个实例可共用一份模型
+- **`config/voice.toml` 的未知键报错而不是被忽略** —— 与 `tools.toml` 同立场（`load_speaker_config` 是忽略的那一派，两种并存是有意的）。拼错 `keywords_threshold` 会静默保留默认值，而操作者以为改了
+- **`live_wake.py` 此前根本跑不起来** —— 它建 capture 时既没传 verifier 也没传 `require_verification=False`，而默认是 `True`，所以 `capture.start()` 在 fail-closed 门上直接抛。已改为复用 `open_voice_stack`，且默认带门（`--no-gate` 才关，JSON 输出里记 `gate` 字段，好让命中率不会被引用到错的配置上）
+
+
+**已完成但容易记错的**：
+- **唤醒球是花冠呼吸（Canvas 2D）：一团装在液面里的光，没有面孔、没有刻度、没有玻璃壳** —— 第九代（2026-08-27，DD-026）。前几代被推翻的共同病根是**用一个轮廓表达一团光**：第四/五代是「一段弧在固定半径的环上」，第六/七代是「一个会变形的闭合轮廓」—— 只有一层形体，所以只能**变形**，做不出**波动**。第四代还多犯一件：把「不能用对手的配色」推成了「继续用黄铜刻度」，而 12 条刻线渲染出来是**老怀表的表盘、音响的旋钮** —— 错误的交互暗示，已作为反模式条目写进 ANTI_SLOP。**「球内只有一个几何中心、任何元素不得成对出现」这条规则从第四代继承**（它是「读作脸」的解法），thinking 分裂成 N 叠是唯一例外：那不是一对，是一个可数的真实数字
+- **球壳不存在，这是量出来的** —— 素材的径向亮度剖面从球心单调衰减，r=0.91 只剩峰值的 3.9%、r=1.00 是 **0.4%**：边界上**没有任何描边**；亮度峰值角一轮里扫过 **0–354°**，定角镜面高光也不存在。第九代因此删掉五项：白色内描边、左上镜面弧、右下暖色弧、`.gloss` 前表面反光、边缘辉光。边界由两项承担，都是量出来的：**液面轮廓** `contourRadii()`（2–5 次谐波，角向标准差 1.7% 半径，各自慢转；**闸门时归零退回精确圆**）当裁剪路径 + **流动带** `film()`（r=0.90R、宽 0.155R、48 段、角向亮度绕圈流动）。`--glass`/`--edge` 同时压到近黑（实测素材外圈 #070c17–#090c18），但**不能归零** —— 球是透明置顶窗口，全透明会让它在白底桌面上消失
+- **主状态量是聚合度 `bloom`（0–1），第二重是成环度 `ring`** —— bloom 0 = 花瓣分离成小片、中心全暗；1 = 花瓣**穿过球心**彼此透叠、中心被逼出一团过曝白核。花瓣的**长度与中心外移反相**，这是「呼吸」的全部。外移越过 0 的那一点是 `own=0.40`，**是量出来的**（素材的核亮度比在 agg<0.40 是 0.33–0.39、agg>0.40 直接跳到 0.97）；试过推到 0.50 想让散开相更暗，逐帧实测全面变差，**0.40 就是 0.40**。
+- **`ring` 只有 `thinking` 取 1，它是「散成一圈互不重叠的独立元素在环绕」，不是「合并成一个」** —— 「统一」是 **uniform（各片长得一样）**，不是 **merged（并成一个）**，这句话我读错了三次（DD-031）。**几何全部按实测反算，而且两侧都要按各自的球半径归一** —— 素材成环相（帧 166–196）块心 0.459 RMAX、块长轴 0.18 RMAX、短轴 0.108 RMAX，而**同帧球的可见边界**（方位平均亮度跌到峰值 10% 处）在 **0.78 RMAX**；相对球半径因此是 块心 0.589 / 长轴 0.231 / 长短比 1.67。本渲染器球沿在液面轮廓 ≈0.95R，换算得 **环半径 0.56R · 元素长 0.219R · 元素宽 0.1315R**。上一版把 0.459 RMAX 直接当 0.44R 用（等于假设球填满整幅裁切），元素偏内 21%，使用者报的「没有分布在球体的靠最外层」就是这 21%。**均匀是可断言的，且必须精确归零**：`vr = 1 − ring`（不是 1 − 0.94·ring）把 `SIZE`/`ANG`/三个形状参数/呼吸相位的片间差异**全部**收掉，慢摆同样 `×(1 − ring)`；只要还剩 6%，角距就不再相等，最近的一对就会贴上（使用者报的「亮片相连」）。`main.ts` 另加一次**吸附**：`|target − ring| < 0.004` 时直接落到目标 —— 指数逼近永远到不了 1，差 0.6% 就等于「各片仍略有不同」。实测（`vite-node` 直接调 `petals()`）：一路时六个元素**中心半径全部 0.560、角间距全部 60.00°**；三路时 48/72/48/72/48/72（三组可数）。**不重叠是算得出来的**：r=0.56 处 6 片的切向节距 2π·0.56/6 = 0.586R，元素宽 0.135R ⇒ 填充率 **0.23**、留空 77%。**落位只允许有一份系数**：上一版把落位写成 `−len × push` 而 `push` 里硬抄了一份 `len` 的收缩系数，后来收缩系数从 0.58 改成 0.84，两处不同步，元素落到 0.21R —— 现在直接写 `off = radius − len/2`。**中心必须暗**（`coreGlow × (1 − ring)`，`hot` 因此是 0）。**多路 = 环被切成 N 段、段间留空**；一路时整圈等分、没有缺口。成环相只占素材一轮的 **12%**（0.96s/8.1s，n45≥5 的帧共 32 帧）且在**低聚合**段 —— 它是一个真实存在的短相，不是整轮的主形态
+- **球是「几乎正圆的面 + 里面的光在晃」，不是会晃成椭圆的果冻** —— 逐帧实测：边界半径 **0.9265R、摆动仅 ±0.4%**（外沿几乎不胀缩）；角向不圆度 2.03%，其中 **1 次谐波占 1.50%** 而 2–8 次各自只有 0.12–0.53%（RMS **0.69%**）。1 次谐波不是形状，是**整团光偏心**，所以拆成两件事：`contourRadii()` 只留 2–8 次、幅度与相位漂移**照抄实测**（3 次 +0.964、7 次 −1.774 rad/s 最快，换算图形自转 19.6s/24.8s 一圈）；偏心改由 **`sloshAt()`** 承担 —— 亮度质心偏心实测平均 **0.031R**、最大 **0.078R**，这是「微动」的主载体。**晃只作用在光上**（`corolla`/`hotCore` 经 `blobCenters()`），`body`/`film`/`shell` 不跟着晃。闸门第四项归零：呼吸、自转、涟漪、**晃动**。复刻侧 `listening` 实测 0.036/0.074R、1 次 1.14%、形状 RMS 0.84%、半径 0.98R ±0.5%，四项都在素材同档
+- **上一版的轮廓数是假的，因为裁切太紧** —— 360px 裁切把球的外圈光切掉了，量到的「边界」在对角线上撞的是**方形裁切角**，于是得出「只有偶次谐波、且完全不旋转」。改 560px 裁切后那组数作废。**度量前先确认裁切装得下被测对象**
+- **亮片是弯曲面，不是平面色片** —— 素材的亮度梯度横向分量占比平均 **0.254**（纯径向渐变该≈0），散开相冲到 0.44–0.54。落法：填充渐变的焦点**横跨短轴偏向迎光侧**，而且迎光方向在**世界坐标**里恒定（`LIGHT` 常量），所有片体迎同一束光 —— 这是「一叠弯曲面」与「一堆各自带渐变的色斑」的唯一区别。片体还必须**不等大、不等角**（`SIZE`/`ANG` 两张固定表）：等大等角画出来读作**风车/矢量花**
+- **生命感靠三件事，缺一件就退回贴图** —— ①每片花瓣**各自呼吸**（相位错开 1.9 倍、各自 ±0.16 的聚合度偏移），同一帧里有的已张开有的还收着，所以整体是**波动**不是同步缩放；②整组慢自转 + 每片额外的慢摆（0.29 rad/s）+ 液面轮廓四条谐波各自旋转（0.11/−0.17/0.23/−0.31 rad/s），全部互不整除所以永不循环 —— 用噪声或随机数会让静止帧不可复现，指纹就断言不了；③**每片自己的亮度**跟着相位走（`lit` 量程 0.02→1.26）—— 能量摆动主要来自**亮度**不是面积。第五代曾以「不携带信息」为由删掉呼吸，那是**误用宪法第 4 条**：呼吸携带的是 presence，纠错记在 DD-020
+- **「够不够活」是可复算的数，不靠吵架** —— 跑满一个呼吸周期、逐帧读 canvas 像素，量亮度总和与亮度加权等效半径。**度量例程必须先预热 140 帧**：不预热的话 `bloom` 正从上一态爬过来（约 400ms），那段过渡会被算成「呼吸」——此前记的 4.23×/5.78× 就是这么虚高一倍以上的，已更正。稳态基线：idle 2.48× / ±2.7%、listening 2.21× / ±3.0%、speaking **3.26× / ±5.8%**、thinking 1.45× / ±1.5%；**六态全程 18.66× / ±13.7%**。判据也跟着改了（原来那条「listening ≥4.0×」是在错误读数上定标的，稳态下做不到，而且有结构性原因：聚合度 0.83 那一段所有项都已经开着，没有会切换的项）：**每个呼吸态稳态 ≥1.8×**，保真度改看逐帧对照的能量形状（当前 0.151）。**thinking 低是设计要求**：它散成一圈独立元素、靠**公转**表达「在忙」，不靠胀缩。**掉回 1.1× 量级就是退回一张贴图**。例程在 `docs/routines.md`，改 `breathAmp`/`lit`/`coreGlow`/`body`/`volume` 之后必须重跑
+- **上一代把一个缺陷写成了取舍，代价是它差点永远不被修** —— 第八代的文档说「静态贴合 vs 动态起伏二选一，体积光与边缘辉光把等效半径钉死了」。根因不是取舍：那两项画的是**固定大小**的盘。改成可见半径随 `bloom` 长之后两边同时变好（逐帧等效半径平均绝对差 0.085 → **0.044**，listening 半径摆动 ±4.0% → **±9.1%**）。**发现「取舍」时先问它是不是缺陷**
+- **参考素材：运动学量与配色都已取用，权利依据是使用者的买断声明** —— 使用者提供一段第三方动画素材（1600×900 / 270 帧 / 30ms），三次要求直接取用配色并声明素材已买断（DD-024 受理，无从核验，也无立场核验）。现在取的是：三个运动学量（能量摆动 3.8×、等效半径 ±10%、主周期 1.57 rad/s）+ **270 帧全量提取的参数表** + **按 agg 段取样的三簇配色**。**ANTI_SLOP 原先对紫粉蓝的禁令在本产品不再声称成立**（取样出来正是那个色域）。仍然守住两处：`error` 朱红、`gated` 琥珀**不参与取样** —— 安全语义。解出来的帧与参数表在 `.vox-ref/`，已 gitignore，未进仓库
+- **「逐帧相同」能做到哪一步** —— 渲染器能**逐帧吃**素材那一帧的聚合度与簇色并还出接近的形态与能量（`replay.html`，252 帧去掉淡入相：等效半径平均绝对差 0.044、能量形状 0.150、核亮度比 0.157、横向梯度 0.108、质心 80、脊线 0.047）。但生产的球由**事件**驱动（状态、音量、agent 路数），不由帧号驱动 —— 素材是一段 8.1 秒的固定编排，Vox 没有那条时间轴可对齐。把 270 帧钉进产品等于把状态机换成一段循环动画
+- **片体形状必须**不等大、不等角、**不同形，而且还要随呼吸换形** —— 使用者的判断是「亮片形状过于固定，体现不出多态变换性」。三张固定表：`SIZE`（大小）·`ANG`（朝向偏移）·`SHAPE`（`[taper, waist, curl]`）。`taper` 管端点钝/尖（**不许到 1**，圆端是硬约束，指数 0.5 才是正圆）·`waist` 管最宽处落在长度的哪一比例·`curl` 带符号所以卷向按片相反。三个参数还都随该片的 `own` 连续漂移：固定表只解决「七片互不相同」，没解决「同一片胀开时会换形」。**用固定表不用随机数** —— 随机数会让静止帧不可复现，几何指纹就断言不了
+- **迎光高光用片体自己的簇色，不用近白的 `--lum-core`** —— 使用者的判断是「亮片之间的重叠部分和素材不匹配」，根因就在这儿：往每片叠一层近白，两片交叠处先被去饱和再被加亮，重叠区一律奔向白。素材的重叠区读作**第三个色相**（青叠粉出淡紫）。同色加色 = 同色变亮，饱和度因此保住。`--lum-core` 从此只服务真正的白热核
+- **白热核不许有实色平台** —— 使用者的判断是「中心的亮点太突兀」，根因是实色一直铺到半径的 20% 再直线归零：那是一个**有边的盘**，读作贴上去的亮点。改成 exp(−3.2u²) 七档 + 一层 1.6× 半径的极淡外晕，核因此在花瓣之间化开。但**放大不等于不突兀**：半径推到 0.52R、alpha 0.06+cg×0.86 那一版在高聚合相把整颗球烧成白团、花瓣全被吞掉，最后落在 0.42R / 0.04+cg×0.42
+- **最贵的一课：标量对上了不等于结构对上了** —— 素材的脊线含量 0.076、我的 0.022。为了补上我沿迎光长边**描了一道亮线**，脊线含量立刻到 0.095（数字对上了），并排渲染出来是**一圈白色线框**，每片花瓣都被描了边，读作矢量花瓣。素材的脊线来自弯曲面自己的明暗渐变，不是轮廓线。已删线改成片体内侧的偏心软高光，脊线含量退回 0.026 并作为**已知落差**留着。**新增任何「贴合度」标量，必须同时给并排渲染**（规则写进 AI_STATES 第 5 节）。同类：角向主谐波命中率从 46% 掉到 31% 而视觉明显变好 —— 片体排布变不规则之后那个 argmax 本身就不稳定了，它不再是有效判据
+- **闸门反着来：它是唯一不呼吸、不自转、边界也不流动的一帧** —— `breathAmp=0`、`spin=0`、`wobble=0`（液面轮廓退回**精确圆**），冻在半开 + 一道硬边整圈琥珀环。其余六态都在动、边界都在流，所以「突然僵住成一个规整的圆」在余光里最抢眼，而语义正好要求它最抢眼。一团流动的光表达不了「拦住」，一个僵住的活物可以。琥珀环是这个软塌塌的世界里**唯一一个精确的圆**
+- **花瓣怎么画** —— `rotate` 到朝向 → 沿自己的轴外移 `off` → 画**卵形**轮廓（收窄的一头朝内，`petalOutline()` 用余弦包络生成，中轴带一次+二次谐波的**不对称弯曲**；**不用纯椭圆**，椭圆两头一样粗，几片一叠读作交叉的镜片；**宽度包络的指数 0.5 是圆端的充要条件**，线性趋零得到尖角，那正是读作星芒的根因，**加模糊盖不住**）。填充是**焦点横跨短轴偏向迎光侧**的偏心径向渐变，**实色到 62% 再羽化到透明** + `blur(0.007R)`，之后在片体内再叠一层小半径的**迎光软高光**（不是描边）。混合用 `lighter`；**cancelled 与 gated 例外用 `source-over`**（三色同源，加色会烧成白块）
+- **颜色的唯一来源是 `style.css`，`core.ts` 只在切态时读一次** —— 三个色相簇 `--lum-far`（主）/`--lum-mid`（次）/`--lum-alt`（弱）按 `[far,far,mid,far,alt]` **加权轮转**而不是三色均分（素材实测三簇权重约 60/25/15；`i % 3` 的 33/33/33 不对），`--lum-core` **只给中心白热核与迎光高光**（它近乎白色，一旦占掉花瓣轮转就把色相洗平了）。`--glass`/`--edge` **不随态变**。**每态取素材哪一段色，由该态的 `bloomLevel()` 落在素材的哪个 agg 段决定** —— 素材的颜色随聚合度移动（越聚合越偏青且整体变亮，散开相收成单一深蓝紫），按聚合度对段颜色关系才和素材一致，而不是给每态随便挑一个好看的色；对应表写在 `style.css` 顶部注释里，**不要在别处再抄一份**。变量块**故意不带 `#app` 前缀**，好让 `preview.html` / `compare.html` / `replay.html` / `side.html` 把同一套颜色套在任意容器上
+- **`bloomAt()` 的基准必须是 `f.bloom` 而不是 `bloomLevel(f)`** —— 后者是**目标值**，用它会让切态变成跳变，而主循环里那句 `bloom += (target-bloom)*0.12` 就成了死代码。这是个真缺陷，已修（DD-023）；`f.bloom` 为 0 时退回目标值，供只填目标不跑插值的对照页用
+- **`bloomLevel()`/`bloomAt()`/`petalCount()`/`ringLevel()`/`ringAt()`/`spinRate()`/`breathAmp()`/`breathRate()`/`skew()`/`blobCount()`/`coreGlow()`/`contourRadii()` 是纯函数，几何因此可断言** —— `render_core_to_text()` 吐 `{bloom, petals, ring, spin, skew, breath, rate, blobs, hot, wobble}` 十元组（无量纲，与像素尺寸无关，固定 t=1、amp 0.85）。实测八态（含 thinking 3 路，`bloom/petals/spin/skew/breath/rate/blobs/ring/wobble/hot`）：idle 0.520/5/0.06/0/0.100/0.85/1/0/0.007/0.160 · listening 0.902/**7**/0.13/0/0.165/1.57/1/0/0.007/**0.420** · thinking 0.700/6/**1.67**/0/0.060/2.30/1/**1**/0.007/**0** · thinking(3 路) 同上但 blobs=**3** · speaking 0.825/**4**/0.10/0/**0.219**/2.97/1/0/0.007/0.307 · cancelled 0.260/3/0.03/0/0.040/0.50/1/0/0.007/**0** · error 0.580/6/0.42/**0.22**/0.140/3.10/1/0/0.007/0.153 · gated 0.480/7/**0**/0/**0**/0/1/0/**0**/0.074。**实测零重复**，逐对可辨：`gated` 是唯一 breath、spin、wobble 三项同时为 0 的、`cancelled` 与 `thinking` 都没有白热核但前者 bloom 0.26 / ring 0、后者 0.70 / ring 1、`error` 是唯一 skew 非零的、`thinking` 是唯一 ring=1 的、`speaking` 的花瓣数 4 不与任何一态重复；thinking 与 thinking(3 路) 只差 blobs，那正是界面上唯一可数的真实数字
+- **确认卡是一道闸，不是一张通知卡** —— 卡顶那条**琥珀斜纹带**（`repeating-linear-gradient(-45deg)`，负 margin 贴三边）借的是道闸与警示带，与球的琥珀闸门同色，两处说的是同一件事。`border-left:3px solid var(--amber)` **已删**（impeccable 检测器判定的 side-tab 反模式）、圆角 10px → 2px、通用警告图标删掉、标题改等宽疏排。面板顶部那条**光带**（中心最亮向两端淡出，吃 `--lum-mid`/`--lum-core`）与球同源 —— 回复流出时球是 speaking，那条线就是暖金的
+
 - **语音接进派发的是 `VoiceRuntime`，不是 `VoicePlugin`** —— `VoicePlugin.submit_text` 本身不走派发（门面只做状态机 + 记忆 + transport，不自造已验说话人）。`vox_plugin/runtime.py` 的 `VoiceRuntime.say()` 构造 `Dispatcher`，`submit_text` 之后 `dispatcher.dispatch()`，再 `complete_turn` 说回答案。「说一句 → 读文件」的链路已接上并有 `tests/test_runtime.py` 覆盖；`VoicePlugin.run_tool()` 仍是 opt-in 的手动入口。`_reach_listening()` 是实例方法、操作 `self.plugin`（此前是 `@staticmethod` 在操作一个丢弃的副本）
 - **P7 `acp` + `http` 适配器已实现** —— `acp.py` 讲 JSON-RPC 2.0 over stdio（initialize → session/new → session/prompt，`session/update` 流式增量）；`http.py` 讲 OpenAI Chat Completions（SSE 流式 + 非流式回退）。http 的 token 只从 `VOX_AGENT_HTTP_TOKEN` 读，url 遵循桥接同款约束（明文 HTTP 只许回环、带凭据拒绝）。都算 SIM（mock peer / mock server），真实联调是 P9 的 REAL-AGENT
 - **ACP 子进程被强制 UTF-8，`cli.py` 故意不强制** —— 差别不是疏漏：ACP 帧**由协议规定**是 UTF-8，裸 CLI 的 stdout 没有声明编码。`acp.py` 的 `_child_env()` 注入 `_UTF8_ENV`（`PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8`），因为 Windows 上 Python 子进程默认按 ANSI 代码页（本机 cp936）编 stdout，而读侧的 `errors="replace"` 会把乱码变成夹在正常回复里的 U+FFFD —— **静默错，不是失败**。`env_passthrough` 排在注入之后，用户点名的变量仍然赢。**只对 Python 子进程有效**：非 Python 的 agent 写本地代码页照样烂，这是已记录的残留缺口。`cli.py` 的中文测试断言长度而非文本，正是这个立场的体现，不要「统一」掉
@@ -99,12 +161,14 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 
 ## 注意事项
 
-- **已是 git 仓库**（基线 `9f7d923`）。改动前 `git status --short` 确认工作区，不要覆盖无关脏文件。破坏性 git 操作（`reset --hard`、`push --force`、`clean -f`）一律先问。
+- **git 只有一条主干 `main`**，流程与自查命令见 [`docs/git-workflow.md`](../docs/git-workflow.md)。开工前 `git status --short` + `git branch --show-current` 确认站对了地方，不要覆盖无关脏文件。破坏性 git 操作（`reset --hard`、`push --force`、`clean -f`、`stash`）一律先问。
 - **`VoiceState` 六态不改**，`contracts/voice-events.schema.json` **字节不变**、version 保持 `"1"` —— 这条现由 `tests/test_agent_event_schema.py` 的 SHA-256 摘要钉死，不靠自觉。平台事件走 `contracts/agent-events.schema.json`。
 - **信封只在 `core/events.py` 构造**。新事件类型加进契约文件即可，Python 侧不需要同步改。
 - **`enrollment/` 是生物特征**，已在 `.gitignore` 内，永不提交；查看注册状态只用 `describe()`，绝不输出向量。
 - **`memory/` 是个人数据**，已在 `.gitignore` 内（要不要纳入版本控制由你决定，取消那一行即可）。记忆事件只带 id / 计数 / 标签，**永不带文本** —— 事件会扇出到每一个日志与传输通道。凭据形状的文本**整条拒绝而不是打码**：多行私钥正是打码会留下正文的那个例子。
 - **声纹 fail-closed 断言不许绕过**：模型缺失、无人注册、校验抛异常都必须落在拒绝一侧。一个静默放行的声纹门比没有门更糟。
+- **控制台的白名单不许放宽**：`EDITABLE` / `AGENT_EDITABLE` / `MCP_EDITABLE` 三份清单是「哪些配置能从一个网页改」的全部答案。往里加 `command`、`url`、`require_confirmation`、`allow`、`auto_allow` 或任何 `enabled` 之外的 shell/fs 键，都是把一次安全决策降级成一次点击。加键之前先读 ADR 006 第 3 节。
+- **MCP 工具走同一道门，不许给它开第二条路**：`policy.check()` 里的 `mcp.` 分支是唯一入口，出厂三层全关，`require_confirmation` 默认 true。`confirmed` 判定必须 `is True`（`"no"` 是真值字符串，这个缺陷在 `shell.run` 上被抓过一次）。
 - **`shell.run` 默认关闭**，白名单外的命令**拒绝而非询问**（询问会训练出无脑点确认的习惯）。危险模式在代码里、不在配置里：配置的白名单只能收窄，永远不能放宽。
 - **`config/tools.toml` 里写错的键会报错而不是被忽略** —— 拼错 `denied_names` 会静默扩大沙箱，一个「看起来在约束什么但其实没有」的配置比两个极端都糟。
 - 文档要同步更新：实测数据进 `docs/research/prototype-results.md`，新例程进 `docs/routines.md`，依赖与模型版本进 `THIRD_PARTY_NOTICES.md`。

@@ -1,0 +1,72 @@
+# 语音栈配置 —— 见 docs/adr/001-voice-stack-selection.md
+#
+# 这个文件里只有**参数**。模型路径故意不在这里：路径走环境变量，理由与
+# config/speaker.toml 同款 —— 一个进版本控制的配置文件不该记录某台机器的
+# 磁盘布局，换机器就得改仓库。四个环境变量（都可不设，默认指向 models/）：
+#
+#   VOX_KWS_MODEL_DIR   唤醒模型目录（sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01）
+#   VOX_ASR_MODEL_DIR   识别模型目录（sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23）
+#   VOX_TTS_MODEL_DIR   合成模型目录（vits-melo-tts-zh_en）
+#   VOX_VAD_MODEL       Silero VAD 模型文件（models/silero_vad.onnx）
+#
+# 声纹的阈值与时长在 config/speaker.toml，不在这里。写错的键会**报错而不是
+# 被忽略**：一个「看起来配了但其实没生效」的键比没有这个键更糟。
+
+[wake]
+# 唤醒词表。空字符串 = 先看约定路径 config/keywords.txt，那个文件也不在才用模型自带的
+# keywords.txt。控制台的「唤醒词」那一栏写的就是 config/keywords.txt，手改它等效。
+#
+# 词表的每一行是「拼音声母/韵母 @原文」—— 模型的 227 个建模单元就是这套音素，所以
+# **不能直接写中文**：写中文那一行整行匹配不上，表现是这个词永远唤不醒而不是报错。
+# 用控制台生成，或者看 core/audio/keywords.py。
+keywords_file = ""
+
+# 唤醒确认音：命中之后先应一声再开始听。没有这一声，人会以为没听见而重复喊，
+# 而重复的第二遍会落进已经开着的识别器、变成请求文本的一部分。
+#
+# 分隔符收「，,；;|、」。空字符串 = 关掉。第一次用到时合成并缓存到 .vox/acks/，
+# 之后直接播 wav —— 合成一句要 500–900 ms，那是唤醒之后最不该等的时候。
+# 要短：这一声得在人开口说下一句之前放完。
+acks = "嗯哼，我在呢，咋了，有什么事吗"
+
+# KWS 命中阈值。低了误唤醒多，高了叫不应。0.25 是 sherpa-onnx 的推荐起点，
+# 最终值应按 REAL-MIC 多场景实测调定（发布阻塞项 #1），不要凭感觉调。
+keywords_threshold = 0.25
+
+# 推理线程数。唤醒是常驻负载，这个数字直接进 30 分钟资源画像。
+num_threads = 2
+
+[asr]
+# 关掉的话唤醒仍然工作，但不转写 —— 只唤醒模式，用于单独调唤醒率。
+enabled = true
+num_threads = 2
+
+[tts]
+# 关掉的话回合照常走完（仍发 tts.chunk 事件），只是不出声。
+enabled = true
+speaker_id = 0
+speed = 1.0
+num_threads = 2
+
+[input]
+# 输入设备。空字符串 = 系统默认。填索引（"3"）或名称片段都行，
+# 设备清单看 plugin.devices() 或控制台的就绪清单。
+device = ""
+
+# 采样率与块长。16 kHz 是三个模型共同的输入约定，改它等于换模型。
+# blocksize 1600 = 100 ms/块：再小 CPU 上升，再大唤醒响应变钝。
+sample_rate = 16000
+blocksize = 1600
+
+[orb]
+# 唤醒球。构建缺失时自动降级为无头模式并如实报告，不会拖死启动。
+enabled = true
+
+# visible = false 意味着**待机时桌面上没有球**。它在唤醒词命中后弹出（同时应一声，见
+# wake.acks），回合结束 hide_after_s 秒后收回去。设成 true 则一直显示 —— 调窗口位置、
+# 调视觉的时候有用，日常用不着。
+visible = false
+
+# 回合结束到收回球之间等多久。不立刻收是因为连续对话模式下说完会回「在听」，
+# 球在那几秒里是「我还在听」的唯一可见信号；每次新回合都会重置这个倒计时。
+hide_after_s = 10.0

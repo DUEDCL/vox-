@@ -46,6 +46,7 @@ class SounddeviceWakeCapture:
         verify_seconds: float = 1.5,
         asr_provider: Any = None,
         on_recognized: Any = None,
+        on_verified: Any = None,
     ) -> None:
         self.keyword_provider = keyword_provider
         self.on_wake = on_wake
@@ -57,6 +58,17 @@ class SounddeviceWakeCapture:
         self.on_reject = on_reject
         self.require_verification = require_verification
         self.verify_seconds = verify_seconds
+        #: Where the gate's verdict on *who* spoke is delivered. This is separate
+        #: from ``on_wake`` because the identity must not travel with the wake
+        #: event: events fan out to every log and transport, and a speaker name is
+        #: personal data. It is also why ``on_wake``'s signature is unchanged --
+        #: this is an addition, not a break.
+        #:
+        #: The contract is one call per wake attempt with ``None`` (cleared) and a
+        #: second call with a name only when the gate accepted. A consumer that
+        #: only ever assigns therefore cannot hold a stale identity: a failure in
+        #: the second call leaves ``None`` standing, which is the closed answer.
+        self.on_verified = on_verified
         #: Optional streaming ASR for the listening phase after a wake. With
         #: neither ``asr_provider`` nor ``on_recognized`` the capture stays in
         #: wake-only mode, exactly as before.
@@ -186,10 +198,31 @@ class SounddeviceWakeCapture:
                 "run scripts/enroll_speaker.py first"
             )
 
+    def _report_verified(self, speaker: str | None) -> None:
+        """Deliver the gate's identity verdict without letting it break the wake.
+
+        A raising consumer is counted like any other callback fault. It is safe
+        for it to raise on the *accept* call specifically, because the clear call
+        already ran: the consumer is then left holding ``None``.
+        """
+        if self.on_verified is None:
+            return
+        try:
+            self.on_verified(speaker)
+        except Exception as exc:  # noqa: BLE001 - counted, never propagated
+            self._record_callback_error(exc)
+
     def _authorise(self, keyword: str) -> None:
         """Decide one wake hit, then drop the audio it was decided on."""
+        # Clear first, unconditionally. Every path below either leaves this
+        # standing (no gate, error, rejection) or replaces it with a verified
+        # name. There is no ordering in which a previous speaker's identity
+        # survives into this attempt.
+        self._report_verified(None)
         if not self.gate_active:
-            # Escape hatch only: diagnose() reports this as a warning.
+            # Escape hatch only: diagnose() reports this as a warning. No gate
+            # means no verified identity, so nothing is reported here -- the
+            # cleared value above is the honest answer.
             self.on_wake(keyword, None)
             self._start_listening()
             return
@@ -205,6 +238,7 @@ class SounddeviceWakeCapture:
             # the biometric exposure for no benefit.
             self._ring.clear()
         if result.accepted:
+            self._report_verified(result.speaker)
             self.on_wake(keyword, result.score)
             self._start_listening()
         elif self.on_reject is not None:

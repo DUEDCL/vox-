@@ -1,7 +1,7 @@
 # 项目总览与当前进度
 
 > 工作区:`D:\program\vioce-wake`
-> 最后更新:2026-08-24（VoiceRuntime、麦克风采集、DesktopBridge、工具事件隐私与事件 sink 隔离加固）
+> 最后更新:2026-08-28（控制台第二版界面 + 模型配置模块、MCP 工具接入、语音生产入口、声纹身份接线、搜索后端、记忆线程安全）
 > 本文件是项目的单一入口(single source of truth,唯一事实来源),其它文档由此索引。
 
 ## 1. 项目是什么
@@ -27,22 +27,26 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 
 | 维度 | 状态 |
 |---|---|
-| 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0 骨架 + P1 声纹门 + P2 平台契约 + P3 记忆 + P4 工具与安全门 + P5 agent 适配器 + **P6 派发层** + **P7 ACP/HTTP 适配器**已落,`VoiceRuntime` 已把语音接进派发,「Python→桌面事件通道」已接线(代码级) |
-| 技术选型 | **已定案**,见 [ADR 001](adr/001-voice-stack-selection.md) ~ [ADR 005](adr/005-task-dispatch-model.md) |
-| Python 测试 | **669 passed, 3 skipped**（全量 AUTO；事件 sink 专项 **123 passed**、DesktopBridge 专项 **33 passed**、采集专项 **36 passed**；无真实设备） |
+| 阶段 | Phase 3(原型与决策)已完成;**Phase 4(生产实现)进行中** —— P0–P8 全部落地。**本轮(2026-08-28)新增**:语音生产入口 + 配置化、声纹已验身份接线、`web.search` 两级后端、TOML 行级写入器、**本机 web 控制台**、**MCP 工具接入**、无人值守验收脚本 |
+| 技术选型 | **已定案**,见 [ADR 001](adr/001-voice-stack-selection.md) ~ [ADR 007](adr/007-mcp-tools.md) |
+| Python 测试 | **1009 passed, 3 skipped**(全量 AUTO;控制台 103、模型方案 60、MCP 51、搜索后端 35、配置编辑 33、语音配置 20、语音装配 16、声纹身份 15、记忆并发 7;无真实设备) |
 | 前端构建 | `npm run build`(tsc + vite)通过;`cargo check` 通过 |
+| **入口** | 三个:`run_console.py`(控制台,浏览器里补齐配置)· `run_voice.py`(说话)· `run_desktop.py`(打字)。此前**只有打字入口**,语音全链路只存在于验收脚本里 |
+| **本机控制台** | **已实现,界面已到第二版**([ADR 006](adr/006-local-console.md) 第 8、9 节):侧栏 + 九个视图 —— 运行态 · **模型配置** · 声纹 · 本机 Agent · 本人档案 · 技能与 MCP · 唤醒球 · 安全边界(只读) · 调试。标准库 `http.server`,零新依赖;强制回环 + 每请求 token;安全边界不可从网页改。第二版**没有开麦克风的入口**(用 `--voice` 启动),事件流与记忆检索面板已删 |
+| **MCP 工具** | **已实现**([ADR 007](adr/007-mcp-tools.md)):stdio JSON-RPC 客户端,远端工具走同一道 `ToolPolicy`,三层默认关。等级 **SIM**(假 server),真实 MCP server 未联调 |
 | 真机麦克风唤醒 | **已验证一次**(2026-07-26,`你好问问`,7.193s;当时打印的 score 1.0 是硬编码常量,不是测量值 —— 已改正,见 §7) |
-| 声纹准入 | 门**已接线**,模型已下载(dim 512);判别力 **AUTO 已验**(簇内 0.736 / 簇间 0.370,阈值 0.5 落在间隙);校验耗时 41 ms;**真机通过率未验** |
+| 声纹准入 | 门**已接线**,模型已下载(dim 512);判别力 **AUTO 已验**(簇内 0.736 / 簇间 0.370,阈值 0.5 落在间隙);校验耗时 41 ms;**已验身份现在真的到达 `shell.run` 的授权判定**(此前是一个字符串常量);**真机通过率未验** |
 | 事件契约 | 语音 9 种 + 平台 12 种,**两个文件一个信封**、枚举互斥;语音契约字节不变由 SHA-256 钉死 |
-| 平台层四包 | `memory`(P3)、`tools`(P4)、`agents`(P5)与 **`dispatch`(P6)全部已实现** |
-| 本地工具 | 门(`policy.py`)+ `fs.read` / `web.search` / `shell.run` **已实现**,`voice` 与 `agent` 同一道门;`shell.run` 默认关、危险模式不可配置;`web.search` 无内置后端 |
-| agent 适配器 | `cli`(headless 子进程)、`evox`(包装会话桥接)、`acp`(JSON-RPC 2.0 over stdio)、`http`(OpenAI 兼容 SSE)**全部已实现**,`config/agents.toml` 已落;http token 只从环境变量读,url 遵循桥接同款回环/凭据约束 |
-| 派发层 | `intent` / `router` / `aggregator` / `breaker` / `dispatcher` **已实现并测过**(159 用例);`task.*` / `agent.*` 有了产出点。**已接入 `VoiceRuntime`**；运行时具备启动回滚、幂等关闭和回合失败恢复 |
-| 唤醒球 UI | 六态 + 展开态 + 工具确认卡 **DOM/CSS 已实现**,Rust 侧选择性穿透已实现;**Python→桌面事件通道已接线**,真机验收未做 |
+| 平台层五包 | `memory`(P3)、`tools`(P4,含 MCP)、`agents`(P5)、`dispatch`(P6)与 **`console`** 全部已实现 |
+| 本地工具 | 门(`policy.py`)+ `fs.read` / `web.search` / `shell.run` / **MCP 远端工具**;`shell.run` 默认关、危险模式不可配置;**`web.search` 有后端了但出厂仍关**(SearxNG 回环优先 / DDG 兜底,两个都默认关) |
+| agent 适配器 | `cli` / `evox` / `acp` / `http` **全部已实现**,`config/agents.toml` 已落;http token 只从环境变量读,url 遵循桥接同款回环/凭据约束 |
+| 派发层 | `intent` / `router` / `aggregator` / `breaker` / `dispatcher` **已实现并测过**(159 用例);已接入 `VoiceRuntime`;运行时具备启动回滚、幂等关闭和回合失败恢复 |
+| 记忆 | SQLite + FTS5 单文件 + Markdown 事实层;跨进程持久性 AUTO_MULTI_PROCESS 已验;**多线程并发已修并验**(此前控制台的多线程会撞 `sqlite3.ProgrammingError`) |
+| 唤醒球 UI | 六态 + 展开态 + 工具确认卡 **已实现**,渲染路径为 **Canvas 2D**,Rust 侧选择性穿透与托盘已实现;**Python→桌面事件通道已接线**,真机验收未做 |
 | 真实 EvoX 会话桥接 | **未验证** — 发布阻塞项 |
-| 真实外部 agent | **未验证** — 发布阻塞项(REAL-AGENT) |
-| 真实透明窗口验收 | **未验证** — 发布阻塞项 |
-| 版本控制 | 已推送到 `https://github.com/DUEDCL/vox-.git`;最近完成 DesktopBridge、Agent 失败路径、工具事件隐私与事件 sink 隔离加固，当前分支仍需独立审查 |
+| 真实外部 agent | **未验证** — 发布阻塞项(REAL-AGENT)。三后端 2026-08-24 全部**试过被挡**;`scripts/acceptance/probe_agents.py` 是恢复后的重试入口 |
+| 真实透明窗口 | **未验证** — 发布阻塞项(REAL-WIN) |
+| 版本控制 | 已推送到 `https://github.com/DUEDCL/vox-.git`;当前分支 `hermes/platform-dev` |
 
 ## 3. 已定案的技术选型
 
@@ -58,7 +62,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | agent 接入 | **headless CLI 子进程 + ACP** 双通路 | OpenAI 兼容 HTTP(含 OpenClaw Gateway) |
 | 记忆存储 | **SQLite + FTS5**(单文件)+ Markdown 人类可读层 | — (明确不做向量检索) |
 | 派发模式 | **`single`(默认)/ `race`** | `fanout` 仅显式请求多方验证时 |
-| UI 渲染 | **Canvas 2D(v1 主路径)** + CSS 玻璃层 | 静态 CSS(降级档)、WebGL shader(v2 升级路径) |
+| UI 渲染 | **Canvas 2D 驻波核(v1 主路径,已实现)** + CSS 腔体外光 | 静态帧(降级档,拓扑自带辨识度)、WebGL shader(v2 升级路径) |
 | 桌面外壳 | Tauri 2 + TypeScript + Vite | — |
 
 ## 4. 已完成的工作
@@ -183,9 +187,9 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 插件门面 | `vox_plugin/plugin.py` | 413 | EvoX 工具面 + 回合编排 + 声纹诊断 + 记忆接线 + 工具接线 |
 | 声纹配置 | `config/speaker.toml` | 28 | 阈值与时长下限,`tomllib` 读 |
 | 录入 CLI | `scripts/enroll_speaker.py` | 125 | 交互式录入,音频不落盘 |
-| 前端 | `desktop/src/main.ts` + `style.css` + `index.html` | 1076 | 六态唤醒球、展开态流式文本、工具确认卡(含命令原文)、命中区上报 |
+| 前端 | `desktop/src/main.ts` + `core.ts` + `style.css` + `index.html` | 1223 | 六态驻波核(Canvas 2D)、流式文本、工具确认卡(含命令原文)、命中区上报;另有 `preview.html`(109 行)是开发用六态对照页,不进生产包 |
 | 窗口 | `desktop/src-tauri/src/main.rs` | 329 | 透明、置顶、无投影、不占任务栏;三个 `vox_*` IPC + 30 ms 光标轮询的选择性穿透 |
-| 测试 | `tests/*.py` + `tests/integration/` | — | 672 collected（669 passed + 3 skipped）；DesktopBridge 专项 33 passed，采集专项覆盖启动回滚、回调隔离、ASR/KWS 恢复与幂等停止，见 [测试文档](testing.md) |
+| 测试 | `tests/*.py` + `tests/integration/` | — | 1012 collected（1009 passed + 3 skipped）；DesktopBridge 专项 33 passed，采集专项覆盖启动回滚、回调隔离、ASR/KWS 恢复与幂等停止，见 [测试文档](testing.md) |
 
 ## 5. 进行中 / 下一步
 
@@ -201,16 +205,36 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | P5 | agent 适配器 `cli.py` + `evox.py` + `registry.py` + `config/agents.toml` | AUTO+SIM | ✅ 完成(真实 CLI 留 P9) |
 | P6 | 派发/路由/汇总 `core/dispatch/` | AUTO+SIM | ✅ 完成（已由 `VoiceRuntime` 接入语音路径） |
 | P7 | `acp.py` + `http.py` / `openclaw.py` | AUTO+SIM | ✅ 完成(真实 ACP/HTTP 联调留 P9) |
-| P8 | 唤醒球弹出 + 工具确认 UI + Python→桌面事件通道 | REAL-WIN | 🔄 DOM/CSS、Rust 侧与事件通道**均已接线**（DesktopBridge 专项 33 passed、cargo test 15 passed）；透明窗口真机验收留 P10 |
-| P9 | 真实 agent 联调(`claude` / `opencode` 各一次) | REAL-AGENT | ⬜ |
+| P8 | 唤醒球弹出 + 工具确认 UI + Python→桌面事件通道 | REAL-WIN | 🔄 Canvas 2D 渲染器、Rust 侧与事件通道**均已接线**（DesktopBridge 专项 33 passed、cargo test 15 passed、npm build 通过）；透明窗口真机验收留 P10 |
+| **P8.5** | **本机控制台 + 语音生产入口 + MCP 工具**（2026-08-28） | AUTO+SIM | ✅ 完成 —— 控制台 103 例、模型方案 60 例、MCP 51 例、搜索后端 35 例、配置编辑 33 例、语音配置 20 例、语音装配 16 例、声纹身份 15 例、记忆并发 7 例。控制台界面已到第二版并接通模型配置三端点。浏览器真实录音、真实 MCP server、云端模型端点留 P9/P10 |
+| P9 | 真实 agent 联调(`claude` / `opencode` 各一次) | REAL-AGENT | ⬜ 三后端已试过被挡；`probe_agents.py` 是恢复后的重试入口 |
 | P10 | 真实语音端到端(含他人拒绝) | REAL-MIC + REAL-AGENT | ⬜ |
 
 原 Phase 4 计划里的「流式 ASR、TTS 播放队列、超时重连、状态机生产化」并入 P1–P8 各阶段,不单列。
 
-**尚余的接线缺口（有代码但尚未完成真实验收）**:
-- `Dispatcher` 已由 `VoiceRuntime.say()` 构造并接进语音路径（`submit_text` → `dispatch` → `complete_turn`）；`VoiceRuntime` 现对启动失败执行资源回滚，对 `close()` 执行幂等清理，并在派发/回合完成异常后恢复到 `LISTENING`。记忆召回文本也已由 `Dispatcher._recall_context()` 拼进 `Task.context`，`write_turn()` 自裁剪（`prune_turns`）
-- Python→桌面事件通道 —— 三层已接上：Python `desktop_bridge`（管道） → Rust `spawn_event_reader`（stdin→`vox-bridge`） → 前端 `applyEnvelope`/`askConfirm`；确认应答走 `vox_confirm_reply` 回 stdout。DesktopBridge 已补充重启、EOF、启动回滚和并发关闭保护；**npm build、cargo test 15 passed，真机窗口上的点击/焦点/Esc 仍待 P10 REAL-WIN**
-- `web.search` 无真实后端(每个托管 API 都是带 key 的云依赖,红线 1)
+**本轮(2026-08-28)关掉的接线缺口**:
+
+- **语音全链路有了生产入口** —— 此前唯一的命令行 `run_desktop.py` 只从 stdin 读文本,
+  麦克风/KWS/ASR/TTS 一个都没装;语音链路只存在于 `scripts/acceptance/live_conversation.py`
+  这个「需要人在场」的验收脚本里,而它把三个模型路径与 `speaker="owner"` 都硬编码了。
+  现在装配点是 `vox_plugin/voice_stack.py`,入口是 `scripts/run_voice.py`。
+- **声纹已验身份到达了授权判定** —— `capture._authorise()` 此前拿到 `result.speaker`
+  却只把 `score` 传出去,所以麦克风模式下 `shell.run` 的凭据是一个字符串常量。现在
+  `on_verified` → `plugin.verified_speaker` → `runtime.effective_speaker`,身份**不进
+  事件**,所有失败路径倒向 `None`。
+- **`web.search` 的后端注入线接上了** —— `VoiceRuntime.start()` 此前根本没把
+  `search_backend` 传给 `open_tools()`,所以即使配了后端也到不了工具。
+- **`live_wake.py` 此前跑不起来** —— 建 capture 时既没传 verifier 也没传
+  `require_verification=False`,而默认是 `True`,所以在 fail-closed 门上直接抛。
+- **记忆库在多线程下不可靠** —— 连接懒建、绑在第一个查询的线程上,第二个线程抛
+  `sqlite3.ProgrammingError`。控制台是多线程的,所以症状是「保存档案成功、紧接着删除
+  档案 sync 失败」。已修(`check_same_thread=False` + `RLock`),7 例真线程测试。
+
+**尚余的缺口**:
+- `web.search` 有后端了但**出厂仍然关着**(SearxNG 要自建、DDG 是对外请求)
+- 真实 MCP server 未联调(阻塞项 #13)
+- `scripts/fetch_models.py` 未实现(阻塞项 #12)
+- REAL-MIC / REAL-AGENT / REAL-EVOX / REAL-WIN 一项都没关
 
 ## 6. 发布阻塞项(release blockers)
 
@@ -218,17 +242,20 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 
 | # | 阻塞项 | 当前等级 | 需要达到 |
 |---|---|---|---|
-| 1 | 中文唤醒**质量**验收(安静/远场/噪声/重复) | 单次 REAL-MIC | 多场景 REAL-MIC 统计 |
+| 1 | 中文唤醒**质量**验收(安静/远场/噪声/重复) | 单次 REAL-MIC | 多场景 REAL-MIC 统计([例程](routines.md#真实麦克风唤醒验收),`live_wake.py` 现已可运行) |
 | 2 | 真实麦克风 Silero 端点检测验收 | 设备开合已验证 | REAL-MIC 语音端点 |
 | 3 | **真实 EvoX 会话桥接**(发送/增量回复/取消/超时/重连) | SIM(mock 传输) | REAL-EVOX |
 | 4 | 真实流式首字延迟 | 未测 | REAL-EVOX 实测 |
 | 5 | **独立透明置顶窗口**(合成/DPI 125-175%/多显示器/托盘/远程桌面) | 定义并编译通过 | REAL-WIN |
-| 6 | 持续运行资源画像(≥30 分钟 CPU/内存/FPS) | 未测 | REAL-WIN 长跑 |
+| 6 | 持续运行资源画像(≥30 分钟 CPU/内存/FPS) | 采集脚本已实现(`resource_profile.py`,零新依赖,可无人值守启动) | REAL-WIN 长跑 + **人看环境写结论** |
 | 7 | 提供器可替换性(契约强制,无 SDK 类型泄漏) | AUTO 已验证 | 保持 |
-| 8 | **声纹准入实测**(本人通过 / 他人拒绝球不弹 / 录音回放) | AUTO(fail-closed、store、判别力与阈值) | REAL-MIC([ADR 002](adr/002-speaker-verification.md)) |
-| 9 | **真实外部 agent 跑通一轮** | 仅契约 | REAL-AGENT([ADR 003](adr/003-agent-integration-protocol.md)) |
-| 10 | **工具安全实机**(`shell.run` 确认含拒绝路径、误唤醒防护) | AUTO 全绿(89 条拒绝矩阵) | REAL-WIN 确认流程 + REAL-MIC 误唤醒([ADR 005](adr/005-task-dispatch-model.md)) |
-| 11 | **记忆跨会话持久性**(重开进程后事实仍在、手改 Markdown 被下一次召回看到) | AUTO_MULTI_PROCESS(双进程实测 2026-08-24,[例程](routines.md)) | REAL([ADR 004](adr/004-memory-architecture.md)) |
+| 8 | **声纹准入实测**(本人通过 / 他人拒绝球不弹 / 录音回放) | AUTO(fail-closed、store、判别力与阈值)+ **已验身份接线已修**(此前是字符串常量) | REAL-MIC([ADR 002](adr/002-speaker-verification.md)) |
+| 9 | **真实外部 agent 跑通一轮** | 仅契约 + SIM。三后端 2026-08-24 **试过被挡**;探测已标准化(`probe_agents.py`,三等级不混淆) | REAL-AGENT([ADR 003](adr/003-agent-integration-protocol.md)) |
+| 10 | **工具安全实机**(`shell.run` 确认含拒绝路径、误唤醒防护) | AUTO 全绿(89 条拒绝矩阵 + MCP 门 51 例) | REAL-WIN 确认流程 + REAL-MIC 误唤醒([ADR 005](adr/005-task-dispatch-model.md)) |
+| 11 | **记忆跨会话持久性**(重开进程后事实仍在、手改 Markdown 被下一次召回看到) | AUTO_MULTI_PROCESS(双进程实测)+ **多线程并发已修并验**([例程](routines.md)) | REAL([ADR 004](adr/004-memory-architecture.md)) |
+| 12 | **模型分发与归档策略** | **文档部分已关闭**([docs/model-distribution.md](model-distribution.md),三档分发 + 三条硬约束) | `fetch_models.py` 实现 + 打包验证(DOC → AUTO) |
+| 13 | **第三方 MCP server 真实调用** | SIM(进程内假 server,51 例) | 真实 MCP server 完成一次 `tools/call`([ADR 007](adr/007-mcp-tools.md)) |
+| 14 | **控制台真机验收**(浏览器录音授权、真实注册、真实模型测试、**云端模型端点探测**) | AUTO(103 例)+ SIM(渲染取证,九视图) | REAL-MIC(浏览器麦克风)+ REAL-WIN |
 
 ## 7. 文档地图
 
@@ -240,11 +267,15 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | [requirements.md](requirements.md) | 功能/非功能需求、验收标准、阶段范围 |
 | [testing.md](testing.md) | 测试环境、命令、分层、已验证结果与待验收矩阵 |
 | [routines.md](routines.md) | 可重复编码例程(改完什么跑什么) |
+| [model-distribution.md](model-distribution.md) | **模型分发策略**:三档分发、按需下载脚本的三条硬约束 |
+| [backlog.md](backlog.md) | **识别但故意没做的技术债**,每条带根因与「修的时候需要什么」 |
 | [adr/001-voice-stack-selection.md](adr/001-voice-stack-selection.md) | 选型决策记录与发布阻塞项 |
 | [adr/002-speaker-verification.md](adr/002-speaker-verification.md) | 声纹准入:为什么零新依赖、门在 KWS 命中时、fail-closed、静默拒绝 |
 | [adr/003-agent-integration-protocol.md](adr/003-agent-integration-protocol.md) | agent 接入:ACP + headless CLI 双通路,OpenClaw 作后端而非底座 |
 | [adr/004-memory-architecture.md](adr/004-memory-architecture.md) | 记忆:SQLite + FTS5,为什么不做向量与知识图谱 |
 | [adr/005-task-dispatch-model.md](adr/005-task-dispatch-model.md) | 派发:路由五维、汇总策略、`fanout` 不做默认、工具政策门 |
+| [adr/006-local-console.md](adr/006-local-console.md) | **本地控制台**:为什么零依赖、为什么每请求都要 token、为什么安全边界不可从网页改、为什么确认面只有一个 |
+| [adr/007-mcp-tools.md](adr/007-mcp-tools.md) | **MCP 工具**:为什么走同一道门、三层默认关、名字空间为什么被约束 |
 | [research/prototype-results.md](research/prototype-results.md) | 原型实测数据与验证等级 |
 | [research/selection-matrix.md](research/selection-matrix.md) | 候选方案加权打分 |
 | [research/open-source-landscape.md](research/open-source-landscape.md) | 开源候选实地核查 |
@@ -256,8 +287,24 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 - **`shell.run` 是全项目最大的安全风险面** — 「语音说一句话就能在本机执行命令」。声纹门砍掉「他人语音」这一支,但**误识别与录音回放仍然存在**,所以默认关闭 + 白名单 + 每次 UI 确认 + 危险模式拦截 + 审计日志五层一条都不能省(ADR 005)。
 - **声纹不防录音回放** — 本轮不做反欺骗模型,这是**已知缺口**而非尚未测到(ADR 002 局限节)。真实人声的判别力已有 AUTO 背书(簇内 0.736 / 簇间 0.370),但**合成音频完全测不出判别力** —— 120 Hz 与 240 Hz 两组谐波栈互相通过 0.767,任何用生成音调测声纹的测试都会空过。
 - **声纹注册数据是生物特征** — `enrollment/` 已在 `.gitignore` 内,永不提交;查看注册状态只用 `describe()`。
-- **VoxCord 不在本机** — `D:\program\voxcord` 不存在,相关测试自动 skip;它是可选参考依赖,不影响发布路径。
-- **模型体积大** — `models/` 约 451 MB(含两个未清理的 `.tar.bz2` 归档共 192 MB,以及 37.8 MB 声纹模型);打包策略需在 P8 前决定。多 agent 子进程并发另有内存压力,派发并发上限已落(`DEFAULT_MAX_CONCURRENT = 3`,`RACE_WIDTH = 2`)。
+- **VoxCord 目录在本机,但适配器报不可用** — `D:\program\voxcord` **存在**(monorepo:
+  `apps/desktop` React+Tauri / `packages/voxcord_core`),本文档此前写的「不存在」是**错的
+  事实陈述**,虽然结论碰巧对。实测 `VoxCordAdapter().load()` 报
+  `import failed: No module named 'voxcord_core'`:适配器往 `sys.path` 加的是
+  `packages/voxcord_core` 与 `.../lib`,而真实模块在 `.../lib/audio_engine/`。所以
+  `test_provider_adapter.py` 的 2 个 skip **掩盖了一个路径缺陷**。它是可选参考依赖、
+  不在发布路径上,本轮不修,根因与修的前提见 [docs/backlog.md](backlog.md) B1。
+- **控制台开了一个监听端口** — 安全面确实扩大。姿态:强制回环绑定(`0.0.0.0` 拒绝
+  构造)、每请求校验随机 token(含页面本身)、token 不进日志不进 `describe()`、
+  **安全边界不可从网页修改**、**确认面只有唤醒球一个**。细则与被否决的方案见
+  [ADR 006](adr/006-local-console.md)。
+- **MCP server 是外部子进程,能做的事没有上界** — 所以三层默认关、默认每次确认、
+  凭据不继承、远端输出截断且不进事件。`allow` 名单在运行时复检而不只在注册时过滤。
+  真实 MCP server 未联调(阻塞项 #13)。
+- **模型体积** — `models/` 约 597 MB,其中 261 MB 是解压完可删的 `.tar.bz2` 归档。
+  分发策略已成文([model-distribution.md](model-distribution.md)),但三档分发一档都没
+  打包过、`fetch_models.py` 未实现,全是 DOC 级。多 agent 子进程并发另有内存压力,
+  派发并发上限已落(`DEFAULT_MAX_CONCURRENT = 3`,`RACE_WIDTH = 2`)。
 - **开源项目判定多为「社区来源」** — `github.com` / `api.github.com` / `raw.githubusercontent.com` 的 WebFetch 在本环境全部被拦截,无法读取一手 README。除注明「官方文档确认」者外,star 数、许可证、最后提交时间均未直接核实,不得当官方结论用。
 - **SenseVoiceSmall 权重许可证未取证** — 若启用该 ASR 备选,须先归档 ModelScope 许可证文本。
 - **控制台中文乱码** — Windows 代码页显示问题,UTF-8 字节本身正确,不是数据缺陷。

@@ -1,7 +1,7 @@
 # 技术架构与组件边界
 
 > 工作区:`D:\program\vioce-wake`
-> 最后更新:2026-08-22（VoiceRuntime 生命周期加固）
+> 最后更新:2026-08-28（控制台第二版界面 + 模型配置模块,见第 8.3 节）
 > 本文描述磁盘上**已实现**的架构。计划中但未落地的部分明确标注「未实现」。
 > 平台层（第 9 节）已按 P3～P7 分阶段落地；本文仍明确标注尚未实现或仅有 AUTO/SIM 证据的部分。
 
@@ -39,6 +39,10 @@
 
 平台层 Platform（`memory`、`tools`、`agents`、`dispatch` 已实现，P3～P7）：
 core/agents/ 适配器 · core/dispatch/ 派发 · core/tools/ 工具 · **core/memory/ 记忆**
+
+操作面 Operator（本机回环 web 控制台，ADR 006）：
+core/console/ 服务 + API + 单文件前端 · core/config_edit.py 行级 TOML 写入 ·
+core/models_config.py 模型方案（见第 8.3 节）
 ```
 
 ### 1.1 运行时装配与生命周期
@@ -277,13 +281,16 @@ cancel         → transport.cancel(last_turn_id) + state.changed(cancelled) + t
 
 定位逻辑:读当前显示器尺寸与 `scale_factor`,水平居中、底部上移 250 逻辑像素。**注意**:该 DPI 换算只做过 `cargo check`,真机 125%/150%/175% 缩放未验收(发布阻塞项 #5)。
 
-### 7.2 前端(`desktop/src/main.ts` 34 行 + `style.css`)
+### 7.2 前端(`desktop/src/main.ts` 598 行 + `core.ts` 229 行 + `style.css` 357 行)
 
-- 监听 `vox-voice-state` 自定义事件,取 `state` 与 `amplitude` 驱动渲染。
-- 状态中文标签:待机 / 已唤醒 / 聆听中 / 思考中 / 正在回复 / 需要处理。
-- `amplitude` 钳制在 `[0.12, 1]`,写入 CSS 变量 `--amplitude`;`--phase` 由 `requestAnimationFrame` 循环推进。
-- 当前是 **CSS-only 渲染**(conic-gradient 核心 + 三层波纹环 + blur)。Canvas 2D 生产渲染器属 Phase 4(t28–t35),**尚未实现**。
-- 已内置自验证钩子:`__READY__`、`render_state_to_text()`、`step(ms)`,以及 `?test=1` 冻结模式。
+- 监听 `vox-voice-state` 与 `vox-bridge` 自定义事件;后者由 Rust 把 stdin 收到的整行原样投过来,类型分派落在 `applyEnvelope()`(UI 语义在的地方,契约加事件不必改 Rust)。
+- 状态中文标签:待机 / 聆听中 / 思考中 / 正在回复 / 已取消 / 需要处理。
+- `amplitude` 钳制在 `[0.12, 1]`,同时写入 CSS 变量 `--amplitude`(驱动腔体外发光半径)与模块级变量(驱动波形振幅);每帧读 `getComputedStyle` 是白付的强制样式计算,已经去掉。
+- 渲染是 **Canvas 2D 驻波核**(`core.ts` 的 `WaveCore`,FR-6.5):一条波,振幅吃音量,**拓扑吃六态** —— 近直线 / 正弦 / 李萨如结 / AM 包络 / 衰减余波 / 削波方波,`data-confirm=true` 时锁成琥珀扫线。`samplePath()` 是纯函数,几何因此可断言而不只能靠截图。ADR 001 要的 `Renderer` 边界就在这里:v2 换 WebGL 只替换这个类,调用方不动。
+- 颜色的唯一来源是 `style.css` 的六态变量块(`--wave`/`--glow`/`--glow-far`/`--cavity`),`core.ts` 在切态时读一次。变量块故意不带 `#app` 前缀,好让对照页复用同一套颜色。
+- `prefers-reduced-motion` 时停 rAF 并留一帧静态代表帧(FR-6.6);拓扑本身承载状态,静止不丢信息。信号变化是运行时监听的,不只在启动读一次。
+- 已内置自验证钩子:`__READY__`、`render_state_to_text()`、`render_core_to_text()`(波形几何指纹:包围盒 + 弧长)、`render_layout_to_text()`、`render_panel_to_text()`、`step(ms)`、`setVoiceState`、`setLanes`、`showConfirm`/`hideConfirm`、`applyEnvelope`,以及 `?test=1` 冻结模式。
+- `desktop/preview.html` 是开发用六态对照页(深/浅两种桌面底),`npm run build` 不会把它打进 `dist/`。
 - CSP 收紧为 `default-src 'self'; style-src 'self' 'unsafe-inline'`。
 
 ## 8. 平台层(`core/{agents,dispatch,tools,memory}/`,契约 + 契约校验)
@@ -336,8 +343,42 @@ Phase 4 新增的四个包已按 P3～P7 分阶段实现：`agents` 提供 CLI/E
 
 `core/session_bridge.py` 保留原样,降级为 `agents/evox.py` 的实现细节 —— 五道安全校验不得随之降级。
 
-## 9. 组件边界速查表
+### 8.3 操作面:本机控制台(`core/console/`,ADR 006)
 
+平台层之上的**操作面**,不是新的一层业务:它只调已有的 `VoiceRuntime` / `VoiceStack` /
+`ToolPolicy`,不绕过任何一道门。四个模块加一份前端:
+
+| 文件 | 行数 | 职责 |
+|---|---|---|
+| `core/console/server.py` | 320 | `ThreadingHTTPServer`、回环强制、token、方法+路径 → API 调用 |
+| `core/console/routes.py` | 1080 | 每个端点的语义;三份白名单 `EDITABLE`/`AGENT_EDITABLE`/`MCP_EDITABLE` |
+| `core/console/audio.py` | 93 | base64 WAV 解码与质量数(时长/rms/削波) |
+| `core/console/providers.py` | 111 | 服务商预设表(11 LLM + 4 ASR + 4 TTS),**端点未经本项目复验** |
+| `core/console/static/index.html` | 2668 | 单文件前端,CSS/JS 内联(所以每个请求包括页面本身都要 token) |
+
+界面是侧栏 + **九个视图**,一次只看一个:运行态 · 模型配置 · 声纹 · 本机 Agent ·
+本人档案 · 技能与 MCP · 唤醒球 · 安全边界(只读) · 调试。
+
+配置写入走两个模块,分工是按**文件的性质**分的:
+
+- `core/config_edit.py`(380 行):行级替换,保留注释、空行与**行尾**。`set_scalars` 只改
+  已存在的键 —— 对 schema 固定的文件(`voice`/`tools`/`speaker`/`memory`/`agents`/`mcp`)
+  来说,未知键就是拼错的样子。`set_section` 是唯一的例外,只服务下一条。
+- `core/models_config.py`(317 行):`config/models.toml` 的 loader + 写入器。这个文件的
+  **表就是数据**(一个 profile 一张表),所以允许加表加键;代价是它自己要把校验做足 ——
+  未知键报错、`proto` 枚举、`key_env` 必须是环境变量名、形似凭据的值整条拒绝、
+  `base` 明文 HTTP 只许回环。**没有运行时代码读它**(见第 10 节)。
+
+出网有两处,分工在「要不要发密钥」上:`POST /api/models/probe` 发一次
+`GET {base}/models`,**不带凭据**、不跟随重定向、只取状态码 —— 所以 `401` 是它的好结果
+(主机在、路径对、只是没带钥匙)。`POST /api/models/fetch` 打同一个路径,但**带凭据**并
+读 body,把模型名解析出来填进「模型名」那个下拉 —— 所以 `401` 在它这里是失败。两件事
+不合成一个端点,因为合起来就得在"要不要发密钥"上二选一,而不发正是探测存在的意义。
+密钥只从 `key_env` 指定的环境变量读,页面传的是变量名;响应里回的是模型名、状态码、
+耗时和一个"带没带凭据"的布尔,没有密钥值。body 有 1 MiB 上限,超了报错而不是截断。
+这两个是整个控制台唯一主动出网的动作。
+
+## 9. 组件边界速查表
 | 边界 | 谁不许知道谁 | 强制手段 |
 |---|---|---|
 | 模型推理 ↔ 音频设备 | `SherpaKeywordProvider` 不碰麦克风 | 采集逻辑独立在 `SounddeviceWakeCapture` |
@@ -351,6 +392,9 @@ Phase 4 新增的四个包已按 P3～P7 分阶段实现：`agents` 提供 CLI/E
 | 工具调用 ↔ 调用来源 | 工具不区别对待 voice 与 agent | 单一 `ToolPolicy.check()` 入口 |
 | 记忆 ↔ 音频 | 记忆层拿不到波形 | `records` 无 BLOB 列 + `bytes` 抛 `TypeError` + 断言测试 |
 | 记忆 ↔ 任务注入 | 记忆不认识 `Task` 形状 | 注入是 dispatch 的职责,不是 memory 的 |
+| 控制台 ↔ 安全边界 | 网页改不到决定「跑什么」的键 | 三份白名单 + 403 在校验之前;`models.toml` 走自己的端点与 `FIELDS` 白名单,不进 `EDITABLE` |
+| 控制台 ↔ 确认面 | 控制台不确认 `shell.run`,也不确认 MCP | 只报「有一个待确认」,连命令原文都不返回(FR-6.13) |
+| 配置文件 ↔ 密钥 | 配置文件里不许出现密钥值 | `agents.toml` schema 层面没有那个键;`models.toml` 只收 `key_env`,形似凭据的值整条拒绝 |
 
 ## 10. 尚未实现的架构件(Phase 4 起)
 
@@ -371,3 +415,5 @@ Phase 4 新增的四个包已按 P3～P7 分阶段实现：`agents` 提供 CLI/E
 | 工具确认交互面 | `desktop/src/` | P8 | `shell.run` 的确认 UI 落在这里 |
 | 超时/重连/错误恢复 | `vox_plugin/runtime.py` + `core/state.py` + 传输层 | Phase 4 | VoiceRuntime 生命周期与回合失败恢复已实现；真实重连策略仍待联调 |
 | 系统托盘常驻 | `main.rs` | Phase 4 | 发布阻塞项 #5 一部分 |
+| **`config/models.toml` 的读侧** | 语音栈装配 + LLM 选择 | Phase 4 | 控制台能读写能探端点,但**没有任何运行时代码按它组装模型**:语音栈仍由 `config/voice.toml` + 四个 `VOX_*_MODEL_DIR` 决定,LLM 仍由 `config/agents.toml` 决定。所以 `active` 目前只是一个被记录的意图（`docs/backlog.md` B7） |
+| 云端 ASR/TTS/LLM 接入 | `core/audio/` + `core/agents/` | Phase 4 | `providers.py` 的 19 条预设端点抄自各家文档,**一家都没打通过** |

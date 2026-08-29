@@ -152,17 +152,31 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 
 | 目的 | 命令 | 等级 | 预期 |
 |---|---|---|---|
-| Python 全量 | `.venv\Scripts\python.exe -m pytest tests -q` | AUTO | 300 passed, 3 skipped |
+| Python 全量 | `.venv\Scripts\python.exe -m pytest tests -q` | AUTO | **1009 passed, 3 skipped**（2026-08-28，干净 shell） |
+| **控制台** | `.venv\Scripts\python.exe -m pytest tests/test_console.py -q` | AUTO | **103 passed**（回环、token、白名单、路径穿越、凭据拒绝、模型端点与探测） |
+| **模型方案** | `.venv\Scripts\python.exe -m pytest tests/test_models_config.py -q` | AUTO | **60 passed**（未知键、密钥形状、回环 URL、写入保留注释与行尾、预设值不落盘） |
+| **控制台渲染取证** | `preview_start console` → snapshot → console_logs → screenshot | SIM | 九区块齐、**无 JS 错误** |
+| **MCP** | `.venv\Scripts\python.exe -m pytest tests/test_mcp.py -q` | SIM | **51 passed**（进程内假 server） |
+| **搜索后端** | `.venv\Scripts\python.exe -m pytest tests/test_search_backends.py -q` | AUTO | **35 passed**（不打真网络） |
+| **配置编辑** | `.venv\Scripts\python.exe -m pytest tests/test_config_edit.py -q` | AUTO | **33 passed**（注释保留、行尾保留、校验失败不落盘） |
+| **语音配置** | `.venv\Scripts\python.exe -m pytest tests/test_voice_config.py -q` | AUTO | **20 passed**（未知键报错） |
+| **语音装配** | `.venv\Scripts\python.exe -m pytest tests/test_voice_assembly.py -q` | AUTO | **16 passed**（**缺声纹不降级**） |
+| **声纹身份接线** | `.venv\Scripts\python.exe -m pytest tests/test_speaker_identity.py -q` | AUTO | **15 passed**（全部倒向 fail-closed） |
+| **记忆并发** | `.venv\Scripts\python.exe -m pytest tests/test_memory_threads.py -q` | AUTO | **7 passed**（真线程，真 SQLite 文件） |
 | 工具与安全门 | `.venv\Scripts\python.exe -m pytest tests/test_tools.py tests/test_tool_security.py -q` | AUTO | 123 passed, 1 skipped(skip 是符号链接) |
-| 工具/记忆与语音路径接线 | `.venv\Scripts\python.exe -m pytest tests/test_memory.py tests/test_plugin_tools.py -q` | AUTO | 86 passed |
-| 记忆 | `.venv\Scripts\python.exe -m pytest tests/test_memory.py -q` | AUTO | 62 passed(**无需模型**) |
-| 声纹(免模型) | `.venv\Scripts\python.exe -m pytest tests/test_speaker.py tests/test_speaker_privacy.py tests/test_speaker_hardening.py -q` → **44 passed** | AUTO |rivacy.py -q` | AUTO | 30 passed(**无需模型**) |
+| 工具/记忆与语音路径接线 | `.venv\Scripts\python.exe -m pytest tests/test_memory.py tests/test_plugin_tools.py -q` | AUTO | 87 passed |
+| 记忆 | `.venv\Scripts\python.exe -m pytest tests/test_memory.py -q` | AUTO | 65 passed(**无需模型**) |
+| 声纹(免模型) | `.venv\Scripts\python.exe -m pytest tests/test_speaker.py tests/test_speaker_privacy.py tests/test_speaker_hardening.py -q` | AUTO | **44 passed**（**无需模型**） |
 | 声纹(真实模型) | `.venv\Scripts\python.exe -m pytest tests/integration/test_speaker_model.py -q` | AUTO | 5 passed(缺模型时 5 skipped) |
-| 声纹录入 | `.venv\Scripts\python.exe scripts/enroll_speaker.py --name <名字>` | REAL-MIC | 写入向量,不写音频 |
+| 声纹录入(命令行) | `.venv\Scripts\python.exe scripts/enroll_speaker.py --name <名字>` | REAL-MIC | 写入向量,不写音频 |
+| 声纹录入(控制台) | `run_console.py` → 声纹区录 3 段 | REAL-MIC | 逐段报时长与 RMS，`audio_saved: false` |
 | 声纹注册状态 | `.venv\Scripts\python.exe scripts/enroll_speaker.py --name x --list-only` | AUTO | 只出名字与样本数 |
 | 事件契约(语音) | `.venv\Scripts\python.exe -m pytest tests/test_events.py tests/test_event_schema.py -q` | AUTO | 9 passed |
 | 事件契约(平台 + 注册) | `.venv\Scripts\python.exe -m pytest tests/test_agent_event_schema.py -q` | AUTO | 34 passed |
-| 集成 | `.venv\Scripts\python.exe -m pytest tests/integration -q` | AUTO+SIM | 10 passed(缺模型时 3 passed, 7 skipped) |
+| 集成 | `.venv\Scripts\python.exe -m pytest tests/integration -q` | AUTO+SIM | 缺模型时部分 skip |
+| **就绪清单** | `.venv\Scripts\python.exe scripts/run_voice.py --check` | AUTO | 逐项 ok/-- 加补齐提示 |
+| **REAL-AGENT 探测** | `.venv\Scripts\python.exe scripts/acceptance/probe_agents.py` | REAL-AGENT | 三等级不混淆 |
+| **资源画像** | `.venv\Scripts\python.exe scripts/acceptance/resource_profile.py --minutes 30` | REAL-WIN | CSV + 摘要，**只报数字不给结论** |
 | 语音冒烟 | `.venv\Scripts\python.exe scripts/smoke_voice.py` | SIM | 打印生命周期事件 |
 | 端到端模拟 | `.venv\Scripts\python.exe scripts/e2e_simulated.py` | SIM | `E2E SIMULATED OK` |
 | t10 栈验证(证据生成) | `.venv\Scripts\python.exe scripts/acceptance/t10_voice_stack_validation.py` | AUTO+SIM | `t10 OK` |

@@ -38,6 +38,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from core.outbound import API_USER_AGENT
+
 from .contract import AgentChunk, AgentDescriptor, Task, render_prompt
 
 #: Environment variable carrying the optional bearer token. Not in the config
@@ -181,7 +183,7 @@ class HttpAgentAdapter:
                 "stream": True,
             }
         ).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", "User-Agent": API_USER_AGENT}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         return Request(self._endpoint(), data=body, method="POST", headers=headers)

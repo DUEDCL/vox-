@@ -85,7 +85,15 @@ class SherpaTtsProvider:
                 tokens=str(self.model_dir / "tokens.txt"),
                 lexicon=str(self.model_dir / "lexicon.txt"),
                 dict_dir=str(self.model_dir / "dict"),
-                data_dir=str(self.model_dir),
+                # **不要设 data_dir。** 它是 espeak-ng 的数据目录，一给值 sherpa-onnx 就
+                # 从 lexicon 前端切到 espeak-ng 前端 —— 而 espeak-ng 会把中文按它自己的
+                # 规则念，出来的是一段听得出是人声、但完全不是中文的东西。
+                #
+                # 这是个只在**听**的时候才暴露的错：音频有正常的语音包络、正常的零穿越率、
+                # 采样率也对，`played: true` 一样返回，所以每一条自动断言都是绿的。唯一的
+                # 数字线索是时长 —— 同一句话 13 个汉字，设了 data_dir 是 1.32 秒
+                # （101 ms/字），不设是 2.60 秒（200 ms/字，中文的正常语速）。
+                # `tests/integration/test_tts_model.py` 现在钉的就是这个比值。
             )
             model = sherpa.OfflineTtsModelConfig(
                 vits=vits, num_threads=self.num_threads, provider=self.execution_provider

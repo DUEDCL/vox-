@@ -104,8 +104,61 @@ _SHELL_RUN_PATTERNS = (
 )
 
 #: Utterances that end in a question particle are asking, not commanding.
-#: 「跑得动吗」matched ``跑`` and would have run「得动吗」as a shell command.
+#: 「跑得动吗」matched ``跑`` and would have run「得动吁」as a shell command.
 _QUESTION_TAIL = re.compile(r"(?:吗|嗎|呢|吧)\s*[?？]?\s*\Z")
+
+#: ``time.now``。整句匹配、不捕获参数 —— 时区是本机的属性，「现在几点」没有参数可提。
+#:
+#: 这一组敢用整句锚定是因为这些说法没有第二个意思：「几点了」不会是别的请求。而它们
+#: 派给 agent 要几秒和一次出网，答案却在本机时钟里。
+_TIME_NOW_PATTERNS = (
+    r"\A(?:现在|現在|目前|当前|當前)?\s*(?:是)?\s*(?:几点|幾點|什么时候|什麼時候|时间|時間)"
+    r"(?:了|钟|鐘)?\s*[?？。]?\s*\Z",
+    r"\A(?:几点|幾點)(?:了|钟|鐘)?\s*[?？。]?\s*\Z",
+    r"\A(?:今天|今日)\s*(?:是)?\s*(?:几号|幾號|星期几|星期幾|周几|週幾|礼拜几|禮拜幾)"
+    r"\s*[?？。]?\s*\Z",
+    r"\A(?:报时|報時|报一下时间|報一下時間)\s*[?？。]?\s*\Z",
+    r"\A(?:what(?:'s| is)\s+the\s+time|what\s+time\s+is\s+it)\s*[?.]?\s*\Z",
+)
+
+#: ``app.open``：打开一个本机应用。
+#:
+#: 名字必须**短且不含分隔符**（见 ``_looks_like_app_name``）—— 「打开」对文件、网址和应用
+#: 三样都歧义，而形状是唯一能在不碰文件系统、不读工具配置的前提下分开它们的东西。
+#: 白名单不在这一层：意图层不该知道装了什么，工具拒绝时会列出能开的，那是有信息的失败。
+_APP_OPEN_PATTERNS = (
+    rf"\A{_POLITE}(?:打开|打開|启动|啟動|开启|開啟){_VERB_SEP}?(.+?)"
+    r"(?:吧|呀)?\s*[。!！]?\s*\Z",
+    rf"\A{_POLITE}(?:open|launch|start)\s+(.+?)\s*[.!]?\s*\Z",
+)
+
+#: 泛指的「放点音乐」—— 没有具体曲目，所以是「打开那个播放器」而不是「搜这首歌」。
+#: 单独一组是因为它**不捕获参数**：要开哪个由 ``apps.default_music`` 定。
+_PLAY_ANY_PATTERNS = (
+    r"\A(?:放|播放|听|聽|来|來)\s*(?:点|點|一?首|一?些)?\s*(?:音乐|音樂|歌|歌曲|歌儿|歌兒)"
+    r"\s*(?:吧|呀|听|聽)?\s*[。!！?？]?\s*\Z",
+    r"\A(?:play|put\s+on)\s+(?:some\s+)?music\s*[.!]?\s*\Z",
+)
+
+#: ``web.open``：把一个地址或一次搜索交给浏览器。
+#:
+#: 「播放周杰伦的稻香」落在这里而不是 ``web.search``：后者把结果抓回来给平台读，而这句话
+#: 要的是一个能点播放的页面 —— 渲染它的是浏览器，不是我们。
+_WEB_OPEN_PATTERNS = (
+    rf"\A{_POLITE}(?:打开|打開|访问|訪問|上)\s*((?:https?://|www\.)\S+)\s*\Z",
+    rf"\A{_POLITE}(?:播放|放|听|聽){_VERB_SEP}?(.+?)(?:吧|呀)?\s*[。!！]?\s*\Z",
+    rf"\A{_POLITE}(?:play|open)\s+((?:https?://|www\.)\S+)\s*\Z",
+)
+
+
+#: 不捕获参数的规则。``_plausible`` 对它们放行 —— 「几点了」没有参数可提，而一个要求
+#: 参数非空的检查会把这一整类拒掉。
+_NO_ARGUMENT_RULES = frozenset({"time.now", "play.any"})
+
+#: 规则名 -> 真实工具名。``play.any``（「放点音乐」）是 ``app.open`` 的一种说法：它不带
+#: 名字，开哪个由 ``apps.default_music`` 定。分成两条规则而不是一条，是因为**捕不捕获
+#: 参数**不同 —— 合成一条会让「放音乐」和「播放稻香」走同一个提取逻辑，而后者要的是搜索。
+_RULE_TO_TOOL = {"play.any": "app.open"}
 
 
 class RuleBasedIntentResolver:
@@ -121,8 +174,12 @@ class RuleBasedIntentResolver:
         patterns: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         self.patterns = dict(patterns) if patterns is not None else {
+            "time.now": _TIME_NOW_PATTERNS,
+            "play.any": _PLAY_ANY_PATTERNS,
             "web.search": _WEB_SEARCH_PATTERNS,
+            "web.open": _WEB_OPEN_PATTERNS,
             "fs.read": _FS_READ_PATTERNS,
+            "app.open": _APP_OPEN_PATTERNS,
             "shell.run": _SHELL_RUN_PATTERNS,
         }
         # Compile once rather than per utterance, and keep order.
@@ -150,20 +207,33 @@ class RuleBasedIntentResolver:
             return Intent(kind="agent", confidence=0.0)
         # Order matters: ``web.search`` runs before ``fs.read``, because
         # 「读一下网页 X」contains both「读」and「网页」but means search.
-        for tool in ("web.search", "fs.read", "shell.run"):
+        #
+        # 新加的四组按「谁更具体」排：``time.now`` 和 ``play.any`` 是整句匹配、不捕获参数，
+        # 不可能误伤别的请求，所以最先；``web.open`` 在 ``fs.read`` 之前，因为「打开
+        # https://…」两边都能匹配而它是网址；``app.open`` 最后，它捕获的是「打开」后面
+        # 剩下的任何东西，是这一串里最宽的一条。
+        for tool in (
+            "time.now",
+            "play.any",
+            "web.search",
+            "web.open",
+            "fs.read",
+            "app.open",
+            "shell.run",
+        ):
             for pattern in self._compiled.get(tool, ()):
                 match = pattern.search(stripped)
                 if match is None:
                     continue
                 arguments = self._extract(tool, match)
-                if not self._plausible(arguments):
+                if tool not in _NO_ARGUMENT_RULES and not self._plausible(arguments):
                     # A one-character capture is a quantifier artefact, not an
                     # argument. Keep looking, and fall through to the agent if
                     # nothing better matches.
                     continue
                 return Intent(
                     kind="tool",
-                    tool=tool,
+                    tool=_RULE_TO_TOOL.get(tool, tool),
                     arguments=arguments,
                     # Confidence is 1.0 for a hit, because the hit is the only
                     # evidence: there is no model score to average or threshold.
@@ -180,13 +250,121 @@ class RuleBasedIntentResolver:
     def _extract(self, tool: str, match: re.Match[str]) -> dict[str, Any]:
         """The named payload from the regex hit."""
         captured = match.group(1).strip() if match.lastindex else ""
+        if tool in _NO_ARGUMENT_RULES:
+            # 「几点了」「放点音乐」都没有参数：前者的时区是本机属性，后者开哪个由配置定。
+            return {}
         if tool == "fs.read":
-            return {"path": captured}
+            path = _trim_path(captured)
+            # 不像路径就**不认这个工具**，让它落到 agent 上。
+            #
+            # 实测过的形状：「读一下 一下」捕获出 ``一下``，然后 fs.read 以 ``no such file``
+            # 收场，而用户在界面上看到的是「route=tool ok=false 0ms」—— 一个既不告诉他哪里
+            # 错了、也不给他答案的回合。落到 agent 至少能得到一句话。
+            return {"path": path} if _looks_like_path(path) else {}
         if tool == "web.search":
             return {"query": captured}
+        if tool == "web.open":
+            value = captured.strip()
+            lowered = value.casefold()
+            if lowered.startswith(("http://", "https://")):
+                return {"url": value}
+            if lowered.startswith("www."):
+                # 说「上 www.bilibili.com」的人给的是主机名，补上协议是补一个他省略的字，
+                # 不是替他改地址。https 而不是 http：降级到明文得是个显式选择。
+                return {"url": "https://" + value}
+            return {"query": value}
+        if tool == "app.open":
+            name = captured.strip()
+            return {"name": name} if _looks_like_app_name(name) else {}
         if tool == "shell.run":
             return {"command": captured}
         return {}
+
+
+#: 出现这些词就不是应用名。
+#:
+#: 指示代词和人称代词指的是上下文里的某个东西，而应用名是个固定的专有名词 —— 「打开这个
+#: 问题看看」说的是别的事。动词性尾巴（「看看」「试试」）同理：应用名不带动作。
+#: 这是个否定表而不是肯定表：肯定表要穷举装了什么，那正是意图层不该知道的。
+_NOT_APP_WORDS = (
+    "这个", "這個", "那个", "那個", "这些", "這些", "那些",
+    "我的", "你的", "他的", "它的",
+    "看看", "试试", "試試", "瞧瞧",
+)
+
+
+def _looks_like_app_name(text: str) -> bool:
+    """像不像一个应用的名字：短、不含路径或通配字符、也不像个文件名。
+
+    「打开」对文件、网址和应用三样都歧义，而形状是唯一能在**不碰文件系统、不读工具配置**
+    的前提下把它们分开的东西 —— 一个按「白名单里有没有」分流的解析器会让同一句话在两台
+    机器上走不同的路。
+
+    长度上限分中英两套：中文应用名 6 个字够用（「网易云音乐」5、「酷狗音乐」4），而英文
+    带空格的名字（``Visual Studio Code``）需要 20 个字符。这个差别不是凑数 —— 6 个汉字
+    的上限正是把「我昨天说的那个想法」这类短语挡在外面的东西，而按字符数一刀切要么放它
+    进来，要么把英文名字挡在外面。
+
+    判错的代价是工具那边回一句「不在可启动的应用里，现在能开的是…」—— 一个有信息的失败，
+    比沉默地落到 agent 好。
+    """
+    value = text.strip()
+    if not value or any(char in value for char in '/\\:?*"<>|'):
+        return False
+    if any(word in value for word in _NOT_APP_WORDS):
+        return False
+    if _looks_like_path(value):
+        return False
+    han = sum(1 for char in value if "一" <= char <= "鿿")
+    if han:
+        return han <= 6 and len(value) <= 12
+    return len(value) <= 20
+
+
+#: 没有扩展名但确实是文件的那几个。全大写或首字母大写的 ASCII 名字在仓库里就是这一类，
+#: 一一列出而不是按大小写猜：``README`` 是文件，``OK`` 不是。
+_EXTENSIONLESS = frozenset(
+    {"readme", "license", "licence", "makefile", "dockerfile", "changelog", "authors", "notice"}
+)
+
+
+def _looks_like_path(text: str) -> bool:
+    """这串东西像不像一个路径。
+
+    判据是**形状**而不是「文件在不在」：意图层不该碰文件系统 —— 一个按存在性分流的解析器
+    会让同一句话在不同机器上走不同的路，而那种不确定性比偶尔多走一次 agent 糟得多。
+    """
+    value = text.strip()
+    if not value:
+        return False
+    if "/" in value or "\\" in value:
+        return True
+    stem, dot, ext = value.rpartition(".")
+    # 扩展名要像扩展名：``.md``、``.py``、``.toml``。「今天.我」不算。
+    if dot and stem and ext.isascii() and ext.isalnum() and 1 <= len(ext) <= 6:
+        return True
+    return value.casefold() in _EXTENSIONLESS
+
+
+#: 路径后面跟中文修饰语时，从哪里切。
+#:
+#: 「读一下 README.md 的第一行」整段捕获是 ``README.md 的第一行``，那不是任何文件的名字,
+#: 于是快路径以 ``no such file`` 收场 —— 而说这句话的人只是想读那个文件。这是最自然的
+#: 中文说法之一，把它留给 agent 也行，但 agent 要起一个进程读一个本机文件。
+#:
+#: **只在切之前那半已经像个文件名时才切**：含扩展点或路径分隔符。中文文件名（``报告.txt``）
+#: 的第一个汉字出现在扩展点之前，切前那半是空的，所以它不会被误伤 —— 这条件就是为它加的。
+_HAN = re.compile(r"[一-鿿]")
+
+
+def _trim_path(captured: str) -> str:
+    hit = _HAN.search(captured)
+    if hit is None:
+        return captured
+    head = captured[: hit.start()].strip()
+    if head and ("." in head or "/" in head or "\\" in head):
+        return head
+    return captured
 
 
 __all__ = [

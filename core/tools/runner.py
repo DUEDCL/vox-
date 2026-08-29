@@ -42,6 +42,10 @@ _SAFE_EVENT_REASONS = frozenset(
         "fs tools are disabled",
         "web tools are disabled",
         "shell tools are disabled",
+        "mcp tools are disabled",
+        "tool is not on the allow-list",
+        "tool is not on the server's allow-list",
+        "the remote tool reported an error",
         "tool failed",
     }
 )
@@ -87,6 +91,10 @@ class ToolRunner:
         self.tools: dict[str, Tool] = dict(tools or {})
         self.on_event = on_event
         self.memory_writer = memory_writer
+        #: MCP servers this runner owns, if any. Held so ``close()`` can reap the
+        #: subprocesses: they are children of this process and nothing else is in a
+        #: position to end them.
+        self.mcp: Any = None
         self.executed = 0
         self.refused = 0
         self.confirmations = 0
@@ -97,6 +105,17 @@ class ToolRunner:
 
     def register(self, tool: Tool) -> None:
         self.tools[tool.name] = tool
+
+    def close(self) -> None:
+        """Release the MCP subprocesses. Idempotent; safe with none attached."""
+        registry, self.mcp = self.mcp, None
+        if registry is not None:
+            try:
+                registry.close()
+            except Exception:
+                # Teardown is best-effort. A server that will not die must not
+                # prevent the rest of the runtime from shutting down.
+                pass
 
     def _emit(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         event = validate_event(build_event(event_type, payload), AGENT_SCHEMA_PATH)
@@ -222,4 +241,6 @@ class ToolRunner:
         describe = getattr(self.policy, "describe", None)
         if callable(describe):
             report["policy"] = describe()
+        if self.mcp is not None:
+            report["mcp"] = self.mcp.describe()
         return report

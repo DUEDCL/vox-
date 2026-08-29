@@ -14,7 +14,20 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from .contract import ORIGINS, TOOL_NAMES, Tool, ToolPolicy, ToolRequest, ToolResult
+from .apps import AppOpenTool
+from .browser import WebOpenTool
+from .clock import TimeNowTool
 from .fs import FsReadTool
+from .mcp import (
+    McpClient,
+    McpConfigError,
+    McpError,
+    McpRegistry,
+    McpServerConfig,
+    McpTool,
+    load_mcp_config,
+    open_mcp_tools,
+)
 from .policy import (
     DANGEROUS_PATTERNS,
     SENSITIVE_ENV_MARKERS,
@@ -29,6 +42,13 @@ from .policy import (
     sensitive_name,
 )
 from .runner import ToolRunner
+from .search_backends import (
+    DuckDuckGoBackend,
+    SearchBackendError,
+    SearxBackend,
+    endpoint_problem,
+    open_search_backend,
+)
 from .shell import ShellRunTool
 from .web import WebSearchTool
 
@@ -39,23 +59,64 @@ def open_tools(
     on_event: Any = None,
     memory_writer: Any = None,
     search_backend: Any = None,
+    mcp: Any = None,
 ) -> ToolRunner:
     """Gate plus tools, wired. ``shell.run`` is registered only when enabled.
 
     Registering it while disabled would work -- the gate refuses it either way --
     but leaving it out means ``describe()["registered"]`` answers "can this
     machine run commands at all" without reading the config a second time.
+
+    ``search_backend=None`` means "decide from the config": that is what makes a
+    configured SearxNG instance actually reach the tool. Passing one explicitly
+    (including a fake, which is how this is tested) overrides the config.
+
+    ``mcp`` is the same idea one step further: ``None`` reads ``config/mcp.toml``
+    and starts whatever it enables (nothing, out of the box), ``False`` skips MCP
+    entirely, and an ``McpRegistry`` is used as given. Starting servers here rather
+    than lazily is deliberate -- a tool list that grows after the first call would
+    make "what can this platform do" a question with a time-dependent answer.
     """
     resolved = dict(config) if config is not None else load_tools_config()
+    if search_backend is None:
+        search_backend = open_search_backend(resolved)
+
+    mcp_config = None
+    registry = None
+    if mcp is not False:
+        if mcp is None:
+            try:
+                mcp_config = load_mcp_config()
+                registry = open_mcp_tools(mcp_config)
+            except McpConfigError:
+                # A broken MCP config must not stop the platform's own tools. It is
+                # surfaced through describe() rather than by refusing to start.
+                mcp_config = None
+                registry = None
+        else:
+            registry = mcp
+            mcp_config = getattr(mcp, "config_snapshot", None)
+
     runner = ToolRunner(
-        policy=DefaultToolPolicy(resolved),
+        policy=DefaultToolPolicy(resolved, mcp_config=mcp_config),
         on_event=on_event,
         memory_writer=memory_writer,
     )
     runner.register(FsReadTool(resolved))
     runner.register(WebSearchTool(resolved, backend=search_backend))
+    runner.register(TimeNowTool(resolved))
+    # 两个「打开点什么」的工具。各自的开关在 config/tools.toml：apps.enabled 与
+    # web.open_enabled，默认都开 —— 它们不出网、不读文件、不回传。
+    if resolved.get("apps", {}).get("enabled", True):
+        runner.register(AppOpenTool(resolved))
+    if resolved.get("web", {}).get("open_enabled", True):
+        runner.register(WebOpenTool(resolved))
     if resolved.get("shell", {}).get("enabled", False):
         runner.register(ShellRunTool(resolved))
+    if registry is not None:
+        runner.mcp = registry
+        for tool in registry.tools:
+            runner.register(tool)
     return runner
 
 
@@ -65,7 +126,16 @@ __all__ = [
     "SENSITIVE_ENV_MARKERS",
     "TOOL_NAMES",
     "DefaultToolPolicy",
+    "DuckDuckGoBackend",
     "FsReadTool",
+    "McpClient",
+    "McpConfigError",
+    "McpError",
+    "McpRegistry",
+    "McpServerConfig",
+    "McpTool",
+    "SearchBackendError",
+    "SearxBackend",
     "ShellRunTool",
     "Tool",
     "ToolPolicy",
@@ -76,7 +146,11 @@ __all__ = [
     "WebSearchTool",
     "command_is_allowed",
     "dangerous_reason",
+    "endpoint_problem",
+    "load_mcp_config",
     "load_tools_config",
+    "open_mcp_tools",
+    "open_search_backend",
     "open_tools",
     "resolve_in_sandbox",
     "sandbox_roots",

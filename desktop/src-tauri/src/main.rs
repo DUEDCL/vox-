@@ -37,8 +37,10 @@ use tauri::{
 const WAKE_LABEL: &str = "wake";
 
 /// 折叠态兜底尺寸。前端第一帧上报后就不再用它。
-const INIT_W: f64 = 210.0;
-const INIT_H: f64 = 205.0;
+// 首帧窗口尺寸。前端一上报布局就会被替换,这两个数只决定「第一帧不闪」。
+// 208 是 `--orb`(球 + 外发光的总尺寸,见 style.css),两侧各 16px 内边距。
+const INIT_W: f64 = 240.0;
+const INIT_H: f64 = 240.0;
 
 /// 首次落位时在球下方预留的空间。
 /// 不预留的话，每次展开面板都会撞到工作区下边界、被夹回来，球就往上跳一大截。
@@ -349,8 +351,26 @@ fn main() {
             vox_confirm_reply
         ])
         .setup(|app| {
+            // 调参用：`VOX_ORB_SIZE=240` 直接把球的布局盒尺寸带给前端，不用重新编译。
+            // 走 URL query 而不是新加一个 IPC 命令 —— IPC 面就是那四个 `vox_*`，
+            // 为一个调参旋钮扩大它不值得。范围钳制在 96–420，越界一律忽略。
+            let mut q: Vec<String> = Vec::new();
+            if let Some(px) = std::env::var("VOX_ORB_SIZE").ok().and_then(|v| v.trim().parse::<u32>().ok()) {
+                if (96..=420).contains(&px) {
+                    q.push(format!("orb={px}"));
+                }
+            }
+            // 平时不出文字是默认;`VOX_SHOW_TEXT=1` 打开。报错与拒绝无论开关都出文字。
+            if std::env::var("VOX_SHOW_TEXT").map(|v| v.trim() == "1").unwrap_or(false) {
+                q.push("text=1".to_string());
+            }
+            let url = if q.is_empty() {
+                "index.html".to_string()
+            } else {
+                format!("index.html?{}", q.join("&"))
+            };
             let mut builder =
-                WebviewWindowBuilder::new(app, WAKE_LABEL, WebviewUrl::App("index.html".into()))
+                WebviewWindowBuilder::new(app, WAKE_LABEL, WebviewUrl::App(url.into()))
                     .title("Vox")
                     .inner_size(INIT_W, INIT_H)
                     .resizable(false)
