@@ -25,29 +25,37 @@
 
 active = "local"
 
-# ---------------------------------------------------------------- 本机（默认）
-# 三条红线的第一条：唤醒、VAD、TTS、声纹全部本机执行。这一套不联网。
+# ------------------------------------------------- 当前这一套（语音本机、算力上云）
+# **名字是历史遗留，内容不是「全本机」** —— ADR 008 之后红线 1 由「本地优先」改成
+# 「音频本地，算力上云」：唤醒/VAD/ASR/声纹仍然全部本机，合成与推理走云端。
+# 改 `active` 那一行就能切到别的方案。
 [profiles.local]
-label = "全本机（离线）"
+label = "语音本机 + 云端合成与推理"
 
 [profiles.local.asr]
 provider = "sherpa-local"
 model = "zipformer-zh-14M"
 
+# **运行时读的是 config/voice.toml 的 [tts]，不是这里。** 这一栏是控制台上的显示与编辑
+# 面；两处必须一致，不一致时以 voice.toml 为准（见下面 key_env 那条的教训）。
 [profiles.local.tts]
 provider = "custom"
 model = "qwen-audio-3.0-tts-plus"
+voice = "longanhuan_v3.6"
 base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 proto = "openai"
 key_env = "VOX_TTS_KEY"
 
-# 本机 LLM 走 Ollama。明文 HTTP 只许回环地址 —— 与 EvoX 桥接同一条约束。
+# 云端推理。**key_env 2026-09-01 从 VOX_DASHSCOPE_KEY 改成 VOX_LLM_KEY。**
+# 一个名字叫 DASHSCOPE 的变量被这条（端点是中转站）点名，于是为了让聊天能用而往它里面
+# 存的是中转站的 key —— 而 config/voice.toml 的 TTS 读的正是那个变量，百炼回 401
+# InvalidApiKey，表现为「回答不出声」。一个变量只服务一个角色。
 [profiles.local.llm]
 provider = "custom"
 model = "claude-opus-5"
 base = "https://api.justwoker.icu/v1"
 proto = "openai"
-key_env = "VOX_DASHSCOPE_KEY"
+key_env = "VOX_LLM_KEY"
 
 # ---------------------------------------------------------------- 云端 LLM
 # 语音仍然本机（红线不动），只有 LLM 出网。这是最常用的一套。

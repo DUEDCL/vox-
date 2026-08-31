@@ -357,3 +357,68 @@ def test_a_path_with_spaces_still_survives(resolver):
 def test_a_search_query_is_never_trimmed(resolver):
     """查询词几乎总是中文，按汉字切会把每一个查询都截成空 —— 只有 fs.read 走这条。"""
     assert resolver.resolve("搜索 幂等 是什么意思").arguments == {"query": "幂等 是什么意思"}
+
+
+# ------------------------------------------------- 能力标注（2026-09-01 的路由修正）
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "帮我写个 Python 脚本统计目录大小",
+        "改一下这个函数的返回值",
+        "这个项目里的测试为什么跑不起来",
+        "跑一下测试",
+        "git status 看看",
+        "提交一下",
+        "报错了，帮我看看",
+        "重构这段代码",
+        "write a script that renames files",
+        "refactor this function's error handling",
+        "debug the failing test",
+    ],
+)
+def test_a_request_that_needs_the_machine_asks_for_the_code_capability(text):
+    """这些说法要一个**真能动这台机器**的后端。
+
+    漏判的代价是具体的：一句「跑一下测试」落到裸 HTTP 端点上，换回来的是一段它其实
+    执行不了的说明 —— 语法正确、事实全错，而回合报成功。
+    """
+    from core.dispatch.intent import CODE_CAPABILITY, required_capabilities
+
+    assert required_capabilities(text) == frozenset({CODE_CAPABILITY})
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "你好",
+        "今天天气怎么样",
+        "帮我写一封邮件给张三",
+        "什么是幂等",
+        "给我讲个笑话",
+        "我有点累了",
+        "翻译一下这句话",
+        "how are you",
+        "",
+        "   ",
+    ],
+)
+def test_ordinary_conversation_asks_for_nothing(text):
+    """空集 = 谁都行，于是最便宜最快的后端赢。
+
+    **反方向的误判在这里是有代价的**：把闲聊标成「要动机器」会让每一句话去起一个
+    CLI 进程（自报 2500ms，实测更慢），而语音里 0 秒和 3 秒是「即时」与「迟钝」的差别。
+    「写一封邮件」是这条线上最容易被误伤的那个 —— 它有「写」，物件不是代码。
+    """
+    from core.dispatch.intent import required_capabilities
+
+    assert required_capabilities(text) == frozenset()
+
+
+def test_the_resolver_carries_the_same_answer(resolver):
+    """挂在解析器上是为了让「换掉解析器」把两件事一起换掉。"""
+    from core.dispatch.intent import required_capabilities
+
+    for text in ("写个脚本", "你好"):
+        assert resolver.capabilities(text) == required_capabilities(text)

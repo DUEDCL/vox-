@@ -573,3 +573,147 @@ def test_a_default_result_is_a_failure():
     """``ok`` defaults to ``False``: a turn is not successful until it says so."""
     assert DispatchResult(route="none").ok is False
     assert DispatchResult(route="none").text == ""
+
+
+# -- 能力闸门（2026-09-01：让「所有聊天都进了 Claude Code」这个问题可回答）----------
+
+
+def _fleet():
+    """出厂那两个后端的形状：一个便宜快但只会聊，一个贵慢但真能动机器。"""
+    from core.agents.contract import AgentDescriptor
+
+    return (
+        AgentDescriptor(
+            name="relay",
+            kind="http",
+            capabilities=frozenset({"chat", "reason"}),
+            cost=2,
+            latency_ms=1500,
+        ),
+        AgentDescriptor(
+            name="claude",
+            kind="cli",
+            capabilities=frozenset({"chat", "code", "reason", "local-exec"}),
+            cost=4,
+            latency_ms=2500,
+        ),
+    )
+
+
+def _real_dispatcher():
+    from core.dispatch.intent import RuleBasedIntentResolver
+    from core.dispatch.router import DefaultRouter
+
+    router = DefaultRouter(_fleet())
+    dispatcher = Dispatcher(
+        router=router,
+        aggregator=PassthroughAggregator(),
+        resolver=RuleBasedIntentResolver(),
+    )
+    adapters = {"relay": FakeAdapter(AgentChunk(kind="text", text="嗯"), done()),
+               "claude": FakeAdapter(AgentChunk(kind="text", text="嗯"), done())}
+    return dispatcher, adapters
+
+
+def test_ordinary_chat_goes_to_the_cheap_endpoint_not_the_cli():
+    """闲聊必须走最便宜最快的后端。
+
+    这一半是使用者要的「普通对话用 Vox 自己配的模型」，另一半在下面那条。语音里
+    1.5 秒和 2.5 秒 + 一个进程启动是能听出来的差别。
+    """
+    dispatcher, adapters = _real_dispatcher()
+    result = dispatcher.dispatch(Task(id="t-1", text="今天天气怎么样"), adapters)
+    assert result.agents == ("relay",)
+    assert adapters["claude"].streamed == []
+
+
+def test_a_code_request_goes_to_the_backend_that_can_actually_do_it():
+    """「帮我改一下这个函数」必须落到能动机器的后端上。
+
+    **这是能力闸门第一次在派发路径上真的生效。** 在它之前 relay 以 0.866 对 0.602 赢下
+    每一轮 —— 包括这一句，而 relay 连文件都读不了：它会写出一段没人执行的步骤，而回合
+    报成功。cost/latency 占 70% 权重，所以靠调分数是修不好的，闸门才是。
+    """
+    dispatcher, adapters = _real_dispatcher()
+    result = dispatcher.dispatch(Task(id="t-2", text="帮我改一下这个函数的返回值"), adapters)
+    assert result.agents == ("claude",)
+    assert adapters["relay"].streamed == []
+
+
+def test_an_explicit_capability_from_the_caller_is_not_overwritten():
+    """调用方给的赢 —— 主脑（ADR 008）将来就是那个调用方。
+
+    一个会覆盖调用方判断的推断层会让那条路无法测试：主脑说「这句要动机器」而推断层
+    说「不用」，谁赢就成了实现细节。
+    """
+    dispatcher, adapters = _real_dispatcher()
+    task = Task(id="t-3", text="你好", capabilities=frozenset({"code"}))
+    result = dispatcher.dispatch(task, adapters)
+    assert result.agents == ("claude",), "显式带 code 的闲聊也必须去能动机器的那个"
+
+
+def test_the_route_log_says_which_model_answered():
+    """运行日志必须回答「哪个模型答的」。
+
+    使用者报「所有聊天都进了 Claude Code」时，没有任何一处读数能证实或否证它 ——
+    日志里只有 agent 名字，没有 model、没有端点。事件不能带这些（它扇出到每个通道），
+    所以这一行只走 on_detail。
+    """
+    lines: list[tuple[str, str, dict]] = []
+
+    def sink(source, message, **fields):
+        lines.append((source, message, fields))
+
+    from core.dispatch.intent import RuleBasedIntentResolver
+    from core.dispatch.router import DefaultRouter
+
+    class Checked(FakeAdapter):
+        def check(self):
+            return {"name": "relay", "kind": "http", "available": True,
+                    "model": "claude-opus-5", "endpoint": "https://api.example.com",
+                    "token_configured": True, "key_env": "VOX_LLM_KEY"}
+
+    dispatcher = Dispatcher(
+        router=DefaultRouter(_fleet()),
+        aggregator=PassthroughAggregator(),
+        resolver=RuleBasedIntentResolver(),
+        on_detail=sink,
+    )
+    dispatcher.dispatch(
+        Task(id="t-4", text="讲个笑话"),
+        {"relay": Checked(AgentChunk(kind="text", text="嗯"), done())},
+    )
+    agent_lines = [entry for entry in lines if entry[0] == "agent"]
+    assert agent_lines, "一轮 agent 派发必须留一条 agent 日志"
+    _source, message, fields = agent_lines[-1]
+    assert "model=claude-opus-5" in message
+    assert fields["backends"] == [
+        "relay(http model=claude-opus-5 endpoint=https://api.example.com)"
+    ]
+    assert fields["capabilities"] == []
+    # 凭据一个字都不许进日志：适配器只报变量名，这里连变量名也不转发。
+    assert "VOX_LLM_KEY" not in message
+
+
+def test_a_backend_whose_check_explodes_still_gets_dispatched():
+    """``check()`` 是诊断，不是前提。它抛异常时这一轮照常跑，日志退回只报名字。"""
+    class Exploding(FakeAdapter):
+        def check(self):
+            raise RuntimeError("boom")
+
+    lines: list[tuple[str, str, dict]] = []
+    from core.dispatch.intent import RuleBasedIntentResolver
+    from core.dispatch.router import DefaultRouter
+
+    dispatcher = Dispatcher(
+        router=DefaultRouter(_fleet()),
+        aggregator=PassthroughAggregator(),
+        resolver=RuleBasedIntentResolver(),
+        on_detail=lambda source, message, **fields: lines.append((source, message, fields)),
+    )
+    result = dispatcher.dispatch(
+        Task(id="t-5", text="讲个笑话"),
+        {"relay": Exploding(AgentChunk(kind="text", text="嗯"), done())},
+    )
+    assert result.ok is True
+    assert [entry[2]["backends"] for entry in lines if entry[0] == "agent"] == [["relay"]]

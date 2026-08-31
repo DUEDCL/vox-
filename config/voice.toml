@@ -94,7 +94,23 @@ instruction = "用温柔、亲和、放松的语气说，语速稍慢，像在�
 # 密钥的**变量名**，不是密钥。值写在 .env 里（已 gitignore），或者在控制台「密钥」那一栏
 # 存进去。这个键**不可从网页修改** —— 让网页决定去读哪个环境变量等于让它决定把哪个凭据
 # 发给百炼。
-key_env = "VOX_DASHSCOPE_KEY"
+#
+# **2026-09-01 从 VOX_DASHSCOPE_KEY 改成 VOX_TTS_KEY，因为前者装的是中转站的 key。**
+# 症状是每一句回答都不出声，日志里 `https://dashscope.aliyuncs.com 回 HTTP 401:
+# {"code":"InvalidApiKey"}`。成因不在这一层：`config/models.toml` 的
+# `[profiles.local.llm]` 也点名 `VOX_DASHSCOPE_KEY`（它的端点是 api.justwoker.icu），
+# 于是为了让聊天能用而往这个变量里存的是中转站的 key，百炼那边自然不认。
+#
+# 实测（同一台机器，两个端点各拿五个变量试一遍）：
+#
+# | 变量 | 百炼 TTS | 中转站 /chat/completions |
+# |---|---|---|
+# | `VOX_TTS_KEY`（35 字符） | **200，703ms–3.7s** | 401 Invalid token |
+# | `VOX_DASHSCOPE_KEY` / `VOX_LLM_KEY` / `VOX_AGENT_HTTP_TOKEN` / `ANTHROPIC_AUTH_TOKEN` | 401 InvalidApiKey | **200** |
+#
+# 教训写在名字上：**一个变量只服务一个角色**。名字叫 DASHSCOPE 而装着中转站的 key，
+# 是这次故障的全部内容 —— 两个角色共用一个变量名时，把一边修好就等于把另一边弄坏。
+key_env = "VOX_TTS_KEY"
 
 # --- 只有 provider = "sherpa" 时下面两个有意义 -----------------------------
 speaker_id = 0

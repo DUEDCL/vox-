@@ -128,10 +128,13 @@ ANTHROPIC_VERSION = "2023-06-01"
 USER_AGENT = API_USER_AGENT
 
 #: 除了服务商预设表和 ``models.toml`` 里出现过的 ``key_env`` 之外，还允许设值的变量名。
-#: 前两个不在那两处：一个是 http agent 的 token，一个是 claude CLI 走中转站的凭据。
-#: ``VOX_DASHSCOPE_KEY`` 是云端 TTS（阿里云百炼 CosyVoice）的密钥 —— 它由
-#: ``config/voice.toml`` 的 ``tts.key_env`` 指名，而那个文件不在 ``models.toml`` 的
-#: 扫描范围里，所以要在这里点名，否则页面上存不进去。
+#: 这三个不在那两处：两个是 http agent / claude CLI 走中转站的凭据，一个是旧的云端 TTS
+#: 变量名（2026-09-01 之前 ``config/voice.toml`` 指的是它，留着是为了让人能把它清掉 ——
+#: 它现在装的是中转站的 key，而那正是那次 TTS 401 的成因）。
+#:
+#: **云端 TTS 当前用哪个变量不在这里写死**，由 ``allowed_secret_names()`` 从
+#: ``config/voice.toml`` 的 ``tts.key_env`` 读。写死过一次的后果是：改了配置文件之后
+#: 页面上存不进新变量的值，而界面不会说为什么。
 EXTRA_SECRET_NAMES = frozenset(
     {
         "VOX_AGENT_HTTP_TOKEN",
@@ -146,9 +149,15 @@ def allowed_secret_names() -> frozenset[str]:
     """能通过控制台设值的环境变量名。
 
     **白名单，不是任意名。** 一个能设任意环境变量的网页等于能改 ``PATH``、
-    ``PYTHONPATH``、``LD_PRELOAD`` —— 那是代码执行，不是配置。名字只来自三处，全都在
+    ``PYTHONPATH``、``LD_PRELOAD`` —— 那是代码执行，不是配置。名字只来自四处，全都在
     本机、全都不由请求决定：服务商预设表里的 ``key_env``、``config/models.toml`` 里已经
-    写下的 ``key_env``、以及上面那三个点名的。
+    写下的 ``key_env``、``config/voice.toml`` 的 ``tts.key_env``（运行时读的就是它），
+    以及 ``EXTRA_SECRET_NAMES`` 点名的那几个。
+
+    第三处是 2026-09-01 补的：在它之前那个名字写死在 ``EXTRA_SECRET_NAMES`` 里，于是把
+    ``tts.key_env`` 改到另一个变量之后，**页面上存不进那个变量的值**，而界面只会说
+    「不允许设这个名字」，不会说为什么。配置改了、白名单没跟上，就是一次「看起来配好了
+    其实存不进去」。
     """
     names = set(EXTRA_SECRET_NAMES)
     for kind in KINDS:
@@ -156,6 +165,12 @@ def allowed_secret_names() -> frozenset[str]:
             env = str(preset.get("key_env") or "").strip()
             if env:
                 names.add(env)
+    try:
+        env = str(load_voice_config().get("tts.key_env") or "").strip()
+    except Exception:  # noqa: BLE001 - 配置坏了不该让密钥页整页打不开
+        env = ""
+    if env:
+        names.add(env)
     try:
         config = load_models_config(models_config_path())
     except ModelsConfigError:

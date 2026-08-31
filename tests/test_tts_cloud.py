@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import io
 import time
+from typing import Mapping
 
 import numpy as np
 import pytest
@@ -454,3 +455,84 @@ def test_the_configured_instruction_reaches_the_provider(monkeypatch):
     assert warnings == []
     assert tts is not None
     assert tts.instruction == "用温柔、亲和、放松的语气说"
+
+
+# ------------------------------------------- 失败分类(2026-09-01 那次 401 的账)
+
+
+@pytest.mark.parametrize(
+    "code, must_contain",
+    [
+        (400, "model 与 voice"),
+        (401, "$VOX_TTS_KEY"),
+        (403, "不许调这个模型"),
+        (404, "路径不对"),
+        (411, "音色名无效"),
+        (429, "限流"),
+        (500, "服务端出错"),
+        (502, "服务端出错"),
+        (418, "端点拒绝"),
+    ],
+)
+def test_every_status_says_which_thing_to_change(code, must_contain):
+    """状态码要分类，而且每一条都得说**该动哪里**。
+
+    这一组是 2026-09-01 那次故障的账。那天这一层报的原话是
+    `https://dashscope.aliyuncs.com 回 HTTP 401: {"code":"InvalidApiKey",...}` ——
+    技术上完全正确，而它没有回答唯一要紧的问题：**哪个变量装错了**。于是「回答不出声」
+    被当成合成模型的问题查了好几轮，真因是 `config/voice.toml` 的 `key_env` 指向
+    `VOX_DASHSCOPE_KEY`，而那个变量里装的是中转站的 key。
+
+    401 与 403 分开尤其重要：前者换变量，后者换模型（或去开通）。把两者合成一句
+    「密钥有问题」会把人推向错误的那一侧。
+    """
+    from core.audio.tts_cloud import _classify
+
+    message = _classify(code, '{"code":"InvalidApiKey"}', "VOX_TTS_KEY")
+    assert f"HTTP {code}" in message
+    assert must_contain in message
+
+
+def test_a_failure_never_carries_the_key_itself(monkeypatch):
+    """整条链上只许出现变量**名**。这一条钉的是分类文本本身 —— 它是唯一带
+    `key_env` 的地方，而一个把值格式化进去的手滑会让密钥进日志、进事件流。"""
+    from core.audio.tts_cloud import _STATUS_HINTS, _classify
+
+    for code in (*_STATUS_HINTS, 500, 418):
+        message = _classify(code, "detail", "VOX_TTS_KEY")
+        assert "sk-" not in message
+
+
+def test_the_variable_the_runtime_reads_is_settable_from_the_console():
+    """**这一条比「VOX_DASHSCOPE_KEY 在白名单里」重要。**
+
+    运行时读的是 `config/voice.toml` 的 `tts.key_env`，而白名单此前把那个名字**写死**在
+    `EXTRA_SECRET_NAMES` 里。于是把 `tts.key_env` 改到另一个变量之后，页面上存不进那个
+    变量的值，而界面只会说「不允许设这个名字」—— 配置改了、白名单没跟上。
+    """
+    from core.audio.config import load_voice_config
+    from core.console.routes import allowed_secret_names
+
+    live = str(load_voice_config()["tts.key_env"])
+    assert live in allowed_secret_names(), f"运行时读 {live}，而控制台存不进它"
+
+
+def test_the_shipped_tts_key_is_not_shared_with_another_role():
+    """出厂配置里 TTS 的变量名不许和别的角色共用。
+
+    2026-09-01 的故障就是共用：`config/models.toml` 的 `[profiles.local.llm]`（端点是
+    中转站）也点名 `VOX_DASHSCOPE_KEY`，而 `config/voice.toml` 的 TTS 读同一个变量。
+    为了让聊天能用往里存中转站的 key，百炼就回 401 —— **把一边修好等于把另一边弄坏**，
+    而两边都显示「已配置」。
+    """
+    from core.audio.config import load_voice_config
+    from core.models_config import load_models_config, models_config_path
+
+    tts_env = str(load_voice_config()["tts.key_env"])
+    config = load_models_config(models_config_path())
+    for name, profile in config["profiles"].items():
+        llm = profile.get("llm", {})
+        if isinstance(llm, Mapping):
+            assert llm.get("key_env", "") != tts_env, (
+                f"profiles.{name}.llm 和 TTS 共用 {tts_env}"
+            )

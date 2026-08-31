@@ -185,7 +185,9 @@ class Dispatcher:
         )
         if intent.kind == "tool" and self.tool_runner is not None:
             return self._run_tool(task, intent, started, speaker)
-        return self._run_agents(self._recall_context(task), adapters or {}, started)
+        return self._run_agents(
+            self._require_capabilities(self._recall_context(task)), adapters or {}, started
+        )
 
     def stream(
         self,
@@ -207,6 +209,7 @@ class Dispatcher:
             yield from result.chunks
             return
         task = self._recall_context(task)
+        task = self._require_capabilities(task)
         plan = self.router.plan(task)
         available = self._collect(plan, adapters or {})
         if not available:
@@ -389,13 +392,19 @@ class Dispatcher:
         collected = tuple(self._stream_agents(task, plan, available, started))
         terminal = collected[-1] if collected else None
         ok = terminal is not None and terminal.kind == "done" and not terminal.error
+        backends = self._backends(available)
         self._detail(
             "agent",
-            f"{plan.mode} → {', '.join(name for name, _ in available)}"
+            f"{plan.mode} → {', '.join(backends)}"
             + ("" if ok else f"（失败：{terminal.error if terminal else 'no chunks'}）"),
             level="info" if ok else "error",
             mode=plan.mode,
             agents=[name for name, _ in available],
+            # 「谁答的」要能查。见 ``_backends``。
+            backends=backends,
+            # 为什么是它答的：闸门要求了什么、评分是多少。一个不带这两样的路由记录
+            # 回答不了「为什么不是另一个」。
+            capabilities=sorted(task.capabilities),
             reason=plan.reason,
             ok=ok,
             error=(terminal.error if terminal else "") or "",
@@ -447,6 +456,66 @@ class Dispatcher:
             releaser(name)
         except Exception:  # noqa: BLE001 - bookkeeping must not fail a turn
             pass
+
+    def _require_capabilities(self, task: Task) -> Task:
+        """把「这句话要什么后端」填进 task，让路由的能力闸门真的生效。
+
+        **这一步此前不存在，而它的缺席让能力声明成了装饰。** 5 维评分里 cost 与 latency
+        占 70%，所以一个裸 HTTP 端点必然赢过要起进程的 CLI（实测 relay 0.866、
+        claude 0.602）。能力在 ``DefaultRouter.score`` 里是闸门不是权重，可是没有人给
+        ``Task.capabilities`` 填过东西 —— 空集是任何集合的子集，人人都「有能力」。后果是
+        「帮我改一下这个函数」和「今天天气怎么样」派给同一个后端，而前者那个后端连文件都
+        读不了：它会写出一段看起来正确、其实没人执行的步骤。
+
+        **调用方给的赢。** 显式带 capabilities 的 task 不被改写：那是主脑（ADR 008）将来
+        要用的入口，一个会覆盖调用方判断的推断层会让那条路无法测试。
+
+        解析器没有 ``capabilities`` 方法时什么都不做 —— 这是可选协议，注入一个只实现
+        ``resolve`` 的解析器仍然合法。
+        """
+        if task.capabilities:
+            return task
+        wanted = getattr(self.resolver, "capabilities", None)
+        if not callable(wanted):
+            return task
+        try:
+            needed = frozenset(wanted(task.text))
+        except Exception:  # noqa: BLE001 - 分类失败就按「谁都行」走，不能让一轮失败
+            return task
+        if not needed:
+            return task
+        return replace(task, capabilities=needed)
+
+    @staticmethod
+    def _backends(available: tuple[tuple[str, Any], Any]) -> list[str]:
+        """每个被派发的后端的一句话：agent / kind / model / 端点或命令。
+
+        **给运行日志用，不给事件用。** 事件扇出到球、到传输、到每个消费者，所以它只带
+        名字与计数；这一行只到本机控制台的日志视图，而「到底是哪个模型答的」只有带上
+        model 与端点才答得出 —— 使用者报「所有聊天都进了 Claude Code」时，没有任何一处
+        读数能证实或否证它，这就是那次的账。
+
+        ``check()`` 是适配器自报的形状（``http`` 报 model + endpoint，``cli`` 报 command），
+        它**不打网络**。永不带凭据：适配器只报 ``token_configured`` 与 ``key_env`` 名字。
+        """
+        rows: list[str] = []
+        for name, adapter in available:
+            detail = ""
+            try:
+                status = adapter.check()
+            except Exception:  # noqa: BLE001 - 诊断路径不能自己炸
+                status = None
+            if isinstance(status, Mapping):
+                parts = [str(status.get("kind") or "")]
+                for key in ("model", "endpoint", "command"):
+                    value = str(status.get(key) or "").strip()
+                    if value:
+                        parts.append(f"{key}={value}")
+                if status.get("available") is False:
+                    parts.append("unavailable")
+                detail = " ".join(part for part in parts if part)
+            rows.append(f"{name}({detail})" if detail else name)
+        return rows
 
     def _stream_agents(
         self,

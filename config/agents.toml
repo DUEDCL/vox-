@@ -19,9 +19,12 @@
 # relay 此前声明 `code` 而它连文件都读不了,那个假声明让它过了闸并靠"便宜快"胜出,于是
 # 唯一会做事的后端被挤掉。见 docs/adr/008-vox-as-primary-brain.md。
 #
-# **注意:这道闸门当前在生产里不生效** —— `vox_plugin/runtime.py` 构造 Task 时不传
-# capabilities,空集是任何集合的子集,所以人人都"有能力"。喂它是主脑(ADR 008)的活:
-# 主脑判定"这事要动机器"时带上 `local-exec` 派发。在那之前这些词只是诚实的声明。
+# **2026-09-01：这道闸门现在生效了。** 在那之前 `vox_plugin/runtime.py` 构造 Task 时不传
+# capabilities,空集是任何集合的子集,所以人人都"有能力" —— 「帮我改一下这个函数」和
+# 「今天天气怎么样」派给同一个后端,而前者那个后端连文件都读不了。现在
+# `core/dispatch/intent.py` 的 `required_capabilities()` 按说法判断这一句要不要一个
+# 真能动机器的后端,命中就带 `code` 去路由,于是 relay(只有 chat/reason)被挡掉。
+# 主脑(ADR 008)将来接进来时**调用方显式给的 capabilities 优先**,推断层不覆盖它。
 #
 # cost 1-5,latency_ms 是自报的预期首字延迟,两者在评分里合计占 70% 权重。
 
@@ -76,7 +79,14 @@ timeout_s = 180.0
 name = "opencode"
 kind = "cli"
 # 本机实测在 PATH 上(1.2.27)且 `opencode run` 从 stdin 读 prompt。
-enabled = true
+#
+# **2026-09-01 关掉。** 不是它坏了 —— 是它从来没被派发过：能力闸门此前不生效
+# （见本文件开头），于是 relay 靠 cost/latency 赢下每一轮，opencode 的历史成绩是
+# 0 成功 0 失败。现在闸门生效了，「写代码」这类请求会落到声明了 `code` 的后端上，
+# 而使用者点名的那个是 claude。留一个从未跑通过的第二 CLI 在里面，只会让
+# 「代码类请求由谁答」变成一个按分数抖动的问题（opencode cost 3 会赢 claude cost 4）。
+# 想用它就把这一行改回 true，并且先单独验一轮。
+enabled = false
 command = "opencode"
 args = ["run"]
 # 与 claude 同款两条:Windows 上它也是 npm 的 .cmd shim(cmd.exe 命令行不能跨行),

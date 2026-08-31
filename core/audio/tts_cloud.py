@@ -63,7 +63,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -102,6 +102,41 @@ SEGMENT_MERGE_CHARS = 40
 
 class DashScopeTtsError(RuntimeError):
     """一次合成没成。带上端点主机名，但**绝不带 key**。"""
+
+
+#: HTTP 状态码 → 这台机器上该动哪里。**分类是必需的，不是修饰。**
+#:
+#: 2026-09-01 的故障里，这一层报的原话是
+#: `https://dashscope.aliyuncs.com 回 HTTP 401: {"code":"InvalidApiKey",...}`。
+#: 那句话技术上完全正确，而它没有回答唯一要紧的问题：**哪个变量装错了。** 于是「回答
+#: 不出声」被当成了合成模型的问题查了好几轮，真正的原因是 `config/voice.toml` 的
+#: `key_env` 指向 `VOX_DASHSCOPE_KEY`，而那个变量里装的是中转站的 key。
+#:
+#: 每一条都带「该动哪里」，因为 401 和 403 在这个服务上要动的地方完全不同：前者是变量装错
+#: 了（换变量），后者是这个账号没有这个模型的调用权（换模型或去开通）。
+_STATUS_HINTS: Mapping[int, str] = {
+    400: "请求形状不对 —— 通常是 model 与 voice 不配对（每个模型只支持一组特定音色），"
+    "或者给了一个这个模型不支持的字段（instruction 只有 qwen-audio-3.0-tts-* 支持）",
+    401: "密钥不对：${key_env} 里的值不是这个服务认的 key。"
+    "一个变量只服务一个角色 —— 中转站的 key 放在 TTS 的变量里，症状就是这一行",
+    403: "密钥对，但这个账号不许调这个模型（实测 cosyvoice-v2 回的是 "
+    "403 AllocationQuota.FreeTierOnly = 不在免费额度内）。换模型或去控制台开通，不是换 key",
+    404: "路径不对 —— 主机在，但这个端点不是合成接口",
+    411: "音色名无效 —— 实测 20 个候选里只有配对的那个回 200，其余全部 411",
+    429: "被限流或额度用尽。免费额度上的并发限制是真实的（这一层已经把在途请求压到最多一个）",
+}
+
+
+def _classify(code: int, detail: str, key_env: str) -> str:
+    """一句能照着做的失败原因。**永不带 key**，只带变量名。"""
+    hint = _STATUS_HINTS.get(code)
+    if hint is None:
+        hint = (
+            "服务端出错，重试通常有用（这一层不自动重试：一次合成计费按字符算）"
+            if code >= 500
+            else "端点拒绝了这次请求"
+        )
+    return f"HTTP {code} —— {hint.format(key_env=key_env)}"
 
 
 def merge_segments(segments: Any, *, threshold: int = SEGMENT_MERGE_CHARS) -> list[str]:
@@ -297,18 +332,33 @@ class DashScopeTtsProvider:
             with urlopen(request, timeout=self.timeout_s) as response:
                 return dict(json.loads(response.read().decode("utf-8", "replace")))
         except HTTPError as exc:
-            # 状态码要报出来（401 = key 不对，429 = 配额用尽，400 = 音色/模型不匹配），
-            # 但**不把请求体回显**：它带 key。
+            # 状态码要分类报出来，但**不把请求体回显**：它带 key。分类的理由见 `_classify`
+            # —— 一句正确而不可操作的 `回 HTTP 401: {...}` 让这次故障多查了好几轮。
             detail = ""
             try:
                 detail = exc.read().decode("utf-8", "replace")[:300]
             except Exception:  # noqa: BLE001 - 读不到就算了
                 pass
             raise DashScopeTtsError(
-                f"{self._safe_endpoint()} 回 HTTP {exc.code}: {detail}"
+                f"{self._safe_endpoint()} {_classify(int(exc.code), detail, self.key_env)}"
+                + (f"\n服务端原话：{detail}" if detail else "")
             ) from exc
-        except (URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise DashScopeTtsError(f"{self._safe_endpoint()} 请求失败: {exc}") from exc
+        except TimeoutError as exc:
+            # 超时和「被拒绝」要分开：前者动 timeout_s 或网络，后者动配置。合成一句长文本
+            # 本身就要几秒（非实时接口是整句合成完才返回），所以超时不等于坏了。
+            raise DashScopeTtsError(
+                f"{self._safe_endpoint()} 超时（{self.timeout_s:.0f}s 内没有响应）"
+                " —— 非实时接口整句合成完才返回，长句子上调大 timeout_s"
+            ) from exc
+        except URLError as exc:
+            raise DashScopeTtsError(
+                f"{self._safe_endpoint()} 连不上：{exc.reason} —— 这一层还没发出请求，"
+                "检查网络或代理，不是密钥问题"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise DashScopeTtsError(
+                f"{self._safe_endpoint()} 回的不是 JSON：{exc}"
+            ) from exc
 
     def _get(self, url: str) -> bytes:
         if self.transport is not None:

@@ -161,6 +161,68 @@ _NO_ARGUMENT_RULES = frozenset({"time.now", "play.any"})
 _RULE_TO_TOOL = {"play.any": "app.open"}
 
 
+#: 需要一个**真能动这台机器**的后端的说法。命中它们的一句话带上 ``code`` 能力去路由，
+#: 于是裸 HTTP 端点（``relay``，只声明 ``chat`` / ``reason``）被闸门挡掉，剩下的是
+#: ``claude`` 这类本机 CLI。
+#:
+#: ## 为什么必须有这一层
+#:
+#: 5 维评分里 ``cost`` 与 ``latency`` 占 70%，而裸端点在这两项上必然赢过一个要起进程的
+#: CLI（实测 relay 0.866 / claude 0.602）。能力在评分里是**闸门**，可是 ``Task`` 从来没有
+#: 人给它填 ``capabilities`` —— 空集是任何集合的子集，于是闸门在生产里根本不生效，
+#: 「帮我改一下这个函数」和「今天天气怎么样」走同一个后端，而前者那个后端连文件都读不了。
+#: 见 `docs/adr/008-vox-as-primary-brain.md` 与 `config/agents.toml` 的开头。
+#:
+#: ## 判错的代价是不对称的，所以这一组比工具规则宽
+#:
+#: 工具规则误判 = **运行一条用户没要求的命令**，所以那边处处锚定、处处要边界。这里误判
+#: 只是「换了个更能干、更慢的后端答同一句话」—— 代价是几秒，不是一次副作用。所以这里
+#: 用 ``search()`` 而不是 ``\\A``：「这个函数你帮我改一下」的动词在句尾，而它确实是要
+#: 改代码。反方向（漏判）才是真损失：一句「跑一下测试」落到裸端点上，换回来的是一段
+#: 它其实执行不了的说明。
+_CODE_PATTERNS = (
+    # 写/改/修/重构 + 代码物件。物件词是必需的：「写一封邮件」不该起 CLI。
+    r"(?:写|寫|改|修|重构|重構|优化|優化|实现|實現|加|删|刪)\s*(?:一?下|个|個|一?点)?\s*"
+    r"[^。！？\n]{0,12}?(?:代码|代碼|脚本|腳本|程序|函数|函數|方法|类|類|接口|模块|模組|"
+    r"测试|測試|配置文件|bug|BUG)",
+    # 项目/仓库/文件系统里的活。
+    r"(?:项目|項目|仓库|倉庫|代码库|代碼庫|工程)\s*(?:里|裡|中|的)",
+    # 中文侧不带 ``\b``：Python 的 ``\b`` 在两个汉字之间不成立（都是 word 字符），
+    # 于是「提交一下」根本匹配不上 —— 这是 CJK 上用 ``\b`` 的经典失败。
+    r"(?:提交|推上去|部署|构建|構建|编译|編譯)",
+    r"\b(?:commit|push|deploy|build|compile)\b",
+    r"(?:跑|运行|執行|执行|運行)\s*(?:一?下)?\s*(?:测试|測試|test|pytest|npm|cargo|构建|build)",
+    r"(?:报错|報錯|编译不过|編譯不過|测试不过|測試不過|跑不起来|跑不起來|调试|調試|debug)",
+    # 英文侧。``\b`` 够用：英文有空格边界。
+    r"\b(?:refactor|implement|debug|fix)\b.{0,24}\b(?:code|script|function|class|test|bug|file)s?\b",
+    r"\b(?:write|create|add)\b.{0,24}\b(?:script|function|class|test|module|program)s?\b",
+    r"\bgit\s+\w+",
+)
+
+#: 「这句话要一个能动机器的后端」用哪个能力词表达。
+#:
+#: ``code`` 而不是 ``local-exec``：两个词在出厂配置里都只有本机 CLI 有，但 ``code`` 是
+#: 三个 CLI 都声明了的那个，而 ``local-exec`` 的语义是「能读写这台机器」——
+#: 将来会有只写代码不动机器的后端，那时这两个词要能分开。
+CODE_CAPABILITY = "code"
+
+_CODE_RULES = tuple(re.compile(pattern, re.IGNORECASE | re.UNICODE) for pattern in _CODE_PATTERNS)
+
+
+def required_capabilities(text: str) -> frozenset[str]:
+    """这一句话要求后端具备什么。普通对话返回空集（任何后端都行）。
+
+    纯函数、无状态、不碰文件系统 —— 和这个模块里其余部分同一个姿态。
+    """
+    stripped = text.strip()
+    if not stripped:
+        return frozenset()
+    for rule in _CODE_RULES:
+        if rule.search(stripped):
+            return frozenset({CODE_CAPABILITY})
+    return frozenset()
+
+
 class RuleBasedIntentResolver:
     """Keyword and regex matching, with the patterns above baked in.
 
@@ -246,6 +308,16 @@ class RuleBasedIntentResolver:
         """Reject captures too short to be a real path, query, or command."""
         value = next(iter(arguments.values()), "")
         return isinstance(value, str) and len(value.strip()) >= MIN_ARGUMENT_LEN
+
+    @staticmethod
+    def capabilities(text: str) -> frozenset[str]:
+        """这一句话要求后端具备什么。见 ``required_capabilities``。
+
+        挂在解析器上而不是让派发器直接 import：解析器本来就是可注入的，把「这句话要
+        什么后端」和「这句话是不是工具调用」放在同一个可替换对象上，换掉它就两件事一起
+        换 —— 而两个判断用不同的文本理解方式是下一个 bug 的形状。
+        """
+        return required_capabilities(text)
 
     def _extract(self, tool: str, match: re.Match[str]) -> dict[str, Any]:
         """The named payload from the regex hit."""
@@ -368,5 +440,7 @@ def _trim_path(captured: str) -> str:
 
 
 __all__ = [
+    "CODE_CAPABILITY",
     "RuleBasedIntentResolver",
+    "required_capabilities",
 ]
