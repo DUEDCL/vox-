@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Vox 唤醒球 — 验收面</title>
+<style>
+  /* 这一页只有版面。球的颜色与几何全部来自 src/style.css 与 src/core.ts，
+     一个色值都不在这里重复写 —— 否则这页会开始撒谎。 */
+  html,body{height:auto!important;overflow:auto!important;}
+  body{display:block!important;margin:0;background:#0b0d11;color:#c9d2dc;
+       font:13px/1.5 'Segoe UI Variable Display','Segoe UI','Microsoft YaHei',sans-serif;}
+  /* ---- 参数控件面板。使用者要求「可直接修改参数及时看到效果的控块，我自己调，
+     但是每一个参数你要解释清楚是什么」—— 所以每一条滑块下面都带一行中文说明。 ---- */
+  .tune{position:sticky;top:64px;z-index:8;background:#0d1117f2;border-bottom:1px solid #ffffff1a;
+    padding:10px 14px 12px;display:grid;gap:0;backdrop-filter:blur(8px);}
+  .tune>summary{cursor:pointer;font:12px/1.4 'Segoe UI','Microsoft YaHei',sans-serif;color:#cfd8e3;}
+  .tune .grp{font:11px/1 'Cascadia Mono',Consolas,monospace;letter-spacing:.12em;color:#7f8b9a;
+    margin:12px 0 6px;text-transform:none;}
+  .tune .rows{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:8px 20px;}
+  .tune .row{display:grid;grid-template-columns:118px 1fr 62px;gap:8px;align-items:center;}
+  .tune .row label{font:11px/1.3 'Cascadia Mono',Consolas,monospace;color:#b9c4d1;}
+  .tune .row input[type=range]{width:100%;accent-color:#5c9ee8;}
+  .tune .row output{font:11px/1.3 'Cascadia Mono',Consolas,monospace;color:#e6edf5;text-align:right;}
+  .tune .row .why{grid-column:1/-1;font:11px/1.45 'Segoe UI','Microsoft YaHei',sans-serif;
+    color:#8b96a4;margin:-2px 0 4px;}
+  .tune .acts{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;}
+  .tune .acts button{font:11px/1 'Cascadia Mono',Consolas,monospace;letter-spacing:.08em;
+    color:#dfe6ee;background:#ffffff12;border:1px solid #ffffff2e;border-radius:2px;
+    padding:6px 12px;cursor:pointer;}
+  .tune .acts button:hover{background:#ffffff20;}
+  .tune textarea{width:100%;min-height:64px;margin-top:8px;background:#00000066;color:#cfe4ff;
+    border:1px solid #ffffff24;border-radius:2px;font:11px/1.5 'Cascadia Mono',Consolas,monospace;
+    padding:8px;resize:vertical;}
+  .bar{position:sticky;top:0;z-index:9;display:flex;gap:10px;align-items:center;
+       flex-wrap:wrap;padding:10px 16px;background:#0b0d11f2;
+       border-bottom:1px solid #ffffff14;backdrop-filter:blur(8px);}
+  .bar button{font:11px/1 'Cascadia Mono',Consolas,monospace;letter-spacing:.08em;
+       padding:6px 11px;border-radius:2px;cursor:pointer;
+       background:#ffffff0f;border:1px solid #ffffff26;color:#dde4ec;}
+  .bar button:hover{background:#ffffff1c;}
+  .bar button[aria-pressed=true]{background:#ffffff26;border-color:#ffffff5c;color:#fff;}
+  .bar .read{font:11px/1.5 'Cascadia Mono',Consolas,monospace;color:#8f9aa8;
+       margin-left:auto;text-align:right;white-space:pre;}
+  h2{margin:0;padding:16px 16px 8px;font-size:12px;font-weight:600;letter-spacing:.06em;
+     color:#7d8794;text-transform:none;}
+  .pair{display:flex;gap:0;flex-wrap:wrap;}
+  .half{flex:1 1 380px;min-width:340px;display:grid;justify-items:center;gap:8px;
+        padding:18px 12px 20px;}
+  .dark{background:radial-gradient(120% 120% at 20% 10%,#2b3a4a,#131a22 45%,#0a0d12);}
+  .light{background:linear-gradient(135deg,#eef1f5,#cfd8e3 60%,#aab6c4);color:#1a2430;}
+  .tag{font:10px/1 'Cascadia Mono',monospace;letter-spacing:.14em;opacity:.5;}
+  .orb{position:relative;}
+  .orb canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
+  .big{width:360px;height:360px;}
+  .real{width:140px;height:140px;}
+  .grid{display:flex;gap:14px;flex-wrap:wrap;padding:4px 16px 20px;}
+  .cellwrap{display:grid;justify-items:center;gap:5px;}
+  .cell{width:148px;height:148px;position:relative;}
+  .cell canvas{position:absolute;inset:0;width:148px;height:148px;display:block;}
+  .cellwrap b{font-size:12px;font-weight:600;}
+  .cellwrap code{font:9.5px 'Cascadia Mono',monospace;letter-spacing:.1em;opacity:.5;}
+  .note{padding:0 16px 18px;font-size:11.5px;line-height:1.65;color:#79838f;max-width:900px;}
+  .note b{color:#a8b3c0;}
+</style>
+</head>
+<body>
+<div class="bar" id="bar"></div>
+<div class="tune" id="tune"></div>
+
+<h2>① 活的：放大 360px —— 状态转化、呼吸、晃动、涟漪、成环过程都在这里</h2>
+<div class="pair">
+  <div class="half dark"><div class="orb big" id="bigDark"><canvas></canvas></div><span class="tag">深色桌面</span></div>
+  <div class="half light"><div class="orb big" id="bigLight"><canvas></canvas></div><span class="tag">浅色桌面</span></div>
+</div>
+
+<h2>② 活的：真实尺寸 140px —— 桌面上实际看到的大小，与上面同步</h2>
+<div class="pair">
+  <div class="half dark"><div class="orb real" id="realDark"><canvas></canvas></div><span class="tag">深色桌面</span></div>
+  <div class="half light"><div class="orb real" id="realLight"><canvas></canvas></div><span class="tag">浅色桌面</span></div>
+</div>
+
+<h2>③ 静止一帧 · 八态 · 深色桌面（钉在每态的目标值，供逐态对照）</h2>
+<div class="grid dark" id="gridDark"></div>
+
+<h2>④ 静止一帧 · 八态 · 浅色桌面</h2>
+<div class="grid light" id="gridLight"></div>
+
+<h2>⑤ 面板与确认卡</h2>
+<div class="grid dark" style="padding-bottom:26px">
+  <section id="panel" style="display:grid;opacity:1;transform:none;max-width:340px">
+    <div id="reply">已经读完 README.md 了，一共 42 行，讲的是这个项目怎么起手。<span class="caret"></span></div>
+    <div id="confirm">
+      <p class="confirm-head" id="confirm-title">需要确认才能执行</p>
+      <pre id="confirm-cmd" tabindex="0">git push --force origin main</pre>
+      <p id="confirm-reason">shell.run · 来自 voice</p>
+      <div class="confirm-actions">
+        <button id="confirm-deny" type="button">拒绝</button>
+        <button id="confirm-allow" type="button">执行</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<p class="note" id="note"></p>
+<script type="module" src="/review.ts"></script>
+</body>
+</html>

@@ -1,9 +1,10 @@
 {
   "version": "0.0.1",
+  "_comment": "`.venv` 只在主仓库根（D:/program/vioce-wake/.venv），worktree 里没有自己的一份，所以 Python 入口写绝对路径 —— 相对路径 `.venv/Scripts/python.exe` 在 worktree 里必然找不到。多个工作树共用一份虚拟环境，与模型目录共用同一份的立场一致。",
   "configurations": [
     {
       "name": "proto",
-      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeExecutable": "D:/program/vioce-wake/.venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "http.server", "5178", "--bind", "127.0.0.1"],
       "port": 5178,
       "autoPort": false,
@@ -18,8 +19,16 @@
       "url": "http://localhost:5173"
     },
     {
+      "name": "desktop-ui",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "desktop", "--", "--port", "5273", "--strictPort"],
+      "port": 5273,
+      "autoPort": false,
+      "url": "http://localhost:5273"
+    },
+    {
       "name": "console",
-      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeExecutable": "D:/program/vioce-wake/.venv/Scripts/python.exe",
       "runtimeArgs": ["scripts/run_console.py", "--no-browser", "--no-token", "--no-orb"],
       "port": 8899,
       "autoPort": true

@@ -1,0 +1,101 @@
+<!doctype html>
+<!-- 实机演示页：唤醒球的完整流程，每一步都有按钮。
+
+     这一页是使用者的验收面。它回答三个问题：
+       ① 换成 AE 预渲染序列之后，球是不是使用者要的那个球
+       ② 听 → 思 → 说 这条链走起来连不连（切态是交叉淡化，不是跳变）
+       ③ 错误与待确认这两个打断态，在同一颗球上分不分得开
+
+     **没有待机态。** 未唤醒时球不在屏幕上 —— 不是「暗着呼吸」，是不画。
+
+     开 http://localhost:5273/demo.html -->
+<html lang="zh-CN"><head><meta charset="utf-8"><title>唤醒球 · 实机演示</title>
+<link rel="stylesheet" href="./src/style.css">
+<style>
+  html,body{margin:0;min-height:100%;background:#0b0e15;color:#c8d8f0;
+    font:13px/1.65 'Cascadia Mono',Consolas,monospace;-webkit-font-smoothing:antialiased}
+  body.light{background:#eef1f6;color:#2a3340}
+  .wrap{display:grid;grid-template-columns:1fr 340px;min-height:100vh}
+  .stage{position:relative;display:grid;place-items:center;
+    background:radial-gradient(circle at 50% 45%,#141a29 0%,#0b0e15 70%)}
+  body.light .stage{background:radial-gradient(circle at 50% 45%,#fbfcfe 0%,#dfe4ec 72%)}
+  /* 桌面纹理：验「透明置顶窗口叠在真实桌面上」时球有没有边界 —— 纯色底会让这条过不去 */
+  .stage::before{content:'';position:absolute;inset:0;opacity:.5;pointer-events:none;
+    background:repeating-linear-gradient(38deg,#ffffff08 0 2px,transparent 2px 15px),
+               repeating-linear-gradient(-52deg,#00000012 0 1px,transparent 1px 11px)}
+  #orb{position:relative;z-index:1;width:140px;height:140px;cursor:default}
+  #orb.big{width:420px;height:420px}
+  .side{padding:18px 20px;background:#0e131d;border-left:1px solid #ffffff14;overflow:auto}
+  body.light .side{background:#f7f8fb;border-left-color:#0000001a}
+  h2{margin:0 0 4px;font-size:12px;letter-spacing:.16em;font-weight:600;text-transform:uppercase;opacity:.6}
+  .grp{margin:16px 0 6px;font-size:11px;letter-spacing:.1em;opacity:.5}
+  .row{display:flex;flex-wrap:wrap;gap:5px}
+  button{flex:1 1 auto;min-width:74px;padding:8px 10px;cursor:pointer;
+    font:inherit;font-size:12px;color:inherit;border-radius:2px;
+    background:#ffffff0f;border:1px solid #ffffff1f;transition:background .12s}
+  button:hover{background:#ffffff1c}
+  button.on{background:#4b7fd633;border-color:#6f9de8aa;color:#dce9ff}
+  body.light button{background:#00000008;border-color:#00000022}
+  body.light button:hover{background:#00000014}
+  body.light button.on{background:#3f6fc422;border-color:#3f6fc466;color:#1c3a6b}
+  button.run{background:#2f6f4a2e;border-color:#57a97daa}
+  button.amber{background:#d99a2b26;border-color:#d99a2b88}
+  button.red{background:#e23a2e26;border-color:#e23a2e88}
+  label.sw{display:flex;align-items:center;gap:8px;margin:10px 0;font-size:12px;opacity:.85}
+  input[type=range]{flex:1}
+  pre{margin:8px 0 0;padding:9px 10px;font-size:11px;line-height:1.6;white-space:pre-wrap;
+    background:#00000033;border:1px solid #ffffff12;border-radius:2px;max-height:190px;overflow:auto}
+  body.light pre{background:#00000008;border-color:#00000018}
+  .err{color:#ff9d8f}
+  /* 确认卡：顶上那条琥珀斜纹带借的是道闸与警示带，与球的琥珀闸门同色 —— 两处说的是同一件事 */
+  #card{position:absolute;z-index:3;left:50%;bottom:34px;transform:translateX(-50%);
+    width:min(430px,84%);display:none;padding:0 0 13px;border-radius:2px;
+    background:#101725f2;border:1px solid #ffffff1f;box-shadow:0 12px 40px #0009}
+  #card.show{display:block}
+  #card .band{height:9px;margin:0 0 11px;border-radius:2px 2px 0 0;
+    background:repeating-linear-gradient(-45deg,#d99a2b 0 7px,#2a2113 7px 14px)}
+  #card h3{margin:0 13px 6px;font-size:11px;letter-spacing:.2em;font-weight:600;
+    text-transform:uppercase;color:#e8c583}
+  #card code{display:block;margin:0 13px 11px;padding:7px 9px;font-size:12px;
+    color:#dfe9f8;background:#0000004d;border:1px solid #ffffff14;border-radius:2px;word-break:break-all}
+  #card .acts{display:flex;gap:8px;margin:0 13px}
+</style></head><body>
+<div class="wrap">
+  <div class="stage">
+    <canvas id="orb"></canvas>
+    <div id="card">
+      <div class="band"></div>
+      <h3>需要确认</h3>
+      <code id="cardCmd">git push --force origin main</code>
+      <div class="acts">
+        <button id="cAllow">允许一次</button>
+        <button id="cDeny" class="red">拒绝</button>
+      </div>
+    </div>
+  </div>
+  <div class="side">
+    <h2>唤醒球 · 实机演示</h2>
+    <div class="grp">一条链（唤醒 → 听 → 思 → 说 → 收起）</div>
+    <div class="row"><button id="run" class="run">跑完整流程</button><button id="stop">收起</button></div>
+    <div class="grp">单态</div>
+    <div class="row">
+      <button data-s="listening">听</button>
+      <button data-s="thinking">思</button>
+      <button data-s="speaking">说</button>
+    </div>
+    <div class="row" style="margin-top:5px">
+      <button data-s="error" class="red">错误</button>
+      <button data-s="gated" class="amber">待确认</button>
+      <button data-s="cancelled">被打断</button>
+    </div>
+    <div class="grp">环境</div>
+    <label class="sw"><input type="checkbox" id="light"> 浅色桌面</label>
+    <label class="sw"><input type="checkbox" id="big"> 放大到 420px 看质感</label>
+    <label class="sw">音量 <input type="range" id="amp" min="0" max="1" step="0.01" value="0.35"></label>
+    <label class="sw"><input type="checkbox" id="auto" checked> 说话时音量自动起伏</label>
+    <div class="grp">读数</div>
+    <pre id="log">…</pre>
+  </div>
+</div>
+<script type="module" src="./demo.ts"></script>
+</body></html>

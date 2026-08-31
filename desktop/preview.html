@@ -19,8 +19,14 @@
   .light{ background:linear-gradient(135deg,#eef1f5,#cfd8e3 60%,#aab6c4); color:#1a2430; }
   .row{ display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap; }
   .cell{ display:grid; justify-items:center; gap:9px; }
-  .orb{ position:relative; width:148px; height:148px; border-radius:50%;
-        box-shadow:0 0 26px var(--glow), 0 0 62px var(--glow-far); }
+  /* **这一格必须与生产的 `#orb` 逐条一致，否则这页就在撒谎。**
+     此前这里写着 `border-radius:50%` + `box-shadow:0 0 26px var(--glow), 0 0 62px var(--glow-far)`，
+     而生产的 `#orb`（style.css）两条都**已经删掉**了：圆角是「标准圆的几何元素」，
+     外发光已经移进 canvas（沿液面轮廓画，CSS 的 box-shadow 只能给圆角矩形）。
+     代价不是版面差异 —— 浅色桌面上那圈 box-shadow 的白雾**正好**是让球「有边界、
+     看得见」的东西，而真机上没有它。「深浅两种桌面底都可读」这条承诺一直是在这一页
+     上验的，所以它此前验的是一个比生产更好看的球。 */
+  .orb{ position:relative; width:148px; height:148px; }
   .orb canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
   .cell b{ font-weight:600; letter-spacing:.04em; font-size:14px; }
   /* state 键名用等宽:它是代码标识符,不是给用户看的文案。UI 文案统一中文 */
