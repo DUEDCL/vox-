@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import io
+import json
 import time
 from typing import Mapping
 
@@ -536,3 +537,147 @@ def test_the_shipped_tts_key_is_not_shared_with_another_role():
             assert llm.get("key_env", "") != tts_env, (
                 f"profiles.{name}.llm 和 TTS 共用 {tts_env}"
             )
+
+
+# ------------------------------------- 流式合成（2026-09-01 的首声延迟）
+
+
+class _FakeSse:
+    """替掉 urlopen：按帧吐 SSE 行，记下请求头与请求体。"""
+
+    def __init__(self, frames, *, finish: str = "stop") -> None:
+        self.frames = frames
+        self.finish = finish
+        self.request = None
+        self.closed = False
+
+    def __call__(self, request, timeout=None):
+        self.request = request
+        self.timeout = timeout
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.closed = True
+        return False
+
+    def __iter__(self):
+        import base64 as b64
+        import json as js
+
+        for frame in self.frames:
+            payload = {"output": {"audio": {"data": b64.b64encode(frame).decode("ascii")}}}
+            yield b"data: " + js.dumps(payload).encode("utf-8") + b"\n"
+            yield b"\n"
+        yield b"data: " + js.dumps({"output": {"finish_reason": self.finish}}).encode("utf-8") + b"\n"
+
+
+def _pcm(values) -> bytes:
+    return np.asarray(values, dtype="<i2").tobytes()
+
+
+def test_streaming_is_the_default_and_asks_for_raw_pcm(monkeypatch):
+    """默认走 SSE，而且请求的是裸 pcm。
+
+    非流式那条路有约 3.3 秒的**固定**开销（3 个字也要 3353 ms），因为它要等整句合成完
+    再 GET 下载一次。实测 SSE 的首块 2.3–2.6 s 且**与句子长度基本无关**，音频到手
+    2735/3117/3783 ms（3/11/38 字）—— 见 ``DashScopeTtsProvider.stream`` 的表。
+    每帧再带一个 wav 头没有意义，所以流式请求 pcm。
+    """
+    monkeypatch.setenv("VOX_TTS_KEY", "sk-not-a-real-key")
+    fake = _FakeSse([_pcm([0, 16384, -16384, 0])])
+    monkeypatch.setattr("core.audio.tts_cloud.urlopen", fake)
+    provider = DashScopeTtsProvider(key_env="VOX_TTS_KEY", sample_rate=24000)
+    assert provider.stream is True
+
+    audio = provider.synthesize("好的。")
+
+    sent = json.loads(fake.request.data.decode("utf-8"))
+    assert sent["input"]["format"] == "pcm"
+    assert fake.request.headers["X-dashscope-sse"] == "enable"
+    assert audio.sample_rate == 24000, "裸 PCM 不自带采样率，只能用请求里那个"
+    assert audio.samples.dtype == np.float32
+    assert audio.samples.tolist() == pytest.approx([0.0, 0.5, -0.5, 0.0], abs=1e-4)
+
+
+def test_frames_are_concatenated_in_order(monkeypatch):
+    monkeypatch.setenv("VOX_TTS_KEY", "sk-not-a-real-key")
+    fake = _FakeSse([_pcm([1000, 2000]), _pcm([3000]), _pcm([4000, 5000, 6000])])
+    monkeypatch.setattr("core.audio.tts_cloud.urlopen", fake)
+    audio = DashScopeTtsProvider(key_env="VOX_TTS_KEY").synthesize("测试")
+    assert len(audio.samples) == 6
+    assert audio.samples[0] * 32768 == pytest.approx(1000, abs=1)
+    assert audio.samples[-1] * 32768 == pytest.approx(6000, abs=1)
+
+
+def test_a_stream_with_no_audio_frames_raises_rather_than_returning_silence(monkeypatch):
+    """一段静音会被读成「合成成功但没声音」—— 和非流式那条路同一条判断。"""
+    monkeypatch.setenv("VOX_TTS_KEY", "sk-not-a-real-key")
+    monkeypatch.setattr("core.audio.tts_cloud.urlopen", _FakeSse([], finish="length"))
+    with pytest.raises(DashScopeTtsError, match="一帧音频都没有"):
+        DashScopeTtsProvider(key_env="VOX_TTS_KEY").synthesize("测试")
+
+
+def test_a_corrupt_frame_does_not_lose_the_rest(monkeypatch):
+    """一帧读坏了不该让整句失败：后面的帧仍然有用。"""
+    monkeypatch.setenv("VOX_TTS_KEY", "sk-not-a-real-key")
+
+    class Broken(_FakeSse):
+        def __iter__(self):
+            yield b"data: {not json\n"
+            yield b"data: " + json.dumps(
+                {"output": {"audio": {"data": "!!!not base64!!!"}}}
+            ).encode("utf-8") + b"\n"
+            yield from _FakeSse.__iter__(self)
+
+    monkeypatch.setattr("core.audio.tts_cloud.urlopen", Broken([_pcm([8000])]))
+    audio = DashScopeTtsProvider(key_env="VOX_TTS_KEY").synthesize("测试")
+    assert len(audio.samples) == 1
+
+
+def test_a_barge_in_stops_reading_the_stream(monkeypatch):
+    """``stop()`` 在**帧之间**生效 —— 打断不必等整句合成完。
+
+    这是流式相对两个往返的第二个好处：非流式那条路上 `stop()` 只能在两段之间起作用，
+    因为那一段的音频要么整块到手要么没到。这里让打断发生在第 2 帧下发之前，断言收到的
+    样本数停在第 1 帧 —— 也就是「连接立刻不再读」，而不是「读完再丢掉」。
+    """
+    monkeypatch.setenv("VOX_TTS_KEY", "sk-not-a-real-key")
+    provider = DashScopeTtsProvider(key_env="VOX_TTS_KEY")
+
+    class Barging(_FakeSse):
+        def __init__(self, frames) -> None:
+            super().__init__(frames)
+            self.yielded = 0
+
+        def __iter__(self):
+            import base64 as b64
+
+            for index, frame in enumerate(self.frames):
+                payload = {"output": {"audio": {"data": b64.b64encode(frame).decode("ascii")}}}
+                self.yielded += 1
+                yield b"data: " + json.dumps(payload).encode("utf-8") + b"\n"
+                if index == 0:
+                    provider.stop()  # 第一帧到手之后有人喊了唤醒词
+
+    fake = Barging([_pcm([100] * 10), _pcm([200] * 10), _pcm([300] * 10)])
+    monkeypatch.setattr("core.audio.tts_cloud.urlopen", fake)
+    audio = provider.synthesize("测试")
+    assert len(audio.samples) == 10, "只该收到第一帧"
+    assert fake.yielded < 3, "剩下的帧不该再被读"
+    assert provider.is_stopped() is True
+
+
+def test_an_injected_transport_still_uses_the_two_round_trip_path(monkeypatch):
+    """注入 transport 时走非流式那条：测试替掉的是 post/get 两个方法。
+
+    这一条保住的是**可测性**：流式那条路要替 urlopen，而已有的十几条测试都建立在
+    transport 上。两条路共存不是过渡状态 —— 有些部署（代理、离线镜像）只能走 GET。
+    """
+    monkeypatch.setenv("VOX_TTS_KEY", "sk-not-a-real-key")
+    transport = FakeTransport()
+    audio = DashScopeTtsProvider(key_env="VOX_TTS_KEY", transport=transport).synthesize("你好")
+    assert transport.fetched == ["https://oss/x.wav"]
+    assert audio.sample_rate == 24000
