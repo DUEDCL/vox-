@@ -241,6 +241,11 @@ def open_voice_stack(
         keywords_file=resolve_keywords_file(resolved),
         keywords_threshold=float(resolved["wake.keywords_threshold"]),
         num_threads=int(resolved["wake.num_threads"]),
+        # 束宽。**必须传** —— 它是「安静房间里叫得应、有点噪声就叫不应」的那个参数，
+        # 而漏传它的后果不是「少一个可选项」：`config/voice.toml` 里那一行会变成一个
+        # 能改、能存、不生效的配置项。实测 beam 4 在 0 dB SNR 只剩 2/5，16 是 5/5，
+        # 每块耗时不变。见 core/audio/kws.py 的表。
+        max_active_paths=int(resolved["wake.max_active_paths"]),
     )
     if not kws.available:
         warnings.append(f"wake model not found at {resolved['kws_dir']}")
@@ -277,12 +282,23 @@ def open_voice_stack(
     except Exception:  # noqa: BLE001 - defaults below are the safe ones
         pass
 
+    resolved_device = device if device is not None else resolve_device(resolved)
+    if isinstance(resolved_device, str):
+        # 配置里写了名字，但没有一只输入设备匹配得上（或者同一个 host API 下重名）。
+        # **这一条要在 start() 抛出之前说出来**：那条原始报错来自 PortAudio，读起来像
+        # 「设备 -1 查询失败」，而真实情况是「你配的那只麦克风现在不在」。
+        warnings.append(
+            f"input.device = {resolved_device!r} 没匹配到任何输入设备 —— "
+            "耳机可能没插，或者同名设备在同一个 host API 下有多个；"
+            "控制台就绪清单里有当前的设备清单"
+        )
+
     capture = SounddeviceWakeCapture(
         kws,
         on_wake=lambda keyword, score: None,
         sample_rate=int(resolved["input.sample_rate"]),
         blocksize=int(resolved["input.blocksize"]),
-        device=device if device is not None else resolve_device(resolved),
+        device=resolved_device,
         verifier=verifier,
         require_verification=require_verification,
         # VAD。**它不闸 KWS**，作用是让增益只在语音上适应、并回答「这一段有语音吗」。

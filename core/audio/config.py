@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from core.audio.acks import DEFAULT_ACKS
+from core.audio.kws import DEFAULT_MAX_ACTIVE_PATHS
 
 DEFAULT_CONFIG_NAME = "voice.toml"
 
@@ -65,6 +66,11 @@ _SCHEMA: dict[str, dict[str, Any]] = {
         "keywords_file": "",
         "keywords_threshold": 0.25,
         "num_threads": 2,
+        # 解码束宽。**这是纯召回参数，不是判定标准** —— 唤醒词的假设路径要和普通转写路径
+        # 竞争束里的位置，束太窄时它在噪声里会先被剪掉。sherpa-onnx 的默认是 4，实测那个
+        # 值在 5 dB SNR 上开始丢命中、0 dB 只剩 2/5；16 在 0 dB 是 5/5，而每块耗时不变
+        # （1.10 → 1.21 ms / 100 ms 块）。见 core/audio/kws.py 与 prototype-results.md。
+        "max_active_paths": DEFAULT_MAX_ACTIVE_PATHS,
         # 唤醒确认音。命中之后先应一声再开始听 —— 没有这一声，人会以为没听见而重复喊，
         # 而重复的第二遍会落进已经开着的识别器。空字符串 = 关掉。分隔符收「，,；;|、」。
         "acks": DEFAULT_ACKS,
@@ -229,15 +235,94 @@ def resolve_keywords_file(config: dict[str, Any]) -> Path | None:
     return candidate if candidate.is_absolute() else repo_root() / candidate
 
 
+#: 按名字选设备时，host API 的优先顺序。
+#:
+#: Windows 上**同一个物理麦克风会以四种 host API 各出现一次**（MME / DirectSound /
+#: WASAPI / WDM-KS），所以把名字片段直接交给 sounddevice 会换回
+#: `Multiple input devices found` 而不是一个设备 —— 那正是 `config/voice.toml` 里那句
+#: 「填索引，不要填名字片段」的由来。可是索引**也不稳**：它由枚举顺序决定，插拔一个设备
+#: 就会移位。2026-08-29 记下的 `device = "2"` 当时是耳机，2026-09-01 同一个索引指向的是
+#: 麦克风阵列 —— 配置文件里的注释还写着「[2] 耳机」，而症状是唤醒率变差，不是报错。
+#:
+#: 所以名字要能用，歧义要在这里消掉。WASAPI 排第一是因为它是 Windows 上的现代采集路径，
+#: 而且这台机器上耳机那一条只有 WASAPI 报了 16 kHz（其余报 44.1 kHz，要重采样）。
+_HOST_API_PREFERENCE = ("wasapi", "mme", "directsound", "wdm-ks")
+
+
+def _match_device(fragment: str) -> int | str:
+    """名字片段 -> 设备索引。消不掉歧义时原样返回，让调用方拿到 sounddevice 的报错。
+
+    ``sounddevice`` 装不上时也原样返回：这个模块是配置层，不该因为一个可选依赖缺失
+    而让读配置失败。
+    """
+    try:
+        import sounddevice  # noqa: PLC0415 - 可选依赖，只在真要选设备时才导
+    except Exception:  # noqa: BLE001
+        return fragment
+    try:
+        devices = sounddevice.query_devices()
+        apis = sounddevice.query_hostapis()
+    except Exception:  # noqa: BLE001 - 设备枚举失败时退回原值
+        return fragment
+    needle = fragment.casefold()
+    candidates: list[tuple[int, int]] = []
+    for index, device in enumerate(devices):
+        if int(device.get("max_input_channels", 0)) <= 0:
+            continue
+        if needle not in str(device.get("name", "")).casefold():
+            continue
+        api = str(apis[int(device["hostapi"])].get("name", "")).casefold().replace(" ", "")
+        rank = next(
+            (position for position, key in enumerate(_HOST_API_PREFERENCE) if key in api),
+            len(_HOST_API_PREFERENCE),
+        )
+        candidates.append((rank, index))
+    if not candidates:
+        return fragment
+    best = min(rank for rank, _ in candidates)
+    tied = [index for rank, index in candidates if rank == best]
+    if len(tied) > 1:
+        # 同一个 host API 下重名：这是真歧义，不猜。原样返回让 sounddevice 报它的错，
+        # 那条错里带着候选清单。
+        return fragment
+    return tied[0]
+
+
 def resolve_device(config: dict[str, Any]) -> int | str | None:
-    """``input.device`` as sounddevice wants it: index, name fragment, or None."""
+    """``input.device`` as sounddevice wants it: index, name fragment, or None.
+
+    数字原样当索引用。**名字片段现在会被解析成索引**（见 ``_match_device``）—— 索引会随
+    插拔移位，而名字不会，所以按名字配才是能跨重启活下来的那一种。
+    """
     raw = str(config.get("input.device", "")).strip()
     if not raw:
         return None
     try:
         return int(raw)
     except ValueError:
-        return raw
+        return _match_device(raw)
+
+
+def describe_device(device: int | str | None) -> str:
+    """解析后的设备是哪一个，给就绪清单和启动日志用。
+
+    存在的理由是 2026-09-01 那次索引漂移：配置里写着 `2`，注释里写着「耳机」，而实际打开
+    的是麦克风阵列。**报出名字**是让这类漂移在下一次发生时立刻可见的唯一办法。
+    """
+    if device is None:
+        label = "系统默认"
+    else:
+        label = str(device)
+    try:
+        import sounddevice  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return label
+    try:
+        info = sounddevice.query_devices(device if device is not None else None, "input")
+        api = sounddevice.query_hostapis(int(info["hostapi"]))["name"]
+    except Exception as exc:  # noqa: BLE001 - 报不出来也不能抛
+        return f"{label}（查不到：{type(exc).__name__}）"
+    return f"{label} = {info['name']}（{api}）"
 
 
 __all__ = [
@@ -249,6 +334,7 @@ __all__ = [
     "custom_keywords_path",
     "VoiceConfigError",
     "default_voice_config",
+    "describe_device",
     "load_voice_config",
     "model_paths",
     "repo_root",

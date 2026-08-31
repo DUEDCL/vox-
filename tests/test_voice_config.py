@@ -191,3 +191,105 @@ def test_device_is_an_index_a_name_or_nothing():
     assert resolve_device({"input.device": ""}) is None
     assert resolve_device({"input.device": "3"}) == 3
     assert resolve_device({"input.device": "USB Microphone"}) == "USB Microphone"
+
+
+# --------------------------------- 按名字选设备（2026-09-01 的索引漂移）
+
+
+class _FakeSd:
+    """两只输入设备，各自在 MME 与 WASAPI 下重复出现 —— Windows 的真实形状。"""
+
+    def __init__(self) -> None:
+        self._devices = [
+            {"name": "麦克风阵列 (Realtek(R) Audio)", "max_input_channels": 2, "hostapi": 0},
+            {"name": "耳机 (沉麟的耳机)", "max_input_channels": 1, "hostapi": 0},
+            {"name": "扬声器 (Realtek(R) Audio)", "max_input_channels": 0, "hostapi": 0},
+            {"name": "麦克风阵列 (Realtek(R) Audio)", "max_input_channels": 2, "hostapi": 1},
+            {"name": "耳机 (沉麟的耳机)", "max_input_channels": 1, "hostapi": 1},
+        ]
+        self._apis = [{"name": "MME"}, {"name": "Windows WASAPI"}]
+
+    def query_devices(self, device=None, kind=None):
+        if device is None:
+            return list(self._devices)
+        return self._devices[int(device)]
+
+    def query_hostapis(self, index=None):
+        if index is None:
+            return list(self._apis)
+        return self._apis[int(index)]
+
+
+@pytest.fixture
+def fake_sd(monkeypatch):
+    import sys
+
+    fake = _FakeSd()
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    return fake
+
+
+def test_a_name_resolves_to_one_index_preferring_wasapi(fake_sd):
+    """**索引会漂，名字不会。**
+
+    2026-08-29 记下 `device = "2"` 时索引 2 是耳机；2026-09-01 同一个索引指向麦克风阵列，
+    而耳机成了索引 1。移位之后不报错 —— 流照常打开、回调照常触发，只是唤醒率变差。
+    这就是「配置与现实分岔」最安静的一种形式。
+
+    WASAPI 优先是有理由的：这台机器上耳机只有 WASAPI 那一条报 16 kHz 原生采样率，
+    其余三条都是 44.1 kHz，要多一层重采样。
+    """
+    from core.audio.config import resolve_device
+
+    assert resolve_device({"input.device": "耳机"}) == 4
+    assert resolve_device({"input.device": "麦克风阵列"}) == 3
+
+
+def test_an_output_only_device_is_never_chosen(fake_sd):
+    """扬声器也叫「Realtek」。按名字选设备时它必须被排除，否则会打开一个没有输入通道
+    的设备 —— 而那的症状是「全零输入」，和一只被静音的麦克风一模一样。"""
+    from core.audio.config import resolve_device
+
+    assert resolve_device({"input.device": "扬声器"}) == "扬声器"
+
+
+def test_an_unmatched_name_is_handed_back_untouched(fake_sd):
+    """没匹配上就原样返回，让 sounddevice 报它自己的错（那条错里带候选清单）。
+
+    `open_voice_stack` 会在 `start()` 之前把这件事变成一条警告 —— PortAudio 的原话
+    读起来像「设备 -1 查询失败」，而真实情况是「你配的那只麦克风现在不在」。
+    """
+    from core.audio.config import resolve_device
+
+    assert resolve_device({"input.device": "不存在的设备"}) == "不存在的设备"
+
+
+def test_a_digit_is_still_an_index(fake_sd):
+    """数字仍然原样当索引用：已经按索引配好的机器不该因为这次改动改变行为。"""
+    from core.audio.config import resolve_device
+
+    assert resolve_device({"input.device": "2"}) == 2
+    assert resolve_device({"input.device": ""}) is None
+
+
+def test_the_described_device_names_what_was_actually_opened(fake_sd):
+    """就绪清单必须报**解析后的真实名字**。
+
+    只报「2」的话，索引漂移这件事在任何一处读数里都是不可见的 —— 上一版配置注释写着
+    「[2] 耳机」，而实际打开的是麦克风阵列，两者都「看起来正常」。
+    """
+    from core.audio.config import describe_device
+
+    assert describe_device(4) == "4 = 耳机 (沉麟的耳机)（Windows WASAPI）"
+    assert "系统默认" in describe_device(None)
+
+
+def test_the_shipped_config_does_not_pin_an_index():
+    """出厂配置不许再按索引写死设备。
+
+    这一条是**防回归**：把它改回一个数字就等于把「插拔一个设备就换了麦克风」这个坑
+    重新挖开，而那个坑不报错。
+    """
+    from core.audio.config import load_voice_config
+
+    assert not str(load_voice_config()["input.device"]).strip().isdigit()

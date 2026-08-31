@@ -57,3 +57,60 @@ def test_sherpa_vad_rejects_silence_and_detects_bundled_speech():
     assert segments
     assert sum(segment["samples"] for segment in segments) > 16000
     provider.close()
+
+
+# --------------------------------------------- 束宽（2026-09-01 的唤醒率修正）
+
+
+def test_the_beam_width_actually_reaches_the_spotter(monkeypatch):
+    """``max_active_paths`` 必须真的传进 sherpa。
+
+    这条钉的是本项目反复踩到的那一类缺陷：**一个能改、能存、不生效的配置项**
+    （`tts.instruction` 漏传过一次，`config/keywords.txt` 的条数写死在页面里过一次）。
+    束宽尤其危险，因为漏传它不会报错 —— 只是在噪声里少命中，而每一层都报告自己健康。
+    """
+    import sys
+    import types
+
+    seen: dict[str, object] = {}
+
+    class FakeSpotter:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    fake = types.SimpleNamespace(KeywordSpotter=FakeSpotter)
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", fake)
+    provider = SherpaKeywordProvider(
+        MODEL_DIR, max_active_paths=16, keywords_score=2.0, num_trailing_blanks=2
+    )
+    if not provider.available:
+        pytest.skip("isolated KWS model is not downloaded")
+    assert provider.load().available
+    assert seen["max_active_paths"] == 16
+    assert seen["keywords_score"] == 2.0
+    assert seen["num_trailing_blanks"] == 2
+
+
+def test_the_shipped_default_is_wider_than_sherpas():
+    """sherpa-onnx 的默认束宽是 4，实测它在 0 dB SNR 上只剩 2/5。
+
+    这一条不是在测 sherpa，是在防止「有人把它改回默认值以为那是保守选择」——
+    在这个模型上 beam 4 才是有代价的那一个，而代价看不见（每块耗时几乎一样）。
+    """
+    from core.audio.config import load_voice_config
+    from core.audio.kws import DEFAULT_MAX_ACTIVE_PATHS
+
+    assert DEFAULT_MAX_ACTIVE_PATHS >= 8
+    assert int(load_voice_config()["wake.max_active_paths"]) >= 8
+
+
+@pytest.mark.skipif(not MODEL_DIR.is_dir(), reason="isolated KWS model is not downloaded")
+def test_a_wider_beam_does_not_make_silence_a_hit():
+    """束宽是召回参数，不该把静音变成命中 —— 加宽之后这条负样本仍然必须为空。"""
+    pytest.importorskip("sherpa_onnx")
+    provider = SherpaKeywordProvider(MODEL_DIR, max_active_paths=32)
+    assert provider.load().available
+    stream = provider.create_stream()
+    for _ in range(20):
+        assert provider.feed(stream, [0.0] * 1600) == []
+    provider.close()
