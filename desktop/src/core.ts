@@ -44,6 +44,111 @@
    ADR 001 要求渲染器待在接口之后,v2 的 WebGL 实现替换本文件而不动调用方。
    版面在 style.css,颜色的唯一来源也在那里。 */
 
+/**
+ * ============ 可调参数（`TUNE`）============
+ * **运行时可改，每帧读取。** 验收页（`review.html`）把它接成一排滑块，使用者自己调 ——
+ * 「给我在 localhost:5273/ 添加可直接修改参数及时看到效果的控块，我自己调」。
+ * 生产的球读同一个对象，所以调好的一组值直接就是新的默认值。
+ * 每一项的含义写在字段后面；数值的量程与默认值在 `review.ts` 的 `SLIDERS` 表里。
+ */
+export const TUNE = {
+  // ---- 几何：同一个椭圆片，六片各自形变 ----
+  /** 椭圆的长半轴（单位球比例）。高聚合态用满，低聚合态取它的 72%。 */
+  ellA: 0.74,
+  /** 短半轴 / 长半轴。**1.0 = 正圆**，这是使用者最后确认的形状（「我刚才说错了，
+      就是圆形片进行弯曲和扭曲的，没有椭圆」）。弯曲与扭曲之后圆片的投影自然成为
+      各种叶形，所以「形态多变」不需要靠椭圆的长短比来给。 */
+  ellB: 1.0,
+  /** 沿长轴的**弯曲**强度（乘在每片自己的随机系数上）。0 = 六片都是平的。
+      它是 1/曲率半径，弯过的总角 ≈ `bend × 每片系数 × ellA`：2.6 ⇒ 最大约 1.5 rad（86°）。
+      **0.85 那一版被使用者判为「幅度太小」**（最大只有 0.55 rad = 31°）。 */
+  bend: 50.8,
+  /** 绕长轴的**扭曲**强度。扭过的总角 ≈ `twist × 每片系数 × ellA`：2.4 ⇒ 最大约 1.6 rad。
+      同样是从 0.95（最大 0.65 rad）提上来的。 */
+  twist: 21,
+  /** 绕 X / Y 轴的倾角幅度（rad）。**小**才符合「旋转方向是面对摄像机」；
+      大了片体会频繁转到侧面、投影收成一条线。 */
+  tiltXY: 0.42,
+  /** 六片的片心离整组中心多远。**默认 0 —— 使用者：「亮片的中心就应该是全部重叠的」。**
+      成环相（thinking）例外，那一相由 `ringAt()` 把它推到 0.56 的一圈上。 */
+  offBase: 0,
+  /** 整组中心绕球心进动的半径（整团光的位移只有这一层给）。 */
+  hubTilt: 0.16,
+  /** **半透明度**：1 = 完全挡住后面的片，0.5 = 透一半。使用者：「材质应该是那种半透明
+      能看清本身颜色且能透过其看到一些东西」—— 这一项就是那句话的落点。 */
+  opacity: 0.44,
+  /** 片体的**羽化**：径向渐变从中心走到「几乎全黑」的位置（0.62 = 从 62% 半径起基本没了）。
+      对应 AE 流程里那张接在 E3D 材质 **Alpha 通道**上的**反转 + 羽化 1000** 的圆遮罩。
+      **0.34 而不是 0.62**：羽化 1000px 作用在一个几百像素的圆遮罩上，意味着**整片几乎都在
+      羽化区**、中心的实心部分很小。0.62 那一版中心实区太大，六片的核在球心重合、加色再乘
+      曝光 2 ⇒ 一团纯白（截图确认）。调小 ⇒ 片体收成一团柔光；调到 1 ⇒ 接近硬边色块。 */
+  feather: 0.34,
+  /** 自然饱和度。**工程实测 +60** ⇒ 0.60。0 = 关。 */
+  vibrance: 0.60,
+  /** **湍流置换**的强度（轮廓的径向扰动幅度）。工程里挂了 `Turbulent Displace`
+      数量 7 / 大小 150 —— 教程没提，但它是「流体感」的一个独立来源：它在 2D 上把画好的
+      形状有机地扭动，与 E3D 的 Twist/Bend 是两回事。
+      Canvas 2D 做不了逐像素置换（`ImageData` 太慢），所以用**轮廓的低频谐波扰动**近似 ——
+      这与第九代液面轮廓用的是同一个手法。 */
+  turb: 0.10,
+  /** 湍流的**空间频率**（沿轮廓一圈几个波）。工程的「大小 150」对应低频、大尺度的扰动。 */
+  turbN: 3,
+  /** **后期辉光**的强度（0 = 关）。对应 AE 流程最后那个调整图层上的 Deep Glow / Glow ——
+      「发光」在素材里是**后期**给的，不是材质自己亮。它把整幅（含球壳）糊开一层加回去。 */
+  glow: 0.52,
+  /** 辉光半径（× 球半径）。大 ⇒ 光晕铺得远、球更「湿」；小 ⇒ 只在亮部边上镶一圈。 */
+  glowR: 0.085,
+  /** **曝光**。素材的物理环境实测：曝光 2.00、伽玛 1.00、色彩白、照明变化 0%
+      （使用者给的截图）。颜色算完之后整体乘它再钳制，过曝的部分自然往白里走 ——
+      半透明覆盖没有加色累积，所以「发光」这件事现在由它和光核承担。 */
+  exposure: 2.5,
+
+  // ---- 运动 ----
+  /** 整组中心绕球心进动的角速度（rad/s）。 */
+  hubW: 0.71,
+  /** 片心绕整组中心公转的角速度（rad/s）。片心重合时看不出来。 */
+  orbW: 1.22,
+  /** **绕视线轴的自转**（rad/s）—— 使用者要的「面对摄像机的旋转」，主运动就是它。 */
+  selfW: 0.785,
+  /** 各片速率与方向的差异强度。0 = 六片同速同向；1 = 方向（±）与倍率全开 ⇒ 最无规则。
+      AE 流程给的是两组不同方向：`time*45` 与 `time*-30`，所以这一项该开着。 */
+  dirSpread: 1,
+  /** 扭曲与弯曲的**浮动幅度**（相对各自的基准）。对应 AE 流程里给 Twist / Bend 加的
+      `wiggle(0.2, 10)` —— 频率 0.2 次/秒、幅度 ±10（相对基准约 ±22%）。
+      **慢而小**：0.70 那一版把形态摇得太厉害，不是「轻微的呼吸感」。 */
+  wig: 15,
+
+  // ---- 黑色线性雾（素材的做法，使用者给了参数截图）----
+  /** 雾的起点深度：`z` 大于它的地方完全没有雾。 */
+  fogNear: 0.30,
+  /** 从起点再往里多深变成全黑。**「被遮挡的部分几乎不可见」由这两项承担。** */
+  fogRange: 1.05,
+
+  // ---- 球壳（流边）----
+  /** 这一层的宽度（× 球半径）—— 它是球内壁被最近那片染上的颜色。 */
+  shellW: 0.024,
+  /** 亮度系数。 */
+  shellA: 0.22,
+  /** 「多远之外就不算贴着这一段」的三维距离阈值。 */
+  shellReach: 0.98,
+  /** 权重的幂次。越大 ⇒ 亮带越窄越干脆。 */
+  shellPow: 5,
+
+  // ---- 中心光核 ----
+  /** 半径倍数（× coreGlow 给的基准）。 */
+  coreR: 1.75,
+  /** 峰值 alpha 的斜率。 */
+  coreA: 0.08,
+  /** 衰减指数。**越小越柔和**。 */
+  coreSoft: 2.4,
+
+  // ---- 片体的颜色曲线 ----
+  /** 最亮那一档往白里带多少（发光感）。 */
+  tintLit: 0.22,
+  /** 最暗那一档压到多黑（对比）。 */
+  tintDim: 1.0,
+};
+
 export type CoreState =
   | 'idle' | 'listening' | 'thinking' | 'speaking' | 'cancelled' | 'error';
 
@@ -274,20 +379,50 @@ export function alpha(css: string, a: number): string {
  * **闸门时归零退回精确圆** —— 其余六态的边界都在流动,所以「突然变成一个规整的圆」
  * 与「突然不呼吸不自转」是同一句话的第三遍,余光里最抢眼。
  */
+/**
+ * 逐帧缓存。**这修的是一个真实的卡顿。** `contourRadii()` 每次调用要算 96 个采样点
+ * × 4 条谐波的余弦，而 `shell()`（96 段 × 4 层）与 `film()`（48 段 × 4 层）每一段都要
+ * 调它一次 —— 一帧 576 次调用 = 约 22 万次三角函数，验收页四个球同帧跑就是 88 万次。
+ * 它是 `f` 的纯函数，所以同一帧的重复调用直接返回上一次的数组。
+ *
+ * **单槽而不是 `WeakMap<CoreFrame, …>`**：一帧之内几百次调用的参数完全相同 ⇒ 连续命中，
+ * 单槽就够；而验收页四个球共用同一个 `f`，单槽还能跨球命中。用 WeakMap 反而更差 ——
+ * 调用方每帧新建 frame 对象，WeakMap 会攒下几百个永不复用的弱条目，ephemeron 清理是
+ * GC 标记阶段的额外工作，等于用一个卡顿换另一个。
+ *
+ * 键里列的是**全部**会影响读数的输入（`f.t` 与 `breathAmp`/`beatGate`/`breathRate`
+ * 各自读的字段）；漏一个就会在切态那一帧返回上一态的轮廓。
+ *
+ * **返回的数组是共享的，调用方只许读。** 现在的四个调用点（`contour`/`contourArc`/
+ * `body`/`halo`）都只读。
+ */
+let radiiKey = '';
+let radiiRs: number[] = [];
+
 export function contourRadii(f: CoreFrame, n = 96): number[] {
+  const key = `${n}|${f.t}|${f.state}|${f.gated}|${f.amplitude}|${f.bloom}|${f.ring}|${f.seed}`;
+  if (key === radiiKey) return radiiRs;
+  radiiRs = computeContourRadii(f, n);
+  radiiKey = key;
+  return radiiRs;
+}
+
+function computeContourRadii(f: CoreFrame, n: number): number[] {
   const out: number[] = [];
   // **闸门不再退回精确圆。** 上一代刻意让它变成「这个软塌塌的世界里唯一一个精确的圆」,
   // 使用者要求删掉所有标准圆的几何元素、并点名闸门那一道 —— 这条设计决定因此被推翻
   // (记在 DD-033)。闸门的辨识仍然成立:它是唯一 `breath` 与 `spin` **同时为 0** 的一帧,
   // 加上整圈琥珀,而琥珀环现在也长在液面轮廓上。
   const flow = 1;
-  // **只有 listening 的轮廓真的胀缩。** 使用者:「只有聆听时胀缩」。
-  // 素材实测外沿只摆 ±0.4%,所以其余七态的轮廓只有形状涟漪、没有整体缩放;
-  // listening 那一档按呼吸给到 ±6%,那是「跟着你的声音在动」的载体。
-  // 闸门也不缩放:它的形态是冻住的(呼吸只走亮度)。
-  const swell = f.state === 'listening' && !f.gated
-    ? 1 + 0.06 * Math.sin(f.t * 1.57)
-    : 1;
+  // **球体积真的随呼吸胀缩，而且每一态都胀缩。**
+  // 使用者：「听和说是同一个状态的不同幅度，都是在向外扩大一点球的体积」，而且
+  // 「薯片依旧是在做旋转而不随球变大而向外扩展」—— 后半句的根因就在这里：
+  // 上一版只有 `listening` 的轮廓会缩放（±6%），其余七态的球**尺寸恒定**，
+  // 所以「球变大」这件事在界面上根本没有发生过。
+  // 现在幅度直接由 `breathAmp()` 给：说 0.30 ⇒ ±9.0%、听 0.10 ⇒ ±3.0%、
+  // 待机 0.08 ⇒ ±2.4%、取消 0.035 ⇒ ±1.05%。三倍的幅度差因此同时出现在
+  // **球的大小**和**薯片的伸展**上（`chips()` 的 `own` 吃同一条呼吸）。
+  const swell = 1 + 0.30 * breathAmp(f) * beatGate(f) * Math.sin(f.t * breathRate(f));
   for (let i = 0; i < n; i++) {
     const a = (TAU * i) / n;
     let d = 0;
@@ -405,13 +540,13 @@ export function breathAmp(f: CoreFrame): number {
   // 读作「它活着,但被拦住了」而不是「它死了」。
   if (f.gated) return 0.05;
   switch (f.state) {
-    // 深度排序由使用者定:**聆听最深**(在收集) > 思考 > 回复 > 待机 > 闸门 > 取消最浅。
-    // `f.amplitude` 在真机路径上恒为默认值 —— 语音契约的 9 种事件里没有连续音量,
-    // 而使用者选择不动那份字节冻结的契约。所以这里**不声称**波动反映音量,
-    // 它是自走的呼吸;amplitude 只在 SIM/调参页里被人为拨动。
-    case 'listening': return 0.20;
+    // **听与说是同一个动作的两个档，说的幅度是听的 3 倍。** 这一条由使用者看素材
+    // 得出并纠正了此前的排序：「听和说是同一个状态的不同幅度，都是在向外扩大一点球的
+    // 体积，但是说的幅度和频率比听要高出不少」。上一版正好**反了**（听 0.20 > 说 0.11）
+    // 而且频率完全一样，所以两态在界面上几乎分不开 —— 那正是使用者报的第四条。
+    case 'listening': return 0.10;
+    case 'speaking': return 0.30;
     case 'thinking': return 0.13;
-    case 'speaking': return 0.11;
     case 'idle': return 0.08;
     case 'cancelled': return 0.035;
     case 'error': return 0.14;
@@ -421,12 +556,15 @@ export function breathAmp(f: CoreFrame): number {
 /** 呼吸快慢(rad/s)。参考动画的主周期约 4 秒 ≈ 1.57 rad/s,listening 就取在那儿;
     待机更慢像睡着的人,思考更快像在忙,异常最快像喘。 */
 export function breathRate(f: CoreFrame): number {
-  // **六态共用一条心跳。** 1.57 rad/s ≈ 4 秒一次,就是参考素材的主周期。
-  // 使用者选的是「共用一条心跳、只改幅度」:开心心跳快、紧张心跳快 —— 但还是同一颗心。
-  // 上一版每态一个频率(0.85/1.57/2.30/2.97/0.50/3.10),切态时节奏会跳,
-  // 读作换了一个东西而不是同一个东西换了情绪。
-  // **闸门也用这一条**(只有幅度更浅):它是「被拦住的同一个活物」。
-  // 唯一的例外是 error 的**漏拍**,那不在频率里,见 `beatGate()`。
+  // **听与说各自离开那条共用心跳，其余五态仍然共用。**
+  // 使用者看素材后的判断：「说的幅度和频率比听要高出不少」，而上一版八态全是 1.57，
+  // 频率这个通道等于没用 —— 听/说因此只剩一个 0.09 的 bloom 差在撑区分（第四条）。
+  // 现在 听 1.00（约 6.3 秒一口，平缓地在收集）· 说 3.20（约 2.0 秒一口，明显在使力），
+  // 频率比 3.2 倍、幅度比 3.0 倍，两个通道同时拉开。
+  // 其余五态保持 `HEART` —— 「同一颗心换情绪」那条立场只在这五态上继续成立。
+  if (f.gated) return HEART;
+  if (f.state === 'listening') return 1.00;
+  if (f.state === 'speaking') return 3.20;
   return HEART;
 }
 
@@ -673,6 +811,513 @@ export function petals(f: CoreFrame): Petal[] {
   return out;
 }
 
+/* ============================================================================
+   3D 薯片（第十代）。**这一节是使用者看素材看出来的，不是我量出来的。**
+
+   使用者的原话：「亮片的形状是 3D 类似于薯片的样式，每一片具有固定的颜色，当其
+   转动到正面视角时哪个薯片离球体边缘最近就会把他的颜色渲染到边缘，且离得越近颜色
+   就越亮」。看过 360px 原始帧之后确认了三件此前判断错的事：
+
+   ① **薯片的投影轮廓是清楚的一条曲线，不是弥散的光。** 帧 176（散开相）上六片
+      各有明确的边界。此前一直在给片体加模糊、去实色平台 —— 方向反了。
+   ② **六片的形状差异不是固定表给的，是同一个 3D 曲面在不同视角下的投影。**
+      同一帧里有的圆胖（接近正面）、有的细成月牙（接近侧面）；相隔 10 帧（0.3s）
+      同一片会从圆胖变成细长。`SIZE`/`ANG`/`SHAPE` 三张固定表在模拟这件事，
+      而真正的原因是 3D 姿态 —— 所以那三张表可以退役。
+   ③ **球壳存在。** 帧 106/244 的外沿有一圈清楚的亮边，而且**左侧偏粉紫、右侧偏
+      青蓝** —— 正是使用者说的「最近的薯片把颜色渲染到边缘」。此前文档里
+      「球壳不存在，这是量出来的」那条结论来自径向亮度剖面，而剖面在中心过曝时
+      必然单调衰减，量不出一圈薄膜。
+
+   坐标系：右手系，+x 右、+y 下（与 canvas 一致）、+z 朝观察者。正交投影。
+   ========================================================================== */
+
+type V3 = { x: number; y: number; z: number };
+
+const v3 = (x: number, y: number, z: number): V3 => ({ x, y, z });
+const vadd = (a: V3, b: V3): V3 => v3(a.x + b.x, a.y + b.y, a.z + b.z);
+const vmul = (a: V3, k: number): V3 => v3(a.x * k, a.y * k, a.z * k);
+const vsub = (a: V3, b: V3): V3 => v3(a.x - b.x, a.y - b.y, a.z - b.z);
+const vdot = (a: V3, b: V3): number => a.x * b.x + a.y * b.y + a.z * b.z;
+const vcross = (a: V3, b: V3): V3 =>
+  v3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+const vnorm = (a: V3): V3 => {
+  const l = Math.hypot(a.x, a.y, a.z) || 1;
+  return vmul(a, 1 / l);
+};
+
+/** 绕任意单位轴旋转（Rodrigues）。进动要绕两个不共线的轴，所以不能用欧拉角省事。 */
+function vrot(p: V3, axis: V3, ang: number): V3 {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  const k = vcross(axis, p);
+  return vadd(vadd(vmul(p, c), vmul(k, s)), vmul(axis, vdot(axis, p) * (1 - c)));
+}
+
+/** 每片的**基准倾斜角**（把它的面推离屏幕平面多少）与各自的漂移速率。
+    倾斜多少决定它投影后是圆胖（面朝我们）还是细成月牙（侧过来）；六个速率互不整除，
+    所以同一片会从圆胖 morph 成细长再回来 —— 那正是素材帧 176→186（0.3 秒）里的事。 */
+const CHIP_TILT: number[] = [0.20, 0.72, 0.40, 0.95, 0.55, 0.28];
+const CHIP_TILTW: number[] = [0.19, 0.27, 0.13, 0.33, 0.23, 0.11];
+
+/**
+ * 六片的**轨道**。使用者纠正了我建错的运动模型，原话：
+ * 「素材里是亮片一开始就是多平面的空间位置」「亮片间以球心为中心，亮片中心以小半径
+ *  绕球心做圆周运动，亮片绕亮片中心做圆周运动，达到互补的效果」，以及上一版的病症
+ * 「为什么看着像一个平面在球内做斜轴的自旋」。
+ *
+ * 上一版把六片的长轴全放在**屏幕平面内**（绕 z 轴 60° 分开），只靠 `tilt` 把面推离
+ * 屏幕 —— 六片因此大体共面，整组看起来就是一个平面在斜着自旋。那是根本的建模错误。
+ *
+ * 现在是**两层圆周运动 + 六个不同的轨道平面**：
+ *   ① 每片有自己的轨道平面（法向 `n` 按黄金角撒在球面上 ⇒ 真正的多平面空间位置）；
+ *   ② 片心在该平面内、以小半径 `rho` 绕**球心**做圆周运动（公转）；
+ *   ③ 片体再绕**自己的中心**在自己的平面内转（自转）。
+ * 公转与自转的速率互不整除，所以两层运动永远错开 —— 那就是「互补」。
+ */
+const ORBIT_N: V3[] = (() => {
+  const out: V3[] = [];
+  const ga = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < 6; i++) {
+    const z = 1 - (2 * i + 1) / 6;
+    const r = Math.sqrt(Math.max(0, 1 - z * z));
+    const a2 = ga * i + 0.7;
+    out.push(vnorm(v3(Math.cos(a2) * r, z * 0.82, Math.sin(a2) * r)));
+  }
+  return out;
+})();
+
+/** 每片的初相位与**不均匀**的角度分布（固定表，不是随机数 —— 静止帧要可复现）。
+    **必须不均匀。** 六片等角 60° 张开 + 大小相同 ⇒ 整组投影是**六重旋转对称**的，
+    而旋转对称的图形转起来看不出在转（转 60° 就回到原样）—— 使用者报的
+    「看不到亮片自由旋转的效果」就是这个。现在三件事一起破对称：
+    ① `SPREAD` 的角度不是 60° 均分（间隔 48°–74°）；② `SCALE` 让六片不等大（±18%）；
+    ③ `LEAN` 让每片偏离 hub 的量不同。加上六个固定颜色本来就不同，
+    旋转因此在**颜色的位置**上直接看得出来。 */
+const ORBIT_PH: number[] = [0, 1.05, 2.09, 3.14, 4.19, 5.24];
+const SPIN_PH: number[] = [0.4, 2.7, 1.1, 4.3, 5.8, 3.2];
+const SPREAD: number[] = [0, 0.84, 2.13, 3.05, 4.34, 5.16];
+const SCALE: number[] = [1.18, 0.86, 1.05, 0.92, 1.14, 0.85];
+/** 每片的片心偏离 `hub` 多远（rad，乘上基准 1.05）。**六个值都落在 1.0 附近，
+    也就是六个片心分布在离 `hub` 约 60°–77° 的一个**环**上，绕着 `hub` 张开。
+
+    这是「互相穿插」的落点，而且改了两次才对：
+    ① 最早 [1.15,0.72,1.00,0.84,1.22,0.90] × 基准 0.46 ⇒ 片心全挤在 hub 周围 0.08–0.56 rad
+       的小锥里，六片只是一叠深度不同的曲面 ⇒ 读作「折叠」。
+    ② 接着改成升序 [0.30…1.85] × 1.05 ⇒ 片心从 18° 铺到 111°，前后是错开了，但**升序等于
+       同心嵌套**：offAmt 相差很大的两片（18° 与 111°）曲面几乎不相交，实测每片只与
+       1.7–3.9 片穿插，`idle`/`cancelled` 全部帧都到不了 4 片。
+    现在六片同处一个大锥的环上：任意两片的片心角距在 60°–140° 之间，而片体半跨 80°
+    ⇒ 每一对都既交叠又相交，深度关系必然在交叠区里翻转 —— 那就是穿插的定义。
+    片心都不在 `hub` 方向反而保证了中心最亮：每片都从 70° 外伸 80° 盖过 hub，
+    六片在中心全部交叠，「以中心点进行的高度重叠」是这么来的。 */
+const LEAN: number[] = [0.95, 1.12, 1.02, 1.18, 1.06, 1.15];
+
+/** **每片的运动方向与速率各不相同。** 使用者：「这些亮片就是中心重叠、有面穿插、
+    **相互有不同运动方向**的」。此前六片共用 `ORB_W`/`SELF_W` 两个角速度，只有**相位**
+    不同 —— 相位差只是「同一列队伍里排在后面」，整组仍然是一个刚体在转，那正是
+    「太固定、有点人机感」的最后一处来源。
+    现在公转与自转各带方向符号（±）与速率倍率，六片因此有的顺时针有的逆时针、
+    快慢不一。倍率**故意不成整数比**（0.82/1.24/0.93/1.37/1.08 与 6 个自转倍率同理），
+    所以任意两片的相对姿态永不循环。
+    仍然不用随机数：静止一帧必须可复现，几何指纹才断言得了。 */
+const ORB_DIR: number[] = [1, -1, 1, 1, -1, -1];
+const ORB_MUL: number[] = [1.00, 0.91, 1.13, 0.96, 1.19, 1.05];
+const SELF_DIR: number[] = [1, 1, -1, -1, 1, -1];
+const SELF_MUL: number[] = [1.00, 1.22, 0.89, 1.14, 0.78, 1.33];
+
+/**
+ * 旋转的**漫游轴**。使用者：「找一个能达到原素材效果的旋转方式，做到看不出来是规律的
+ * 全角度有中心的旋转」。
+ *
+ * 上一版绕两个**固定**轴进动 —— 固定轴等于有两个优先方向，看久了那两个方向就露出来了。
+ * 现在轴自己在球面上漫游：极角与方位角各由两三条不整除的正弦驱动，于是轴会走遍全角度，
+ * 而且永远不回到同一个方向。**始终过球心**（这是「有中心」）。
+ *
+ * 三层都不整除（轴的两个角 + 绕轴的转角），所以整套姿态永不循环；而它仍然是 `t` 的
+ * **纯函数** —— 静止一帧可复现，几何指纹仍然可断言。**不用噪声也不用随机数**：
+ * 那会让同一个 `t` 画出不同的帧，指纹就断言不了。
+ */
+export function wanderAxis(t: number): V3 {
+  const th = 1.05 + 0.66 * Math.sin(t * 0.083) + 0.32 * Math.sin(t * 0.137 + 1.1);
+  const ph = t * 0.047 + 0.90 * Math.sin(t * 0.061 + 2.3) + 0.40 * Math.sin(t * 0.113);
+  const st = Math.sin(th);
+  return v3(st * Math.cos(ph), st * Math.sin(ph), Math.cos(th));
+}
+
+/* 三层圆周运动的角速度都在 `TUNE`（`hubW` / `orbW` / `selfW`），因为使用者要自己调。
+   三个数**两两不许接近**：第一版给了 hubW 1.21 / orbW 1.22，两层几乎锁相，等于只有一层。
+   - `hubW` 整组的中心绕球心进动（**整组的位移这一层才有**）
+   - `orbW` 每片的片心绕整组中心公转
+   - `selfW` 片体绕自己的片心方向自转（**「米」字的笔画方向靠它转**）
+   使用者三次说「旋转速度有点慢」/「看不到亮片自由旋转」/「转动效果太卡顿，没有那种
+   360 度旋转的效果」。前两次我只加了后两层的速度 —— 而那两层都只改**局部**；第三次才
+   定位到缺的是**整组的位移**（`hubW`）。 */
+
+/** 绕漫游轴转过的角度。**角速度自己也在变**，所以「转」这件事没有固定的节拍 ——
+    匀速是机器感最直接的来源。`rate` 来自 `spinRate()`，按态变的那张表因此继续有效。 */
+export function wanderAngle(t: number, rate: number): number {
+  return t * (0.30 + rate * 1.35)
+    + 0.85 * Math.sin(t * 0.19)
+    + 0.42 * Math.sin(t * 0.29 + 0.7);
+}
+
+/** 六片的固定颜色。**这六个值由使用者直接指定**（2026-08-30）：
+    `FA0000` 正红 · `00FCC4` 青绿 · `8F65FB` 紫 · `C42DFF` 品红紫 · `FF42ED` 洋红 · `2F95D2` 蓝。
+
+    **它推翻了一条一直守着的约束，这里记下代价。** 此前 `error` 的朱红与 `gated` 的琥珀
+    「不参与配色取样」，理由是安全语义：出错与等你确认不许读作正常态。现在正常态里有了
+    一片正红（`FA0000` 比 error 的 `#c03818` 还要纯），所以静止一帧上 `error` 与其它态的
+    区分**变弱了** —— 它剩下的独占签名是「六片同色朱红 + skew 非零 + 横向抖动」。
+    `gated` 的琥珀 `#ffb454` 仍然不在这六色里，那一态的颜色语义没有被侵占。 */
+export const CHIP_TINTS: readonly string[] = [
+  '#FA0000', '#00FCC4', '#8F65FB', '#C42DFF', '#FF42ED', '#2F95D2',
+];
+
+/* 隐形内球的半径与碗的弯曲度都在 `TUNE`（`chipR` / `dish`）。
+   使用者的发现：「素材中的亮片无论如何旋转都在一个隐形的非球壳的固定球内部，亮片的
+   每一条边都贴着这个隐形的球边，所以显着对称、软润」，后来补充「**但是他的凸面并不贴着
+   隐形球，而是凹面对着球体外部**」。两句话合起来就是 `chipPoint()` 的模型：
+   ① 边严格在球面上（凹陷因子在边界恰好为 0）；② 片体本身朝球心凹（凹面朝外）；
+   ③ 边界曲率 = 球面曲率 ⇒ 对称、软润，不需要任何轮廓修饰。
+   `chipR` 走过 0.86 → 0.93 → 0.84（使用者标注图三写明「大概 7/8」）。 */
+
+export type Chip = {
+  /** 片体自己的正交基：`ex` 长轴、`ey` 短轴、`ez` 法向。XYZ 三轴的旋转都已经烘进它。 */
+  ex: V3; ey: V3; ez: V3;
+  /** 长半轴 / 短半轴（单位球的比例）。**六片同一个椭圆**，差异全在形变与姿态上。 */
+  ra: number; rb: number;
+  /** 片心在世界坐标里的位置（六片几乎重合，由 `TUNE.offBase` 控制散开多少）。 */
+  ctr: V3;
+  /** 沿长轴的**弯曲**（1/曲率半径，带符号）。0 = 平片。 */
+  bend: number;
+  /** 绕长轴的**扭曲**（rad / 单位长轴）。正负决定扭向，所以两片不会是同一个模子。 */
+  twist: number;
+  /** 固定颜色的下标（`CHIP_TINTS`），以及这一片当前的亮度系数。 */
+  tint: number; lit: number;
+  /** 片体最外端（长轴的一头）在投影面上的极坐标与深度 —— 球壳取色用它。 */
+  tipR: number; tipAng: number; tipZ: number;
+  /** 片体最外端的 3D 位置。球壳取色用三维距离，不是屏幕上的方位角差。 */
+  tip3: V3;
+};
+
+/** 这一态六片用哪些颜色。`thinking`（使用者定的靖紫）、`error`（朱红）、
+    `gated`（琥珀）三态六片同色 —— 前一个是选择，后两个是安全语义。 */
+export function chipTint(f: CoreFrame, i: number): string {
+  if (f.gated) return f.palette.far;      // gated 的四个色变量都是琥珀
+  if (f.state === 'error') return f.palette.far;
+  if (f.state === 'thinking') return f.palette.far;   // style.css 里 thinking 的 far = 靖紫
+  return CHIP_TINTS[i % CHIP_TINTS.length];
+}
+
+/** 每片的**随机种子**。使用者：「亮片的旋转是靠随机函数完全随机的，弯曲和扭曲也是使用
+    范围浮动数来定义的」。
+
+    **「完全随机」在这里必须落成「确定性的伪随机」，理由是技术性的而不是偷懒**：
+    `Math.random()` 每帧给一个新值 ⇒ 片体每帧跳到一个新姿态 ⇒ 那是**抖动**，不是旋转。
+    随机旋转要的是「一条看不出规律的**连续**曲线」，所以做法是：每片一组种子，用四条
+    互不整除的频率叠加出旋转角（见 `randRot`）。它同时保住了「静止一帧可复现」——
+    几何指纹与逐帧对照都靠这一条（从第九代守到现在）。
+
+    每组九个数：[基础角速度倍率, 三条摆动频率, 三条摆动相位, 扭曲系数, 弯曲系数]。
+
+    **第一列的六个倍率是从 AE 工程里解出来的**（`.aep` 是 RIFX 容器，自己写解析器读的）：
+    工程里六片的旋转表达式恰好是 `time*45+value` / `-time*30+value` / `time*80` /
+    `-time*45+value` / `time*30+value` / `-time*80`，也就是 **±30 / ±45 / ±80 度每秒**、
+    两个方向。以 45°/s（= 0.785 rad/s，`TUNE.selfW` 的默认值）为 1.0 归一化之后就是
+    1.000 / −0.667 / 1.778 / −1.000 / 0.667 / −1.778。
+    摆动频率对应工程里的 `wiggle(0.2, 10|15|30)` —— 频率 0.2 次/秒是三档共用的。
+    频率之间、以及与呼吸（1.57）和 hub 进动都不整除 ⇒ 六片的姿态组合永不重复。 */
+const CHIP_RND: [number, number, number, number, number, number, number, number, number][] = [
+  [ 1.000, 0.313, 0.171, 0.089, 0.00, 2.41, 4.77,  0.67, -1.00],
+  [-0.667, 0.227, 0.139, 0.061, 1.83, 5.02, 0.94, -0.52,  0.83],
+  [ 1.778, 0.181, 0.107, 0.073, 3.61, 1.28, 2.86,  0.91,  0.34],
+  [-1.000, 0.269, 0.157, 0.043, 5.24, 3.95, 1.52, -0.76, -0.73],
+  [ 0.667, 0.347, 0.121, 0.097, 2.07, 0.63, 5.41,  0.39,  1.00],
+  [-1.778, 0.203, 0.163, 0.051, 4.42, 2.74, 3.18, -1.00,  0.46],
+];
+
+/** 一片的「随机」旋转角 —— 四条互不整除的频率叠加。见 `CHIP_RND` 的注释：
+    它是 `t` 的连续纯函数，看不出规律，但同一个 `t` 永远给同一个角。 */
+function randRot(t: number, r: readonly number[], rate: number): number {
+  return r[0] * rate * t
+    + 1.15 * Math.sin(t * r[1] * 6.3 + r[4])
+    + 0.68 * Math.sin(t * r[2] * 6.3 + r[5])
+    + 0.34 * Math.sin(t * r[3] * 6.3 + r[6]);
+}
+
+/** 自然饱和度（Vibrance）。**工程实测 +60**（同一条链上还有 +30 / +100 / −20 / −52 几层）。
+    做法与 AE 的 Vibrance 同构：往「灰 → 原色」的方向外推，低饱和的像素提升得更多。 */
+function vibrance(css: string, k: number): string {
+  if (k <= 0.001) return css;
+  const m = /rgba?\(([^)]+)\)/.exec(css);
+  if (m === null) return css;
+  const a = m[1].split(',').map((v) => parseFloat(v));
+  const g = 0.2126 * a[0] + 0.7152 * a[1] + 0.0722 * a[2];
+  const f = (v: number): number => Math.round(Math.max(0, Math.min(255, g + (v - g) * (1 + k))));
+  return `rgb(${f(a[0])},${f(a[1])},${f(a[2])})`;
+}
+
+/** 曝光。使用者给了素材的物理环境截图：**曝光 2.00**、伽玛 1.00、色彩白、照明变化 0%。
+    落法就是把颜色整体乘上去再钳制 —— 过曝的部分自然往白里走，那正是「发光」的来相。 */
+function expose(css: string, k: number): string {
+  const m = /^#([0-9a-f]{6})$/i.exec(css);
+  const rgbm = /rgba?\(([^)]+)\)/.exec(css);
+  let r = 0, g = 0, b = 0;
+  if (m !== null) {
+    const n = parseInt(m[1], 16);
+    r = (n >> 16) & 255; g = (n >> 8) & 255; b = n & 255;
+  } else if (rgbm !== null) {
+    const a = rgbm[1].split(',').map((v) => parseFloat(v));
+    r = a[0]; g = a[1]; b = a[2];
+  } else {
+    return css;
+  }
+  const f = (v: number): number => Math.round(Math.min(255, v * k));
+  return `rgb(${f(r)},${f(g)},${f(b)})`;
+}
+
+/**
+ * 六片椭圆片的当前姿态。**第十代第三轮：模型从「隐形球面上的一块」换成「同一个椭圆片
+ * 各自在 XYZ 轴上扭曲 / 弯曲 / 旋转」** —— 使用者深察素材后给的定义，见 `CHIP_RND`。
+ *
+ * 换掉球面块的三个理由，前两个是它自己带来的病：
+ *   ① 球面块的「凹陷」（`dish`）越深，段的投影错位越大，而分段是为了做遮挡排序 ——
+ *      两者叠起来就是使用者三次点名的「一段一段的阶梯」。椭圆片不需要分段（见 `corolla`）。
+ *   ② 六片都贴同一个隐形球 ⇒ **共面** ⇒ 只能靠凹陷差制造相交，「中心重合」与「互相穿插」
+ *      因此一直在互相拉扯。椭圆片各自带 XYZ 旋转，天然相交。
+ *   ③ 素材的片体是同一个椭圆的六个形变副本，不是球面上的六块 —— 使用者的原话。
+ *
+ * **旋转的主轴是视线轴（面对摄像机）**：使用者「旋转方向是面对摄像机」。所以绕 Z 的自转
+ * 是主运动（那是「米」字在转），绕 X/Y 只是小幅慢摆，用来给出 3D 的进出感。
+ */
+export function chips(f: CoreFrame): Chip[] {
+  // **球膨胀时薄片不随之外扩。** 基准是 `bloomLevel()`（态的目标值），不吃当帧的呼吸
+  // 分量 —— 胀缩只走球壳，两者同步等于什么都没动（使用者点名纠正过）。
+  const b = bloomLevel(f);
+  const rg = ringAt(f);
+  const sk = skew(f);
+  const SPIN = wanderAngle(f.t, spinRate(f));
+  // 整组的中心：绕视线轴做进动（`hubTilt` 是锥角、`hubW` 是角速度）。
+  // 成环相收到 0 ⇒ 六片在平视面内绕球心转。
+  const hubA = TUNE.hubW * f.t + 0.42 * Math.sin(f.t * 0.19);
+  const hubR = TUNE.hubTilt * (1 + 0.33 * Math.sin(f.t * 0.23)) * (0.45 + 0.55 * b) * (1 - rg);
+  const hub = v3(Math.cos(hubA) * hubR, Math.sin(hubA) * hubR, 0);
+  const out: Chip[] = [];
+  for (let i = 0; i < 6; i++) {
+    const r = CHIP_RND[i];
+    const [, , , , , , , tw0, bd0] = r;
+    // 每片自己的形态相位（独立慢速率，不与球的呼吸同步；成环时收掉）
+    const own = clamp01(b + 0.12 * (1 - rg) * Math.sin(f.t * 0.31 + i * 1.9));
+
+    // ---- 姿态：绕 Z（面对摄像机）是主自转，绕 X / Y 是小幅慢摆 ----
+    // 三个角都走 `randRot`（四条不整除频率叠加）⇒ 看不出规律，但同一个 t 可复现。
+    // 使用者：「亮片的旋转是靠随机函数完全随机的」——`CHIP_RND` 的注释里记着为什么
+    // 不能真用 `Math.random()`（每帧新值 = 抖动，不是旋转）。
+    const spread = mix(TUNE.dirSpread, 0, rg);
+    const az = randRot(f.t, r, mix(1, 1, spread) * TUNE.selfW) * mix(1, 1, 1) + SPIN * 0.42;
+    // 成环相归零（那一相要求六片在平视面内、形态完全统一）
+    const ax = TUNE.tiltXY * Math.sin(f.t * r[1] * 6.1 + r[4]) * (1 - rg);
+    const ay = TUNE.tiltXY * Math.sin(f.t * r[2] * 6.1 + r[5]) * (1 - rg);
+    // 基：从 (x,y,z) 单位基出发，绕 Z→X→Y 依次旋转
+    let ex = v3(Math.cos(az), Math.sin(az), 0);
+    let ey = v3(-Math.sin(az), Math.cos(az), 0);
+    let ez = v3(0, 0, 1);
+    // 绕 ex 转 ax（把 ey/ez 转出屏幕平面）
+    const cx = Math.cos(ax), sx = Math.sin(ax);
+    [ey, ez] = [vadd(vmul(ey, cx), vmul(ez, sx)), vadd(vmul(ez, cx), vmul(ey, -sx))];
+    // 绕 ey 转 ay
+    const cy = Math.cos(ay), sy = Math.sin(ay);
+    [ez, ex] = [vadd(vmul(ez, cy), vmul(ex, sy)), vadd(vmul(ex, cy), vmul(ez, -sy))];
+    ex = vnorm(ex); ey = vnorm(vsub(ey, vmul(ex, vdot(ey, ex)))); ez = vcross(ex, ey);
+
+    // ---- 尺寸：同一个椭圆，长短半轴由聚合度给；每片再乘自己的大小倍数 ----
+    const ra = mix(mix(TUNE.ellA * 0.72, TUNE.ellA, own), TUNE.ellA * 0.30, rg)
+      * mix(SCALE[i], 1, rg) * (1 + sk * Math.cos(i * 1.047 + SPIN));
+    const rb = ra * mix(TUNE.ellB * 0.86, TUNE.ellB, own) * (1 + 0.30 * rg);
+
+    // ---- 形变：**范围浮动**（使用者：「弯曲和扭曲也是使用范围浮动数来定义的」）----
+    // 每片一个带符号的基础系数（`CHIP_RND` 的后两个数），再在 ±70% 的范围内随时间浮动，
+    // 浮动频率与自转、公转、呼吸都不整除 ⇒ 同一片在一轮里会从「几乎平」走到「弯到 86°」。
+    // ---- 形变：**单位是「度」，数值直接来自工程** ----
+    // AE 工程里 E3D 的 Deform 面板实测：扭曲 X = −10.41°（`wiggle(0.2,15)`）、扭曲 Y = −21°、
+    // 弯曲角度 = −50.76°（`wiggle(0.2,15)`，2 个关键帧）、弯曲方向 = −33.69°。
+    // `wiggle(0.2,15)` 的 15 是**绝对度数**，不是百分比 —— 所以浮动量对弯曲是 ±30%、
+    // 对扭曲是 ±71%，两者差很多，用一个相对比例表达不了。
+    // **我此前的量纲整个偏了**：bend 2.6 换算出来是最大 86°（实际 50.8°），
+    // twist 2.4 是 92°（实际 21°）—— 扭曲大了四倍多。
+    const wob = (deg: number, ph: number, fr: number): number =>
+      (deg + TUNE.wig * Math.sin(f.t * 1.26 * fr * 3.2 + ph)) * Math.PI / 180;
+    // `chipPoint` 里 `phi = x·k`、`x` 到 `±ra`，所以总角 = 2·ra·k ⇒ k = 角/(2·ra)
+    const bnorm = Math.max(0.1, ra) * 2;
+    const twist = wob(TUNE.twist * tw0, r[6], r[1]) / bnorm * (1 - 0.8 * rg);
+    const bend = wob(TUNE.bend * bd0, r[4], r[2]) / bnorm * (1 - 0.8 * rg);
+
+    // ---- 片心：六片几乎重合（`offBase`），成环相推到一圈上 ----
+    const oa = SPREAD[i] + mix(1, r[0], spread) * TUNE.orbW * f.t;
+    const oamt = mix(TUNE.offBase * (0.72 + 0.28 * b) * LEAN[i], 0.56, rg);
+    const ctr = vadd(hub, v3(Math.cos(oa) * oamt, Math.sin(oa) * oamt, 0.10 * Math.sin(oa * 1.7 + i)));
+
+    const c: Chip = {
+      ex, ey, ez, ra, rb, ctr, bend, twist,
+      tint: i,
+      // 片体越正对观察者越亮（`|ez.z|`→1 = 正对）。下限 0.42：转到侧面时投影收窄成一条线，
+      // 再暗下去整片就没了，而使用者要「每一个亮片都可见」。
+      lit: 0.42 + 0.58 * Math.abs(ez.z) * (0.62 + 0.38 * own),
+      tipR: 0, tipAng: 0, tipZ: 0, tip3: ctr,
+    };
+    const tip = chipPoint(c, 1, 0);
+    c.tip3 = tip;
+    c.tipR = Math.hypot(tip.x, tip.y);
+    c.tipAng = Math.atan2(tip.y, tip.x);
+    c.tipZ = tip.z;
+    out.push(c);
+  }
+  return out;
+}
+
+/**
+ * 椭圆片上的一点。`u` ∈ [−1,1] 沿长轴、`v` ∈ [−1,1] 沿短轴，**边界是 u²+v²=1 的椭圆**。
+ *
+ * 三步形变，次序固定（换次序等于换形状）：
+ *   ① 椭圆：`(u·ra, v·rb, 0)`
+ *   ② **弯曲**：沿长轴弯成一段圆弧（`bend` = 1/曲率半径，带符号）
+ *   ③ **扭曲**：绕长轴按 x 扭转（`twist`，带符号）—— 于是片体的两头朝向不同的方向
+ * 最后旋转到 `(ex, ey, ez)` 并平移到片心。
+ *
+ * **厚度可忽略**（使用者原话），所以没有侧边、没有背面 —— 一张纸。
+ * 轮廓天然是一条光滑闭合曲线（椭圆的形变像），所以不需要任何轮廓修饰：
+ * 球面块那一代要靠包络指数、半圆帽去修「折角」和「圆角方块」，这里一个都不需要。
+ */
+export function chipPoint(c: Chip, u: number, v: number): V3 {
+  const x = u * c.ra;
+  const y = v * c.rb;
+  // ② 弯曲：把长轴方向弯成圆弧。bend→0 时退化为直线（下面的极限展开）
+  let px = x, pz = 0;
+  const k = c.bend;
+  if (Math.abs(k) > 1e-4) {
+    const phi = x * k;
+    px = Math.sin(phi) / k;
+    pz = (1 - Math.cos(phi)) / k;
+  } else {
+    pz = 0.5 * k * x * x;   // 二阶极限，避免 1/k 爆掉
+  }
+  // ③ 扭曲：绕长轴（局部 x）按 x 扭转，作用在 (y, z) 上
+  const tw = x * c.twist;
+  const ct = Math.cos(tw), st = Math.sin(tw);
+  const yy = y * ct - pz * st;
+  const zz = y * st + pz * ct;
+  return vadd(
+    c.ctr,
+    vadd(vadd(vmul(c.ex, px), vmul(c.ey, yy)), vmul(c.ez, zz)),
+  );
+}
+
+/** 曲面在 (u,v) 处的法向：两个方向的偏导叉乘（数值差分）。弯曲与扭曲之后法向逐点不同，
+    那正是片体内部明暗的来源 —— 没有它，一张纸就只有一个色。 */
+export function chipNormal(c: Chip, u: number, v: number): V3 {
+  const h = 0.02;
+  const du = vsub(chipPoint(c, Math.min(1, u + h), v), chipPoint(c, Math.max(-1, u - h), v));
+  const dv = vsub(chipPoint(c, u, Math.min(1, v + h)), chipPoint(c, u, Math.max(-1, v - h)));
+  const n = vcross(du, dv);
+  const len = Math.hypot(n.x, n.y, n.z);
+  if (len < 1e-9) return c.ez;
+  const nn = vmul(n, 1 / len);
+  return nn.z < 0 ? vmul(nn, -1) : nn;   // 一张纸没有背面，法向统一朝观察者一侧
+}
+
+/**
+ * **黑色线性雾**（使用者给了素材的雾参数截图：黑、不透明度 100%、线性衰减）。
+ * 返回 0（无雾）–1（全黑）。
+ *
+ * 这一项解开了纠缠好几轮的一个死结：使用者说「在素材中被遮挡的部分几乎就不可见了」，
+ * 我先按**不透明遮挡**去实现（`source-over` + 分段深度排序），结果分段带来了阶梯，
+ * 而阶梯又没法在半透明下消掉。**素材根本不是遮挡，是雾**：远处的片被黑雾吞掉，
+ * 而合成是加色 —— 加色里「黑」就等于「不贡献」，所以远的片自然消失、近的片照常发亮。
+ * 于是片体可以整片一次 fill（无分段 ⇒ 无阶梯）、合成可以回到 `lighter`（发光感回来）。
+ */
+export function fogAt(z: number): number {
+  const t = (TUNE.fogNear - z) / Math.max(1e-3, TUNE.fogRange);
+  return clamp01(t);
+}
+
+/** 世界光向（3D）。所有薯片迎同一束光 —— 这是「一叠曲面」与「一堆色斑」的区别。 */
+const LIGHT3 = vnorm(v3(-0.42, -0.56, 0.72));
+
+/** 雾色。**纯黑** —— 工程实测 `雾颜色 = [0,0,0,1]`、雾不透明度 100、衰减类型 1（线性）。
+    教程正文写的是「深紫色或背景色」，而工程里是黑；**以工程为准**。 */
+const FOG_TINT = '#000000';
+
+/** 球壳的角向段数。144 段 × 每段横跨 2 段宽 ⇒ 每一点被两三段覆盖，段界看不出来。 */
+const SHELL_SEG = 144;
+
+
+/**
+ * 球壳每一段的颜色与亮度：**哪个薯片离球壳这一段最近，就染它的颜色，越近越亮。**
+ * 使用者点名的机制，也是素材外沿左侧偏粉紫、右侧偏青蓝的原因。
+ *
+ * **判定是 3D 的，不是方位角差。** 使用者：「球的边并不是简单的平面轮廓的渲染，
+ * 而是整个球壳的 3D 渲染」。上一版拿「方位角差 × 径向距离 × 深度乘数」三个 2D 量
+ * 凑出一个权重 —— 那是在屏幕平面上比远近，所以球背面的片只要方位对得上就会把颜色
+ * 染到前面的球沿上。现在直接算**球壳上那一点**与**片体外端**的三维欧氏距离：
+ * 球壳这一段所在的 3D 点取该方位的 limb（视线与球面相切处，`z = 0` 的大圆上），
+ * 那正是这一段之所以看得见的地方。背面的片 `tip3.z ≈ −0.9`，到 limb 点的距离因此
+ * 天然就远，不需要再乘一个深度惩罚项。
+ *
+ * **返回最近的两片与它们的混合比。** 只取最近那一片时颜色沿圈是阶梯（一段青、下一段
+ * 突然紫），此前靠一层层加宽加淡的描边把阶梯糊掉 —— 那正是使用者点名的「高斯模糊」，
+ * 而且糊掉的同时也糊掉了边界本身。取两片插值之后颜色沿圈连续过渡，随六片旋转整条
+ * 彩带就沿着球沿流动（使用者要的「流边」）。
+ *
+ * 返回 n 段的 `{ta, tb, w, k}`：`ta`/`tb` 是两片的颜色下标、`w` 是 `tb` 的占比、
+ * `k` ∈ [0,1] 是该段的亮度权重。
+ */
+export function shellSegments(f: CoreFrame, n = 48): { ta: number; tb: number; w: number; k: number }[] {
+  const cs = chips(f);
+  const out: { ta: number; tb: number; w: number; k: number }[] = [];
+  for (let i = 0; i < n; i++) {
+    const ang = (TAU * i) / n;
+    // 球壳这一段的 3D 位置：limb 在 z=0 的大圆上，半径取球壳所在的 0.95
+    const px = Math.cos(ang) * 0.95, py = Math.sin(ang) * 0.95;
+    let a = -1, aw = 0, b = -1, bw = 0;
+    for (const c of cs) {
+      // **三维距离。** 0.98 是「多远之外就不算贴着这一段」——
+      // 片体外端在 `CHIP_R`=0.84 的球面上、limb 点在 0.95 的大圆上，两者最近 ~0.11、
+      // 最远（正对面）1.79。阈值配合**五次幂**：`CHIP_R` 从 0.93 收到 0.84 之后所有片的
+      // 外端都离球壳远了一截，用原来的 1.15 + 三次幂时每个方位都有片够得着 ⇒ 整圈等亮
+      // ⇒ 加上段间重叠与 `lighter`，球沿饱和成**一圈纯白的线**（截图上非常刺眼）。
+      // 对比度必须由权重曲线给，不能靠 alpha 系数压 —— 压 alpha 只会让整圈一起变暗。
+      const d = Math.hypot(c.tip3.x - px, c.tip3.y - py, c.tip3.z);
+      const u = Math.max(0, 1 - d / TUNE.shellReach);
+      const w = Math.pow(u, TUNE.shellPow) * c.lit;   // 幂次越大 ⇒ 只有真的贴着这一段才亮
+      if (w > aw) { bw = aw; b = a; aw = w; a = c.tint; }
+      else if (w > bw) { bw = w; b = c.tint; }
+    }
+    out.push({
+      ta: a < 0 ? 0 : a,
+      tb: b < 0 ? (a < 0 ? 0 : a) : b,
+      // 次近那片的占比。封到 0.5：它是「过渡」，不该盖过最近那片
+      w: aw > 0 ? Math.min(0.5, bw / (aw + bw)) : 0,
+      k: clamp01(aw * 2.6),
+    });
+  }
+  // **亮度必须角向平滑，否则读作一串亮点。** 使用者在球的左沿圈出的那串红点就是
+  // 分段亮度跳变：相邻段的「最近的片」可能不同，权重差一档，独立的每段于是变成一串
+  // 亮点。五点移动平均（环形）把它抹成一条连续的边。
+  // 混合比 `w` 走同一条平滑：不平滑的话颜色过渡本身又成了阶梯。
+  const raw = out.map((o) => o.k), rw = out.map((o) => o.w);
+  for (let i = 0; i < n; i++) {
+    let acc = 0, accw = 0;
+    for (let d = -2; d <= 2; d++) {
+      const g = d === 0 ? 3 : d === 1 || d === -1 ? 2 : 1;
+      acc += raw[(i + d + n * 2) % n] * g;
+      accw += rw[(i + d + n * 2) % n] * g;
+    }
+    out[i].k = acc / 9;
+    out[i].w = accw / 9;
+  }
+  return out;
+}
+
 /**
  * 花瓣的柔边轮廓(单位:len / wid)。**一头收窄、一头饱满的弯曲叶片**:
  * 尖端在原点、最宽处落在 `waist`、圆头在 (len, 0),中轴被弯成一条不对称的弧。
@@ -768,6 +1413,9 @@ export class CorollaBreath {
   private readonly ctx: CanvasRenderingContext2D;
   private css = 0;
   private dpr = 0;
+  /** 后期辉光用的离屏画布（按尺寸复用，不每帧新建）。见 `glowPass()`。 */
+  private gl: HTMLCanvasElement | null = null;
+  private glCtx: CanvasRenderingContext2D | null = null;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     this.ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
@@ -785,6 +1433,15 @@ export class CorollaBreath {
     this.dpr = dpr;
     this.canvas.width = px;
     this.canvas.height = px;
+  }
+
+  /** 清空画布，什么都不画。给「没有待机形态」用 —— `idle` 时球不该存在于屏幕上，
+      而 `draw()` 的 `idle` 是一颗正常的球。序列层资产加载完成之前走的是这条退路，
+      不清的话球会在启动的那几百毫秒里闪一下待机形态。 */
+  clear(): void {
+    if (!this.ctx) return;
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
   }
 
   draw(f: CoreFrame): void {
@@ -809,14 +1466,62 @@ export class CorollaBreath {
     // 是半径的 3.3% —— 边界是一条在流动的液面,所以裁剪路径本身就得会流动。
     this.contour(R, f);
     ctx.clip();
+    // **球内的颜色由薯片渲染。** 顺序：不透明的深底 → 每片染球内一大片 →
+    // 六片薯片本体（深度排序、source-over、alpha 封顶）→ 极淡的中心 → 球壳。
     this.body(R, f);
-    this.volume(R, f);
     this.corolla(R, f);
     this.hotCore(R, f);
-    this.film(R, f);
+    this.shell(R, f);
     this.pulse(R, f);
     ctx.restore();
+    // **后期辉光**：整幅糊开一层加回去。AE 流程的最后一步是在**调整图层**上加
+    // Deep Glow / Glow —— 也就是说「发光」作用在**合成结果**上，不是材质属性。
+    // 我此前一直在让材质自己发亮，方向是反的。放在 `gate()` 之前：闸门那道琥珀
+    // 是安全语义，不该被辉光洗掉。
+    this.glowPass(px, R);
     this.gate(R, f);
+  }
+
+  /**
+   * **多档模糊副本叠加** —— 这一层是「整个球的感觉」的主要来源。
+   *
+   * 使用者的 AE 工程里挂着**六档**高斯模糊：30 / 57 / 80 / 111 / 150 / 200，每档是同一组
+   * 片体的一个副本，各自模糊不同的量、各自的 Vibrance 也不同（+60 / +30 / +100 / −20 / −52），
+   * 叠成一团有层次的光雾。我此前只有**一档** `blur(0.085R)` —— 那是「给球加了点发光」，
+   * 不是「球本身是一团有层次的光」。
+   *
+   * 它顺带解决了球沿那条「流边」：**工程里没有「球壳」这个物体**。球沿的彩带是**片体
+   * 自己的边缘**被大半径模糊糊出轮廓之后的样子。我之前画的那条 1–2px 描边无论怎么调都
+   * 长不成那个形状 —— 那是**结构错误，不是参数错误**。现在最宽那一档（2.6 × glowR）会把
+   * 片体边缘糊到球沿之外，彩带因此是「哪片离得近就在那一段染它的色」的自然结果。
+   *
+   * 三档而不是六档：每档一次 `ctx.filter` 赋值 + 一次带 filter 的 drawImage，而 filter 在
+   * Chromium 上逐次分配离屏 surface（`shell()` 那一版每帧 192 次，那就是卡顿的主因）。
+   * 三档 = 3 次/帧，视觉差别远小于代价差别。 */
+  private glowPass(px: number, R: number): void {
+    if (TUNE.glow <= 0.001 || px < 8) return;
+    const { ctx } = this;
+    if (this.gl === null || this.gl.width !== px) {
+      this.gl = document.createElement('canvas');
+      this.gl.width = px; this.gl.height = px;
+      this.glCtx = this.gl.getContext('2d');
+    }
+    const g = this.glCtx;
+    if (g === null) return;
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, px, px);
+    g.drawImage(this.canvas, 0, 0);
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'lighter';
+    // [半径倍数, 权重]。半径按工程那六档的比例取三个代表值（近 / 中 / 远）。
+    for (const [rk, wk] of [[0.34, 0.52], [1.00, 0.34], [2.60, 0.20]] as [number, number][]) {
+      ctx.globalAlpha = clamp01(TUNE.glow * wk);
+      ctx.filter = `blur(${Math.max(0.3, R * TUNE.glowR * rk).toFixed(2)}px)`;
+      ctx.drawImage(this.gl, 0, 0);
+    }
+    ctx.filter = 'none';
+    ctx.restore();
   }
 
   /** 球外的光。**沿液面轮廓**向外羽化,所以它和球是同一个形状 ——
@@ -890,28 +1595,52 @@ export class CorollaBreath {
   /** 球体底色,**不随态变**。参考实测 r=0.91 只剩峰值的 3.9%、r=1.00 是 0.4%,
       所以**最外圈必须淡出到透明**,不能像上一版那样把 `edge` 压在 stop 1 上 ——
       那等于画了一圈暗描边,而暗描边和亮描边一样是「精确球壳」的长相。
-      最暗的一档移到 0.88(边界之内),边界本身交给液面轮廓的裁剪。 */
+  /**
+   * 球内。**这一层不再是「固定底色」。** 使用者第二轮的更新：「应该就去除掉明确
+   * 固定底色的概念了，球体内的颜色应由薯片颜色而渲染」。
+   *
+   * 两件事：
+   *   ① 一层**不透明的深底**（`--glass`，六态共用不随态变）。球必须不透明 ——
+   *      使用者第一条：「实体演示时，透明的底色是一个大的减分项」。
+   *   ② 每片薯片在它自己的方位上染**球内一大片**（选项 ④），按深度从远到近叠。
+   *      于是球内是一张随薯片转动而变的色彩图，而不是一个静的底色。
+   *
+   * **球内不许过亮。** 每斑 alpha ≤ 0.13、用 `source-over`（不是 `lighter`）——
+   * 使用者第三条圈的就是球内的过曝与反光。加色合成的本质是往过曝走，所以球内整条
+   * 链路都不用它；只有球壳那一层允许加色（那里「越近越亮」是要的）。
+   */
   private body(R: number, f: CoreFrame): void {
     const { ctx } = this;
     const b = bloomAt(f);
-    // **渐变原点回到球心**(原来偏在左上 −0.24R,−0.32R)。那个偏心 + 一点白
-    // 就是「一个会反光的玻璃球壳」的全部来源 —— 使用者点名要删的正是它。
-    // 偏心一去,球体不再有受光方向,它只是一层几乎看不见的散射。
-    // 亮片自己的迎光高光**保留**:那是「亮片是弯曲面而不是平贴纸」的唯一证据
-    // (实测横向亮度梯度占比 0.254,纯径向渐变该≈0)。
-    const g = ctx.createRadialGradient(0, 0, R * 0.06, 0, 0, R * 1.02);
-    g.addColorStop(0.62, f.palette.glass);
-    g.addColorStop(0.97, f.palette.edge);
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    // 玻璃盘的**可见半径随聚合度长**。素材实测边缘半径在一轮里走 0.00→0.94,
-    // 而上一版这里画的是一个固定大小的灰盘 —— 并排看最明显的一处:我的球
-    // 「多大」几乎不随 agg 变,而素材的球会真的胀缩。等效半径高出 0.09 也来自这里。
-    ctx.globalAlpha = clamp01(0.30 + b * 0.70);
-    this.contour(R, f, 0.62 + b * 0.38);
+    // ① 不透明深底。明度随呼吸 ±8%（使用者第一轮选的「会呼吸的有色玻璃」——
+    //    底色不再随态变，但它仍然跟着呼吸起伏，所以整颗球在呼吸而不只是里面的光）。
+    const breathe = 1 + 0.08 * Math.sin(f.t * breathRate(f));
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = blend('#16233f', f.palette.glass, clamp01(0.74 * breathe));
+    this.contour(R, f, 1.0);
     ctx.fill();
+    // ② 每片染球内一大片。位置在该片外端的方位上、半径很大、边界完全羽化。
+    const cs = chips(f);
+    const order = cs.map((_, i) => i).sort((a, b2) => cs[a].tipZ - cs[b2].tipZ);
+    for (const i of order) {
+      const c = cs[i];
+      const cx = Math.cos(c.tipAng) * c.tipR * 0.62 * R;
+      const cy = Math.sin(c.tipAng) * c.tipR * 0.62 * R;
+      const rad = R * mix(0.52, 0.86, b);
+      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
+      const tone = chipTint(f, c.tint);
+      for (let s = 0; s <= 4; s++) {
+        const u = s / 4;
+        g.addColorStop(u, alpha(tone, Math.exp(-2.2 * u * u)));
+      }
+      ctx.globalAlpha = clamp01(0.16 * c.lit * (0.45 + 0.55 * b));
+      ctx.fillStyle = g;
+      this.contour(R, f, 1.0);
+      ctx.fill();
+    }
     ctx.globalAlpha = 1;
   }
+
 
   /**
    * 液态流动带 —— 这一代**取代球壳**的那一层。参考素材的径向亮度剖面在
@@ -943,7 +1672,12 @@ export class CorollaBreath {
     const k = (b - 0.22) / 0.78;
     ctx.save();
     ctx.globalCompositeOperation = f.gated || f.state === 'cancelled' ? 'source-over' : 'lighter';
-    ctx.filter = `blur(${(R * 0.05).toFixed(2)}px)`;
+    // **模糊已删，改用第四档更宽更淡的描边。** 这一层本来就是「同心、宽度递增、
+    // alpha 递减的描边叠加」，横截面已经是一条钟形 —— 那条 `blur(0.05R)` 是保险，
+    // 而它的代价是**每段一次离屏 surface**：48 段 × 3 档 = 144 次带 filter 的 stroke，
+    // 与 `shell()` 的 192 次一起构成使用者报的「转动效果太卡顿」。纯 stroke 是 GPU
+    // 直接画，带 filter 的 stroke 每次都要 SkImageFilter 分配临时位图。
+    // 补第四档（0.46R / alpha 0.14）之后横截面比原来更平滑，边界仍然无可描。
     // 带宽 0.21R 而不是 0.155R:素材的软边带覆盖 r=0.66→0.79(宽约 0.13R 的**峰**,
     // 但它两侧的肩一直铺到 0.61–0.83)。带子加宽之后它才真的承担外圈的亮度权重 ——
     // 逐帧实测等效半径量程从 0.376–0.439 打开(素材 0.00–0.544)。
@@ -952,7 +1686,7 @@ export class CorollaBreath {
     // 等宽带在低透明度下仍有两条可辨的边，叠三档之后横截面是一条平滑的钟形，
     // 没有边界可描。模糊也从 0.03R 提到 0.05R。
     ctx.strokeStyle = f.palette.far;
-    const bands: [number, number][] = [[0.16, 1.0], [0.27, 0.55], [0.38, 0.24]];
+    const bands: [number, number][] = [[0.14, 1.0], [0.24, 0.62], [0.34, 0.34], [0.46, 0.14]];
     for (let i = 0; i < seg; i++) {
       const a0 = (TAU * i) / seg, a1 = (TAU * (i + 1.06)) / seg;
       const a = (a0 + a1) / 2;
@@ -984,7 +1718,6 @@ export class CorollaBreath {
       }
     }
     ctx.restore();
-    ctx.filter = 'none';
   }
 
   /** 体积光:高聚合时**整个玻璃体都在发光**,不只是中心。
@@ -1024,176 +1757,212 @@ export class CorollaBreath {
       所以收窄的那一头永远朝内。填充用沿花瓣长轴的径向渐变(实色到 78%,外沿柔化),
       叠加用 `lighter`:光叠加就是变亮,几片挤到一起中心自然过曝 —— 那团白不是画上去的。
       cancelled 与 gated 例外用 `source-over`:一团垮掉的光和一道闸都不该过曝。 */
+  /**
+   * 六片 3D 薯片。**第十代把 2D 卵形换成了真正的曲面投影。**
+   *
+   * 每片切成 `SEG × 2` 个四边形逐个填充，每个四边形的亮度由它自己的**法向与光向的
+   * 点积**决定 —— 所以片体内部的明暗是真实的曲面明暗，不是一层贴上去的渐变。
+   * 轮廓由四边形边界自然形成，**清楚、不模糊**：看过 360px 原始帧之后确认素材的片体
+   * 边界就是一条清楚的曲线（此前一直在给它加模糊、去实色平台，方向是反的）。
+   *
+   * 合成用 **`lighter`（加色），但单片 alpha 压到 0.13**。这两句必须一起读：
+   * 使用者要「以中心点进行的高度重叠」产生的亮中心，同时要「球体内不会有过亮的颜色」。
+   * `source-over` 那一版做不到前者 —— 半透明叠加是**加权平均**，六片叠起来只会趋向
+   * 最后画的那片的颜色，不会变亮，所以中心永远出不来。加色才会累积。
+   * 「不过亮」因此靠**单片封顶**：0.13 × 6 层 = 0.78，中心亮而不是纯白；
+   * 而只有一两片交叠的地方（0.26）仍然是通透的色。
+   */
   private corolla(R: number, f: CoreFrame): void {
     const { ctx } = this;
-    const rg = ringAt(f);
-    // 成环时**只用主簇一个色**。素材成环相实测只剩**单一色相簇(245°)**,
-    // 而上一版按 TINT_ORDER 轮转,画出来是蓝/粉交替 —— 使用者问「形态颜色和素材
-    // 一致吗」,不一致的就是这一处:交替配色本身就在说「这些元素不一样」。
-    // 成环相不走这张表(每片按 `mixK` 在青→磁之间自己取值,见下面的 `tone`)。
-    const tints = [f.palette.far, f.palette.mid, f.palette.alt];
-    const flat = f.gated || f.state === 'cancelled';
-    // alpha 随聚合度**反向**收:片体越宽、交叠越多,单片就得越淡,
-    // 否则高聚合相整颗球烧成白团 —— 参考在 0.983 仍能看见蓝/粉分片
-    const b0 = bloomAt(f);
-    // 合拢时 n 片挤在 42° 里,交叠面积暴增 —— alpha 再收一档,否则一叠片烧成白刀。
-    // 这和随聚合度反向收是同一个道理的两个来源:交叠多了单片就得淡
-    // 反向系数 0.11 → **0.16**:listening 的 bloom 到 0.902,三格验收页上它整颗烧成
-    // 一团青白、片体全被吞掉。片体越宽、交叠越多,单片就得越淡 —— 这一项就是那个补偿
-    // **反向补偿必须是二次的,不是线性的。** 交叠的片数不随 bloom 线性长:高聚合时
-    // 七片全部穿过球心,球心处是 7 层相加,而中聚合时只有两三层。线性补偿(0.16·b0)
-    // 在 listening(bloom 0.902)仍然把整颗球烧成青白、片体全被吞掉 —— 验收页上
-    // 连着两轮都是这一格出问题。二次项只咬高聚合那一段:b0=0.90 时收 0.163,
-    // b0=0.52(idle)只收 0.054,中低聚合几乎不动
-    // **补偿要咬「这一态有多聚合」,不能咬「这一帧有多聚合」。** 用 b0(含呼吸)那一版
-    // 把 listening 的能量摆动从 4.5× 压到 **1.33×** —— 因为呼吸让 b0 涨时 alpha 正好
-    // 同步跌,补偿把呼吸本身抵消掉了,球退回一张贴图。改用 bloomLevel()(不含呼吸的
-    // 目标值)之后:静态过曝照旧被压住(listening 常数 0.127),而呼吸的明暗摆动
-    // 完全不受影响。**看起来像取舍的东西,先问它是不是键错了量。**
-    const bl = bloomLevel(f);
-    // 成环时**不再收 alpha**:上一版收 34% 是因为 n 片叠在一起要防过曝,
-    // 而现在它们互不重叠,收 alpha 只会让整圈变灰。反过来略抬一点 ——
-    // 单片不再有邻居帮它加亮,素材的散开相是**一圈明亮的分离亮片**。
-    // 成环时 alpha **往上抬 0.9 倍**:素材的散开相是一圈**明亮的**分离亮片
-    // (等效半径 0.680,是它全轮的最大值),而单片不再有邻居帮它加亮,
-    // 不抬的话整圈读作一圈灰色的碎片
-    // 成环时 alpha **抬到 3.4 倍**。这不是审美裁量,是实测:成环相里**整帧的最亮点
-    // 就在这些分离的小片上**(块峰值/帧峰值 = 0.93–1.00),而中心是暗的。
-    // 上一版抬 1.9 倍画出来是一圈灰蓝碎片 —— 那是「散开了但没亮」,与素材相反。
-    let base = (flat ? 0.40 : (0.29 - 0.20 * bl * bl) + f.amplitude * 0.05) * (1 + 2.4 * rg);
-    // 多朵向中心收拢的途中,N 朵会逐渐叠在一起 —— 不补偿的话「收缩」看起来是
-    // 「先变亮再变暗」而不是「聚到一起」。按朵数与合拢度补一次。
-    const nb = blobCenters(f).length;
-    if (nb > 1) base /= 1 + (nb - 1) * rg * 0.8;
-    const half = outlineHalf();
+    const cs = chips(f);
+    ctx.save();
+    // **加色（Screen / Add）。** 使用者给出的 AE 流程写明：E3D 材质的混合模式是
+    // 「屏幕 (Screen) 或 添加 (Add)」。上一版改成半透明覆盖是我猜错了 —— 猜的理由是
+    // 「加色会奔向白，看不清本身颜色」，而**真正让颜色保得住的不是覆盖，是下面那张
+    // 羽化 Alpha**：片体只有中心实、边缘一路羽化到透明，所以两片交叠时叠亮的只有很小
+    // 的一块，其余是各自的渐隐区。均匀 alpha 的加色才会整片奔白。
+    ctx.globalCompositeOperation = 'lighter';
+    for (const c of cs) {
+      const tone = chipTint(f, c.tint);
+      const n0 = chipNormal(c, 0, 0);
+      // 受光：迎光程度 × 正对观察者的程度。E3D 那边「光泽度 = 0」，所以没有镜面高光，
+      // 只有柔和的漫射 —— 这里也不加高光。
+      const lam = (0.42 + 0.58 * Math.abs(vdot(n0, LIGHT3))) * (0.62 + 0.38 * Math.abs(n0.z));
+      const lv = clamp01(lam * c.lit * TUNE.opacity * 1.35);
+      const lit = blend(tone, '#ffffff', TUNE.tintLit * lv);
+      const body = blend('#0a0f1c', lit, clamp01(1 - (1 - lv) * TUNE.tintDim));
+      // 雾：**深紫（背景色），不是纯黑** —— AE 流程里「雾的颜色设为深紫色或背景色」。
+      const mid = vibrance(expose(blend(body, FOG_TINT, fogAt(chipPoint(c, 0, 0).z)), TUNE.exposure), TUNE.vibrance);
 
-    for (const c of blobCenters(f)) {
-      ctx.save();
-      ctx.translate(c.cx * R, c.cy * R);
-      ctx.globalCompositeOperation = flat ? 'source-over' : 'lighter';
-      // 模糊半径按 R 的比例给:1× 与 2× 屏上柔化程度才一致。
-      // 没有这一层,花瓣的轮廓就能被眼睛描出来,那时它是图形不是光
-      // 0.014 而不是 0.020:圆润靠轮廓的数学(端点指数 0.5)而不是靠糊,
-      // 糊过头片体的边界就读不出来了 —— 参考的透镜片是有边的
-      ctx.filter = `blur(${(R * 0.012).toFixed(2)}px)`;
-      for (const p of petals(f)) {
-        const len = p.len * c.scale * R;
-        const wid = p.wid * c.scale * R;
-        if (len < 1 || wid < 0.5) continue;
-        ctx.save();
-        ctx.rotate(p.angle);
-        if (p.tilt > 0.001) {
-          // 成环相:先走到元素**中心**,再把片体自转到切向,再把轮廓的原点挪回去
-          // (`petalOutline` 是从 0 画到 len 的,不是以中心为原点)。
-          ctx.translate((p.off + p.len / 2) * c.scale * R, 0);
-          ctx.rotate(p.tilt);
-          ctx.translate(-len / 2, 0);
-        } else {
-          ctx.translate(p.off * c.scale * R, 0);
-        }
-        // 只在最里 26% 是实色,其余一路羽化到透明 —— 花瓣是一团光,不是一块色片。
-        // 上一版实色到 78%,渲染出来是七片硬边的矢量花瓣
-        // 实色到 46%、其余羽化到透明:再软一档花瓣就数不出来了,再硬一档就读作矢量花瓣。
-        // 这两个极端各渲染过一次,0.46 是中间那一档
-        //
-        // **焦点横跨短轴偏向迎光侧**(第九代):世界光向 LIGHT 恒定,换到这一片的局部
-        // 坐标就是 LIGHT − p.angle,所以每片的高光位置各不相同、但都朝着同一个方向 ——
-        // 这正是「一叠迎同一束光的弯曲面」与「一堆各自带渐变的色斑」的区别。
-        // 参考素材实测亮度梯度的横向分量占比 0.271(散开相 0.48–0.54),
-        // 而同心径向渐变的横向分量≈0,上一版就是那样,所以片体读作平的。
-        const la = LIGHT - p.angle;
-        const lx = Math.cos(la), ly = Math.sin(la);
-        // 横跨短轴的偏移量**随聚合度收**:素材实测横向梯度占比在散开相是 0.44–0.54、
-        // 高聚合相只有 0.19–0.23 —— 片体挤到一起之后单片的明暗被叠掉了。
-        // 上一版给了个常数 0.66,结果全程都是 0.27–0.55,高聚合相偏高。
-        // **成环时归零。** 世界坐标的定向光会把六个不同朝向的片体照成六个不同的
-        // 明暗分布 —— 使用者问「形状统一了吗」,不统一的一半原因在这里,不在轮廓。
-        // 归零之后渐变回到同心,六片因此**长得一样也被照得一样**。
-        const eccent = 0.42 * (1 - 0.38 * b0) * (1 - rg);
-        const g = ctx.createRadialGradient(
-          len * 0.55 + lx * len * 0.08, ly * wid * eccent, len * 0.05,
-          len * 0.55, 0, len * 0.96,
-        );
-        // 成环相按环上位置在青(far)→磁(alt)之间取值;其余形态走三色轮转。
-        const tone = p.mixK >= 0 ? blend(f.palette.far, f.palette.alt, p.mixK) : tints[p.tint];
-        g.addColorStop(0, tone);
-        g.addColorStop(0.52, tone);
-        g.addColorStop(1, 'rgba(0,0,0,0)');
-        ctx.globalAlpha = base * p.lit;
-        ctx.fillStyle = g;
-        const pts = petalOutline(len, wid, p.bend, p.taper, p.waist, p.curl);
-        // 中点二次曲线:C1 连续且不过冲(Catmull-Rom 会过冲,过冲在轮廓上长小尖刺)。
-        // 用 lineTo 连 56 段直线在 296px 上仍能看出棱,而这一代要的正是圆润
-        const n2 = pts.length;
-        const mid = (a: { x: number; y: number }, b: { x: number; y: number }) =>
-          ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
-        let m = mid(pts[n2 - 1], pts[0]);
-        ctx.beginPath();
-        ctx.moveTo(m.x, m.y);
-        for (let i = 0; i < n2; i++) {
-          m = mid(pts[i], pts[(i + 1) % n2]);
-          ctx.quadraticCurveTo(pts[i].x, pts[i].y, m.x, m.y);
-        }
-        ctx.closePath();
-        ctx.fill();
-
-        // 迎光侧的高光 —— 一团**软光**,不是一条线。
-        // 上一版在这里描了一道亮边:逐帧脊线含量刚好对上素材的 0.076(我 0.095),
-        // 但并排渲染出来是一圈**白色线框**,读作矢量花瓣的描边。素材的脊线来自
-        // 弯曲面自己的明暗渐变,不是轮廓线 —— **标量对上了不等于结构对上了**,
-        // 这是这一轮最贵的一课。所以改成在片体内再叠一层小半径的偏心渐变:
-        // 焦点仍在迎光侧,但边界是羽化的,不会长出一条可描出来的线。
-        if (!flat) {
-          const hg = ctx.createRadialGradient(
-            len * 0.52 + lx * len * 0.10, ly * wid * 0.78, len * 0.02,
-            len * 0.52 + lx * len * 0.10, ly * wid * 0.78, len * 0.56,
-          );
-          // **高光用片体自己的色,不用近白的 `core`。** 使用者的判断是「亮片之间的
-          // 重叠部分和素材不匹配」—— 根因就在这儿:往每一片上叠一层近白,两片交叠处
-          // 就先被去饱和再被加亮,于是重叠区一律奔向白。素材的重叠区读作**第三个
-          // 色相**(青叠粉出淡紫),不是白。同色加色 = 同色变亮,饱和度因此保住。
-          // `--lum-core` 从此只服务真正的白热核。
-          hg.addColorStop(0, tone);
-          hg.addColorStop(1, 'rgba(0,0,0,0)');
-          ctx.globalAlpha = clamp01(base * p.lit * 0.50 * (0.30 + 0.70 * b0));
-          ctx.fillStyle = hg;
-          ctx.fill();   // 复用同一条路径
-        }
-        ctx.restore();
-      }
-      ctx.restore();
+      // ---- 片体的填充 = **偏心径向渐变，中心实、边缘到黑** ----
+      // 这一层是 AE 流程里那张贴图的等价物：合成 "2" 是一个**反转 + 羽化 1000** 的圆遮罩，
+      // 接在 E3D 材质的 **Alpha 通道**上 —— 也就是说片体的不透明度本身是「中心 1、边缘
+      // 一路羽化到 0」。**我此前一直缺的就是这一层**：我的片体是轮廓内均匀填充的硬边形状，
+      // 所以读作色块；它的片体是一团渐隐的光，所以读作光。
+      // 在**加色**合成下，「alpha → 0」与「颜色 → 黑」完全等价（黑不贡献），所以这里
+      // 不需要离屏做 Alpha 遮罩，一条径向渐变就够 —— 一次 fill、没有段界、边界自然消失。
+      // 焦点往迎光侧偏 `0.34` 个半径：曲面的明暗因此有方向性（弯面上的亮斑不在正中）。
+      const cx = 0, cy = 0;
+      const p0 = chipPoint(c, 0, 0);
+      const rad = Math.max(2, c.ra * R * 1.06);
+      const fx = p0.x * R + LIGHT3.x * rad * 0.34;
+      const fy = p0.y * R + LIGHT3.y * rad * 0.34;
+      void cx; void cy;
+      const g = ctx.createRadialGradient(fx, fy, 0, p0.x * R, p0.y * R, rad);
+      g.addColorStop(0, mid);
+      g.addColorStop(clamp01(TUNE.feather * 0.5), blend(mid, FOG_TINT, 0.30));
+      g.addColorStop(clamp01(TUNE.feather), blend(mid, FOG_TINT, 0.72));
+      g.addColorStop(1, '#000000');
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = g;
+      this.chipOutline(R, c, 56, 1, true, f.t);
+      ctx.fill();
     }
-    ctx.filter = 'none';
-    ctx.globalCompositeOperation = 'source-over';
+    ctx.restore();
     ctx.globalAlpha = 1;
   }
 
-  /** 白热核:花瓣挤到一起才被逼出来的那团过曝光,所以它的半径与亮度都长在 bloom 上,
-      低聚合时直接为 0(`coreGlow()` 已经处理)。分裂成多朵时每朵各有一颗小核 ——
-      于是「几路在跑」在余光里也数得清。
+  private chipShadows(R: number, cs: Chip[], SEG: number): void {
+    const { ctx } = this;
+    ctx.save();
+    ctx.filter = `blur(${(R * 0.030).toFixed(2)}px)`;
+    ctx.globalAlpha = 0.30;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = '#05070e';
+    ctx.beginPath();
+    for (const c of cs) this.chipOutline(R, c, SEG, 1.14, false);
+    ctx.fill();
+    ctx.restore();
+  }
 
-      **高斯样的连续衰减,没有实色平台。** 使用者的判断是「中心的亮点太突兀」——
-      根因是上一版把实色一直铺到半径的 20% 再一路直线掉到 0:那是一个**有边的盘**,
-      而素材的核是一团没有边界、一路化进花瓣里的云。这里改成七档按 exp(−3.2u²) 取的
-      alpha,并再叠一层 2.1 倍半径的极淡外晕,让它在花瓣之间化开而不是压在上面。 */
+  /* 侧边（`chipRim`）已删。使用者：「同一椭圆形经过 3D 抽象为**厚度几乎可忽略**的
+     椭圆片」—— 既然厚度可忽略，就没有侧边可画。它此前存在的理由是更早一轮要
+     「有薄厚度（能看到侧边）」，那一条已被这次的定义取代。 */
+
+  /** 椭圆片的外轮廓：沿边界 `u²+v²=1` 走一圈。**不需要任何轮廓修饰** ——
+      椭圆经弯曲与扭曲之后的像仍然是一条光滑闭合曲线，所以天然对称、软润。
+      `k` 是外扩系数（接触阴影用 1.14）。`fresh=false` 时不开新路径，让六片的阴影
+      合成一条路径一次填完。
+      用**中点二次曲线**：40 段折线在 720px 放大页上仍看得出棱，而这里是闭合轮廓，
+      二次曲线的「不经过首尾点」在闭合路径上不成问题（分段轮廓才会因此错位）。 */
+  private chipOutline(R: number, c: Chip, SEG: number, k = 1, fresh = true, t = 0): void {
+    const { ctx } = this;
+    const pts: { x: number; y: number }[] = [];
+    const N = Math.max(1, Math.round(TUNE.turbN));
+    for (let i = 0; i < SEG; i++) {
+      const a = (TAU * i) / SEG;
+      // **湍流置换的近似**（工程里的 `Turbulent Displace` 数量 7 / 大小 150）：
+      // 沿轮廓一圈叠三条低频谐波，各自慢转 ⇒ 边界有机地扭动。逐像素置换在 Canvas 2D
+      // 上做不了（`ImageData` 太慢），而低频谐波扰动在视觉上是等价的。
+      const wob = 1 + TUNE.turb * (
+        0.55 * Math.sin(a * N + t * 0.61 + c.tint * 1.7)
+        + 0.30 * Math.sin(a * (N + 2) - t * 0.43 + c.tint * 2.9)
+        + 0.15 * Math.sin(a * (N - 1) + t * 0.83));
+      const p = chipPoint(c, Math.cos(a) * k * wob, Math.sin(a) * k * wob);
+      pts.push({ x: p.x * R, y: p.y * R });
+    }
+    const n = pts.length;
+    const mid = (u: { x: number; y: number }, v: { x: number; y: number }) =>
+      ({ x: (u.x + v.x) / 2, y: (u.y + v.y) / 2 });
+    let m = mid(pts[n - 1], pts[0]);
+    if (fresh) ctx.beginPath();
+    ctx.moveTo(m.x, m.y);
+    for (let i = 0; i < n; i++) {
+      m = mid(pts[i], pts[(i + 1) % n]);
+      ctx.quadraticCurveTo(pts[i].x, pts[i].y, m.x, m.y);
+    }
+    ctx.closePath();
+  }
+
+  /**
+   * 球壳 —— **它在素材里确实存在**（帧 106/244 的外沿有一圈清楚的亮边，而且左侧偏粉紫、
+   * 右侧偏青蓝）。此前文档里「球壳不存在，这是量出来的」那条结论来自径向亮度剖面 ——
+   * 而剖面在中心过曝时必然单调衰减，量不出一圈薄膜。**度量看不见的东西，眼睛能看见。**
+   *
+   * **「3D」在判定里，不在绘制里** —— 这一处试过两种落法，使用者选了前一种：
+   *
+   * · 判定（保留）：哪片离球壳这一段最近就染它的色、越近越亮，而「最近」是**三维**
+   *   欧氏距离（球壳点 vs 片体外端），不是屏幕平面上的方位角差。见 `shellSegments()`。
+   * · 绘制（回退）：曾按 limb brightening 的物理剖面把每个角向扇区填成一个径向渐变 ——
+   *   物理是对的，**但楔形是一块面**，相邻扇区颜色不同就读作一圈拼起来的色块
+   *   （使用者：「还是有色块的出现，你修改为高斯模糊之前的那个流边效果是最好的」）。
+   *   段数从 96 降到 24 并让每段横跨三段之后色块只是变大。**角向的量画成径向的形，
+   *   这个伪影是结构性的。** 一条线只有「沿着它流」这一个方向，所以颜色的角向过渡
+   *   在线上读作流动、在面上读作拼接。
+   */
+  private shell(R: number, f: CoreFrame): void {
+    const { ctx } = this;
+    const segs = shellSegments(f, SHELL_SEG);
+    const n = segs.length;
+    const b = bloomAt(f);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';   // 只有球壳允许加色到亮（球内封顶）
+    // **一条沿液面轮廓的描边，端点 `round`。** 使用者：「流边效果正如你所说，还是有色块
+    // 的出现，你修改为高斯模糊之前的那个流边效果是最好的」。
+    // 上一版把这一层改成了「每个角向扇区填一个径向渐变」（limb brightening 的物理剖面），
+    // 目的是让球壳成为一层真正的 3D 薄壳 —— 物理是对的，**但楔形是一块面**：相邻扇区
+    // 的颜色不同，于是球沿读作一圈拼起来的色块，段数从 96 降到 24 并让每段横跨三个段宽
+    // 之后色块变大而没有消失。角向的量画成径向的形，这个伪影是结构性的。
+    // 回到描边：一条线只有「沿着它流」这一个方向，颜色的角向过渡因此读作**流动**而不是
+    // 拼接。3D 那一半保留在判定里 —— `shellSegments()` 用的是球壳点与片体外端的三维
+    // 距离（见那里的注释），不再是屏幕平面上的方位角差。
+    ctx.lineCap = 'round';
+    ctx.lineWidth = R * TUNE.shellW;
+    for (let i = 0; i < n; i++) {
+      const { ta, tb, w: mixw, k } = segs[i];
+      if (k < 0.02) continue;
+      // 段间重叠**半段**：每段横跨 2 段的宽度 ⇒ 每一点被两三段覆盖，亮度因此连续，
+      // 看不出段界（试过只重叠 0.012 rad，段界仍然可见）。
+      const a0 = (TAU * i) / n - TAU / n;
+      const a1 = (TAU * (i + 1)) / n + TAU / n;
+      // **边缘不封顶**，越近越亮可以冲上去（球内才封顶）。
+      ctx.globalAlpha = clamp01(k * (0.52 + 0.48 * b) * TUNE.shellA);
+      // **两片插值 —— 这就是「流边」。** 最近那片的色往次近那片的色里带 `mixw`
+      // （封顶 0.5），沿圈因此是一条连续过渡的彩带；六片一转，带子跟着流。
+      ctx.strokeStyle = mixw > 0.01
+        ? blend(chipTint(f, ta), chipTint(f, tb), mixw)
+        : chipTint(f, ta);
+      this.contourArc(R, f, 0.988, a0, a1);
+      ctx.stroke();
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  /** 中心那团亮。**第十代把它降级成一层极淡的补底。**
+      使用者第三条圈了中心那个白点（判为过曝），第四轮又说素材的活来自「亮片以中心点
+      进行的高度重叠」并且「会出现重叠过曝」—— 两句话不矛盾：中心该亮，但那团亮必须是
+      **六片在球心叠出来的**，不是画上去的一个盘。所以 `corolla()` 负责叠，这里只留
+      极淡的一层，防止双轴进动到某些相位、六片同时接近侧面时球心塌成一个空洞
+      （使用者：「那六片应该是有一个中心的，应该不会出现都转动到侧面的情况」）。 */
+  /** 中心的**光核**。使用者深察素材后的结论：「这些亮片就是中心重叠、有面穿插、
+      相互有不同运动方向的，**且中心有一个光核**」。所以它重新是一个存在的东西，
+      不再是上一版那层「极淡的补底」（peak 0.014+cg×0.20、`source-over`）。
+
+      **但它仍然不许有实色平台。** 使用者早先圈过中心那个白点判为「太突兀」，根因是
+      实色一直铺到半径的 20% 再直线归零 —— 那是一个**有边的盘**，读作贴上去的亮点。
+      现在：`exp(−2.4u²)` 七档连续衰减 + 一层 1.8× 半径的极淡外晕，核因此在薄片之间
+      化开；合成用 `lighter`（它是光，不是涂层），峰值 0.05+cg×0.62。
+      **半径 ×1.85**：使用者在标注图二上圈出了要的大小（约球直径的三分之一 ⇒ 半径
+      0.30R），而 `coreGlow()` 给的 0.163（idle）只有它的一半。放大的同时峰值反而略降
+      （0.03+cg×0.34 → 0.028+cg×0.30）、衰减指数从 3.0 放缓到 2.4 —— 使用者要求「一定要
+      柔和」，而柔和是「同样的总亮度铺在更大的范围上」，不是「更亮更大」。
+      「放大不等于不突兀」这条仍然有效：0.52R 那一版会把整颗球烧白。 */
   private hotCore(R: number, f: CoreFrame): void {
     const cg = coreGlow(f);
     if (cg <= 0.001) return;
     const { ctx } = this;
-    // 0.04 + cg*0.42 而不是 0.06 + cg*0.86:上一版两遍叠起来在高聚合相把整颗球
-    // 烧成一团白,花瓣全被吞掉 —— 「不突兀」不等于「更大更亮」,素材的核在最亮那一格
-    // 仍然看得见花瓣穿过它。
-    const peak = clamp01(0.025 + cg * 0.30);
+    const peak = clamp01(0.020 + cg * TUNE.coreA);
     ctx.globalCompositeOperation = 'lighter';
     for (const c of blobCenters(f)) {
-      const r = cg * c.scale * R;
+      const r = cg * TUNE.coreR * c.scale * R;
       if (r < 0.6) continue;
-      for (const [mul, k] of [[1.6, 0.22], [1.0, 1.0]] as [number, number][]) {
+      for (const [mul, k] of [[1.8, 0.26], [1.0, 1.0]] as [number, number][]) {
         const rr = r * mul;
         const g = ctx.createRadialGradient(c.cx * R, c.cy * R, 0, c.cx * R, c.cy * R, rr);
         for (let s = 0; s <= 6; s++) {
           const u = s / 6;
-          g.addColorStop(u, alpha(f.palette.core, Math.exp(-3.2 * u * u) * k));
+          g.addColorStop(u, alpha(f.palette.core, Math.exp(-TUNE.coreSoft * u * u) * k));
         }
         g.addColorStop(1, 'rgba(0,0,0,0)');
         ctx.globalAlpha = peak;

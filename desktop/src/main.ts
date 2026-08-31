@@ -4,6 +4,10 @@ import {
   breathAmp, breathRate, coreGlow, ringLevel, ringRate, bloomSpring, contourRadii, blend,
   type CoreFrame, type CoreState, type Palette,
 } from './core';
+import {
+  loadSheets, newMotion, setState as seqSetState, stepMotion, drawOrb,
+  type SeqState, type Sheets,
+} from './sequence';
 
 /* 唤醒球不是浏览器页面：右键菜单、文本拖拽鬼影一律关掉。 */
 window.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -52,6 +56,9 @@ const labels: Record<string, string> = {
 
 const STATES: CoreState[] = ['idle', 'listening', 'thinking', 'speaking', 'cancelled', 'error'];
 
+/** 手写渲染器现在只是**退路** —— 雪碧图缺失 / fetch 失败 / 内存不足时它接手。球是常驻
+    挂件，「画不出来」不能等于「窗口里一片空白」。它直接绑主画布：不再需要与序列层交叉
+    淡化（`thinking` 已改为走序列的高速段），所以离屏那一层没有理由存在。 */
 const core = new CorollaBreath(canvas);
 let state: CoreState = 'idle';
 let amplitude = 0.35;
@@ -122,13 +129,65 @@ function coreFrame(): CoreFrame {
 /** 立刻画一帧。切态、闸门变化与 reduced-motion 都靠它,不必等下一个 rAF。
     动画停着时(reduced-motion)聚合度必须直接落到目标 —— 否则花冠会停在上一态的开度。 */
 function drawCore(): void {
-  core.resize(orb.offsetWidth || 208);
+  resizeMain();
   if (reduceMotion.matches) {
     bloom = bloomLevel(coreFrame());
     ring = ringLevel(coreFrame());
     bloomVel = 0;
   }
-  core.draw(coreFrame());
+  paintOrb();
+}
+
+/** 主画布的位图尺寸。以前这一步由 `core.resize()` 顺手做（手写渲染器当时绑在主画布上），
+    现在它绑离屏了，主画布得自己管。沿用同一个口径：位图边长 = **球的布局盒** × DPR，
+    而 CSS 上 `#core { inset:-22% }` 让它显示成 144% —— 位图比显示小是既有取舍（省算力，
+    代价是外圈辉光略糊），换成按显示尺寸开位图会让每帧的填充面积涨一倍。 */
+function resizeMain(): void {
+  const px = Math.max(1, Math.round((orb.offsetWidth || 208) * (window.devicePixelRatio || 1)));
+  if (canvas.width !== px) { canvas.width = px; canvas.height = px; }
+}
+
+/* ============ 渲染层：AE 预渲染序列，手写渲染器作为退路 ============
+   为什么换：`core.ts` 在 Canvas 2D 里复刻 Element 3D 被否了六轮，根因是这条路上没有
+   逐像素 UV、没有逐像素法向、没有 z-buffer、没有线性色空间，而素材那团光的质感全部
+   来自这四样。资产由 `scripts/build_orb_assets.py` 从 AE（`aerender`）渲出的帧生成。
+
+   **`core.ts` 不删** —— 雪碧图缺失、fetch 失败、内存不足都退回它。球是常驻挂件，
+   「画不出来」不能等于「窗口里一片空白」。 */
+let sheets: Sheets | null = null;
+const motion = newMotion();
+
+/** 契约态 → 渲染态。两处不是一一对应：
+      · `idle` → `hidden`：**没有待机形态**（使用者定的）。球在 idle 时不画，随后窗口隐藏。
+      · `gated` 不是契约里的态，是「有命令待确认」这个布尔量，它盖过当前态 —— 一道闸落下时
+        球在等人，那比它原本在听还是在说更重要。 */
+function mapSeq(): SeqState {
+  if (gated) return 'gated';
+  return state === 'idle' ? 'hidden' : (state as SeqState);
+}
+
+function syncSeq(): void {
+  seqSetState(motion, mapSeq());
+}
+
+/** 画球。有序列就播序列，没有就退回手写渲染器。
+    `appear` 由生产侧的 `seed`（生长/收回）驱动，不用序列层自己那份 —— 生长度是「一轮
+    对话的生命周期」的一部分（idle 收回点、唤醒铺张），序列层看不到那条时间轴。 */
+function paintOrb(): void {
+  const ctx = canvas.getContext('2d');
+  if (ctx === null) return;
+  if (sheets === null) {
+    // 退路：资产没就绪，只有手写层。**它也要守「没有待机形态」这条** —— `core.draw()` 的
+    // idle 是一颗正常的球，不清的话它会在启动的那几百毫秒里闪一下使用者点名删掉的长相。
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (mapSeq() === 'hidden') core.clear(); else core.draw(coreFrame());
+    return;
+  }
+  motion.appear = seed;
+  drawOrb(ctx, sheets, motion, t, amplitude);
 }
 
 /** 闸门只由确认卡的出现/落定驱动:形态与颜色同时变,余光里就能看出球在等人。 */
@@ -138,6 +197,7 @@ function setGated(next: boolean): void {
   if (next) app.dataset.confirm = 'true';
   else delete app.dataset.confirm;
   palette = readPalette();
+  syncSeq();
   drawCore();
 }
 
@@ -160,6 +220,7 @@ function setState(next: string, amp = 0.35) {
   paletteFrom = palette;
   paletteK = 0;
   palette = readPalette();
+  syncSeq();
   drawCore();
 
   /* ============ 生命周期 ============
@@ -551,7 +612,8 @@ function render() {
   if (Math.abs(ringTarget - ring) < 0.004) ring = ringTarget;
   // 光团是每帧的主角。这里只 draw 不 resize：resize 要读 offsetWidth,
   // 每帧读会多一次强制重排,而尺寸只在切态/窗口变化时才可能变。
-  core.draw(coreFrame());
+  stepMotion(motion, 0.016);   // 与 `t` 同步长；序列层的交叉淡化靠它推进
+  paintOrb();
 
   // 面板高度随流式文本增长，每 6 帧量一次；reportLayout 内部按内容去重，不变就不过 IPC
   if ((frame = (frame + 1) % 6) === 0) reportLayout();
@@ -775,6 +837,29 @@ if (!new URLSearchParams(location.search).has('test')) {
 setState('idle');
 drawCore();
 reportLayout(true);
+
+/* `?state=listening` 直接落在某一态上 —— 生产页平时是 idle（不画、随后隐藏窗口），
+   所以不给一个入口的话，实机窗口上和 headless 取证都只能看到空白。与 `?orb=` 同一立场：
+   走 URL 不新增 IPC 命令，而且只影响初始态，事件一到就被覆盖。 */
+(() => {
+  const p = new URLSearchParams(location.search);
+  const s = p.get('state');
+  if (s === null) return;
+  setState(s, Number(p.get('amp') ?? 0.5));
+  // 生长度直接拉满：`seed` 每帧只走 0.046，而 headless 取证的虚拟时间只跑几帧，
+  // 不拉满的话球停在 appear≈0 上 —— 截图里什么都没有，看起来像渲染层坏了。
+  if (s !== 'idle') { seed = 1; seedTarget = 1; }
+  motion.w = 1;
+  drawCore();
+})();
+
+/* 资产是异步的，而球必须立刻可见 —— 所以先用手写渲染器画着，序列到位再切过去。
+   加载失败**不报错给用户**：退路已经在画了，弹一句「资产缺失」只会让人以为球坏了。
+   控制台留一条，取证时看得到。 */
+loadSheets('/orb')
+  .then((s) => { sheets = s; syncSeq(); motion.w = 1; drawCore(); })
+  .catch((e) => { console.warn('[orb] 序列资产未就绪，回退手写渲染器：', e); });
+
 /* DPI 变化(拖到另一块屏)在 WebView2 上伴随 resize 到达：位图要跟着 DPR 重开，
    否则波形在高 DPI 屏上是被放大的糊线。 */
 window.addEventListener('resize', () => {
