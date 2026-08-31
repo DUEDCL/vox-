@@ -34,30 +34,84 @@ from core.models_config import (
 
 SHIPPED = Path(__file__).resolve().parents[1] / "config" / "models.toml"
 
+#: 写入与拒绝那些测试用的**自带**样本，不是仓库里那份出厂文件。
+#:
+#: **这个常量是 2026-09-01 一次全绿变 11 红的正解。** 在它之前 ``models`` fixture 复制的是
+#: `config/models.toml`，而那个文件是**给人改的** —— 控制台上「模型配置」那一栏写的就是它。
+#: 使用者把 `[profiles.local.llm]` 从 `provider = "ollama"` 改成了 `custom`，于是：
+#: 断言 `provider == "ollama"` 的那条直接红，而另外 10 条靠
+#: ``.replace('provider = "ollama"', ...)`` 注入坏值的测试变成了**空替换** ——
+#: 文件没被改坏，`pytest.raises` 于是 DID NOT RAISE。
+#:
+#: 也就是说：一个人正常使用这个产品，就会让 11 个测试变红，而红的原因和被测代码无关。
+#: 判据和 `.claude/CLAUDE.md` 里那条「基线必须在干净 shell 里记」是同一条 —— 一个结果
+#: 取决于可变输入的测试等于没有测试。出厂文件仍然被测，但只测**不变式**（见下面那两条）。
+FIXTURE = """\
+# 出厂的两套方案。这个文件的注释是内容的一部分：写入必须逐条保住它们。
+active = "local"
+
+# ---------------------------------------------------------------- 本机
+[profiles.local]
+label = "全本机（离线）"
+
+[profiles.local.asr]
+provider = "sherpa-local"
+model = "zipformer-zh-14M"
+
+[profiles.local.tts]
+provider = "sherpa-local"
+model = "vits-zh-single"
+
+# 本机 LLM 走 Ollama：base/proto 由预设给，所以这里只写 provider 与 model。
+[profiles.local.llm]
+provider = "ollama"
+model = "qwen2.5:7b"
+
+# ---------------------------------------------------------------- 云端 LLM
+[profiles.cloud-llm]
+label = "本机语音 + 云端 LLM"
+
+[profiles.cloud-llm.asr]
+provider = "sherpa-local"
+model = "zipformer-zh-14M"
+
+[profiles.cloud-llm.tts]
+provider = "sherpa-local"
+model = "vits-zh-single"
+
+[profiles.cloud-llm.llm]
+provider = "deepseek"
+model = "deepseek-chat"
+key_env = "VOX_LLM_KEY"
+"""
+
 
 @pytest.fixture
 def models(tmp_path):
-    """A writable copy of the shipped file, comments and all."""
+    """A writable sample file, comments and all. See ``FIXTURE``."""
     target = tmp_path / "models.toml"
-    target.write_text(SHIPPED.read_text(encoding="utf-8"), encoding="utf-8")
+    target.write_text(FIXTURE, encoding="utf-8")
     return target
 
 
 # ----------------------------------------------------------------------- loader
 
 
-def test_the_shipped_file_loads_and_names_a_real_profile():
-    """出厂的两套方案在，``active`` 指向一个真的存在的 profile。
+def test_the_shipped_file_holds_up_as_a_config():
+    """出厂文件加载得动，``active`` 指向一个真的存在的 profile。
 
-    **不断言「只有这两套」**：这个文件是给人改的，控制台上「新建方案」是个正常动作。
-    钉住集合等于让一个用了这个功能的人看到红色的测试，而那不是回归的信号 —— 出厂内容
-    有没有被改坏，看的是下面那三条。
+    **只断言不变式，一个具体值都不钉。** 这个文件是给人改的：控制台上「新建方案」、
+    「换模型」、「换端点」都是正常动作，而 provider/model/base 改成什么是使用者的事。
+    钉住其中任何一个值，等于让一个正常使用产品的人看到红色的测试 —— 那不是回归的信号。
+    真正的回归是「文件被改成了加载不动的样子」，那就是这一条在测的。
     """
     config = load_models_config(SHIPPED)
+    assert config["active"], "active 是空的：没有任何一套方案生效"
     assert config["active"] in config["profiles"]
-    assert {"local", "cloud-llm"} <= set(config["profiles"])
-    assert config["profiles"]["local"]["llm"]["provider"] == "ollama"
-    assert config["profiles"]["cloud-llm"]["asr"]["provider"] == "sherpa-local"
+    for name, profile in config["profiles"].items():
+        assert isinstance(profile.get("label", ""), str), name
+        for kind in KINDS:
+            assert set(profile.get(kind, {})) <= set(FIELDS), f"{name}.{kind}"
 
 
 def test_a_missing_file_is_an_empty_registry_not_an_error(tmp_path):

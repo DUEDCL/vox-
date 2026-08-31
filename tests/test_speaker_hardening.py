@@ -252,3 +252,186 @@ def test_describe_reports_gate_config_and_counts_without_vectors(tmp_path):
     serialised = json.dumps(described)
     assert "0.1" not in serialised.replace("0.05", "").replace("0.002", "")
     assert "[0.1, 0.2]" not in serialised
+
+
+# -- 注册侧的同一道质量门 -----------------------------------------------------
+#
+# 这一组钉死的是 2026-08-29 查出的一条不对称:verify() 查音频质量,enroll() 不查。
+# 后果不是「注册失败」而是「注册成功、然后本人永远唤不醒」—— 三个噪声向量落进档案,
+# describe() 报 3 个样本,每次唤醒被拒的原因写着 below threshold,看不出根因在注册那一侧。
+#
+# 这条路真实存在:控制台注册走浏览器 getUserMedia,取系统默认输入设备,而 Windows 上一个
+# 被静音/被隐私设置拒绝的默认设备是**静默而不是报错**的。本机实测默认设备录 1 秒
+# peak=0.00003。所以采集侧和注册侧会同时中招,而只有采集侧有检测。
+
+
+def test_a_silent_enrollment_sample_is_refused_not_silently_accepted(tmp_path):
+    """静音注册必须当场报错。静默接受它等于造一个永远拒绝本人的门。"""
+    provider = _provider(tmp_path)
+    provider._extractor = object()  # 越过模型加载,只测质量门
+    with pytest.raises(Exception) as excinfo:
+        provider.enroll("du", [np.zeros(16000, dtype=np.float32)])
+    assert "too quiet" in str(excinfo.value)
+
+
+def test_the_refusal_names_which_sample_was_bad(tmp_path):
+    """三段里坏的是第二段时,消息要说「第 2 段」—— 让人知道重录哪一段。"""
+    provider = _provider(tmp_path)
+    provider._extractor = object()
+    good = (np.sin(np.linspace(0, 400, 16000)) * 0.2).astype(np.float32)
+    with pytest.raises(Exception) as excinfo:
+        provider.enroll("du", [good, np.zeros(16000, dtype=np.float32), good])
+    assert "sample 2" in str(excinfo.value)
+
+
+def test_a_clipped_enrollment_sample_is_refused(tmp_path):
+    """过载的注册音频同样拒:削平的波形已经丢了说话人特征。"""
+    provider = _provider(tmp_path)
+    provider._extractor = object()
+    with pytest.raises(Exception) as excinfo:
+        provider.enroll("du", [np.array([1.0, -1.0] * 8000, dtype=np.float32)])
+    assert "clipped" in str(excinfo.value)
+
+
+def test_serving_the_cooldown_clears_the_streak(tmp_path):
+    """服刑期满即销账 —— 否则本人被压到「每 30 秒只有一次真实尝试」。
+
+    这是 2026-08-29 从使用者实机日志里读出来的缺陷:`cooling down for 0.5s` →
+    一次真实校验 0.484 → 紧接着 `cooling down for 25.2s`。原因是 _rejection_streak
+    要等「距上次拒绝超过 60 秒」才归零,而冷却只有 30 秒,于是计数一直停在上限,
+    冷却结束后再拒一次就立刻又是 30 秒。
+
+    暴力防护要的是限速,不是累加惩罚。等满了就该重新给满额度。
+    """
+    clock = FakeClock()
+    provider = _provider(tmp_path, max_consecutive_rejections=3, cooldown_s=30.0, clock=clock)
+
+    # 三次静音拒绝 -> 进冷却
+    for _ in range(3):
+        provider.verify([0.0] * 16000)
+    assert provider.gate_stats["consecutive_rejections"] == 3
+    assert "cooling down" in provider.verify([0.0] * 16000).reason
+
+    # 等满 30 秒:下一次不该再是冷却,而且计数已经归零
+    clock.now += 31.0
+    result = provider.verify([0.0] * 16000)
+    assert "cooling down" not in result.reason
+    assert provider.gate_stats["consecutive_rejections"] == 1, "销账后这是新一轮的第 1 次"
+
+    # 而且要再攒满 3 次才会重新进冷却 —— 不是「一次就又锁 30 秒」
+    provider.verify([0.0] * 16000)
+    assert "cooling down" not in provider.verify([0.0] * 16000).reason
+    assert "cooling down" in provider.verify([0.0] * 16000).reason
+
+
+def test_the_cooldown_still_throttles_within_one_window(tmp_path):
+    """反向断言:销账不能把限速取消掉。窗口内连续尝试仍然会被锁。"""
+    clock = FakeClock()
+    provider = _provider(tmp_path, max_consecutive_rejections=3, cooldown_s=30.0, clock=clock)
+    for _ in range(3):
+        provider.verify([0.0] * 16000)
+    armed_at = clock.now
+    for offset in (0.0, 5.0, 10.0, 29.0):  # 绝对偏移,不是累加
+        clock.now = armed_at + offset
+        assert "cooling down" in provider.verify([0.0] * 16000).reason
+
+
+def test_a_below_threshold_rejection_names_the_clipping(tmp_path):
+    """拒绝原因里必须带**测出来的输入质量**,不能只说「below threshold」。
+
+    这是 2026-08-29 实机日志的教训:每一次唤醒的峰值都是 1.000(削波),而拒绝原因只写
+    「below threshold 0.5」。那句话把人引向「调阈值」或「换模型」,而真正的毛病是麦克风
+    增益太高 —— 削波把说话人特征削掉一部分,相似度就稳定落在 0.34–0.48。
+
+    削波不到 max_clip_ratio(5%)时质量门是**放行**的,所以这件事此前完全不可见。
+    用 ScriptedSpeaker 走真实的门流程、假的 embedding,所以不需要模型。
+    """
+    speaker = ScriptedSpeaker([[0.4]], tmp_path=tmp_path)
+
+    # 贴轨但削波比例 1.9%:过得了 5% 的质量门,却该在原因里被点出来。
+    samples = (np.sin(np.linspace(0, 400.0, 16000)) * 0.6).astype(np.float32)
+    samples[:300] = 1.0
+    result = speaker.verify(samples)
+
+    assert result.accepted is False
+    assert "below threshold" in result.reason
+    assert "削波" in result.reason, "削波必须出现在原因里,否则这件事仍然不可见"
+    assert "1.9%" in result.reason or "2.0%" in result.reason
+
+
+def test_a_clean_but_unmatched_input_does_not_cry_clipping(tmp_path):
+    """反向断言:没有削波时不许提削波。一个总在报同一句提示的诊断等于没有诊断。"""
+    speaker = ScriptedSpeaker([[0.4]], tmp_path=tmp_path)
+    clean = (np.sin(np.linspace(0, 400.0, 16000)) * 0.3).astype(np.float32)
+
+    result = speaker.verify(clean)
+
+    assert result.accepted is False
+    assert "below threshold" in result.reason
+    assert "削波" not in result.reason
+
+
+def test_input_quality_reports_peak_rms_and_clip_without_judging():
+    """`input_quality` 只测不判 —— 判决仍然只在质量门与阈值那两处。"""
+    import numpy as np
+
+    from core.audio.speaker import SpeakerVerificationProvider
+
+    provider = SpeakerVerificationProvider(model_path="nope.onnx", store_path="nope.json")
+    quiet = provider.input_quality(np.full(1600, 0.001, dtype="float32"))
+    assert quiet["clip"] == 0.0
+    assert quiet["peak"] == pytest.approx(0.001, abs=1e-6)
+    railed = provider.input_quality(np.ones(1600, dtype="float32"))
+    assert railed["clip"] == 1.0
+    assert railed["peak"] == 1.0
+    assert provider.input_quality(np.zeros(0, dtype="float32")) == {"rms": 0.0, "clip": 0.0, "peak": 0.0}
+
+
+# ------------------- 控制台诊断不许消耗本人的暴力防护额度（2026-08-31 实机）
+
+
+def test_a_console_diagnostic_does_not_build_a_cooldown(tmp_path):
+    """**这是「说了唤醒词但根本没检测到」的根因。**
+
+    控制台「试一句」走的是同一个 `verify()`，于是它每一次失败都算一次「连续拒绝」。
+    使用者连点几下（而那时它因为另一个 bug 固定返回 0 分），第 5 次就把真实唤醒门推进了
+    30 秒冷却 —— 实机日志：`声纹拒绝「你好小沃」：verification cooling down for 25.4s`，
+    而唤醒漏斗里只记了 1 次拒绝（另外几次来自试一句，不在漏斗里）。
+
+    一次本机、已鉴权、由人点出来的诊断不是暴力尝试。
+    """
+    clock = FakeClock()
+    speaker = ScriptedSpeaker([[0.1]] * 20, tmp_path=tmp_path, clock=clock)
+    speech = _speech_like(16000)
+
+    for _ in range(8):
+        speaker.verify(speech, throttle=False)
+
+    assert speaker._rejection_streak == 0
+    assert speaker._cooldown_until == 0.0
+    assert speaker.gate_stats["rejected_below_threshold"] == 0, "诊断不进唤醒漏斗的统计"
+    # 门本身照常工作：真实路径仍然会累计并冷却。
+    for _ in range(4):
+        speaker.verify(speech)
+    assert speaker._rejection_streak == 4
+    assert speaker._cooldown_until == 0.0
+    assert speaker.verify(speech).accepted is False
+    assert speaker._cooldown_until > 0.0
+
+
+def test_a_console_diagnostic_still_answers_during_a_cooldown(tmp_path):
+    """冷却期内诊断必须照样出分 —— 那正是最需要它的时候。
+
+    反过来的话，人被冷却挡住、想用试一句查为什么，而试一句也只回一句「冷却中」，
+    于是唯一的读数在唯一需要它的时刻消失了。诊断不放宽任何边界：它不改状态、不给准入。
+    """
+    clock = FakeClock()
+    speaker = ScriptedSpeaker([[0.9]], tmp_path=tmp_path, clock=clock)
+    speaker._cooldown_until = clock.now + 25.0
+
+    result = speaker.verify(_speech_like(16000), throttle=False)
+
+    assert result.accepted is True
+    assert result.score == pytest.approx(0.9)
+    assert speaker._cooldown_until == clock.now + 25.0, "诊断不许把冷却清掉"
+    assert speaker.gate_stats["accepted"] == 0, "也不进漏斗的命中计数"

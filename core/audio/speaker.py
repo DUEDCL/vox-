@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import threading
 import time
 import tomllib
 from dataclasses import dataclass
@@ -26,9 +27,69 @@ import numpy as np
 
 from .base import ProviderStatus, ProviderUnavailable
 
-DEFAULT_MODEL_NAME = "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
+#: 出厂的说话人 embedding 模型。
+#:
+#: **2026-08-29 从 `3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx` 换成 CAM++。**
+#: 判据不是「官方说它好」，是在本仓库自带的 7 段真实人声上量出来的（同一次进程、同一段音频、
+#: 同一个余弦度量；分组来自实测矩阵而不是任何标签）：
+#:
+#: | 模型 | 大小 | dim | 同人最低 | 不同人最高 | **间隙** |
+#: |---|---|---|---|---|---|
+#: | ERes2Net base | 37.8 MB | 512 | 0.736 | 0.370 | +0.366 |
+#: | **CAM++ zh-cn common** | **27.0 MB** | **192** | **0.833** | 0.396 | **+0.437** |
+#:
+#: 同人分整体抬高约 0.1 而不同人分几乎没动，所以间隙宽了 0.07；模型还小了 10.8 MB、
+#: 向量短了 2.7 倍（打分更快）。这对使用者报的「声纹识别率有点低」是直接有效的一步 ——
+#: 他的实测分数落在 0.34–0.48，同人分整体上移就是要的那个方向。
+#:
+#: **换型让既有档案全部作废**（512 维的向量对 192 维的模型无意义）。`_restore()` 会把它们
+#: 丢掉并记进 `stale_profiles`，所以那件事是可见的，不是「一个人都没注册」。换完必须重新注册：
+#: `.\.venv\Scripts\python.exe scripts\enroll_speaker.py 你的名字 --replace`
+DEFAULT_MODEL_NAME = "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
 DEFAULT_CONFIG_NAME = "speaker.toml"
 STORE_VERSION = 1
+
+#: 文件名 -> 人看的短名。
+#:
+#: 存在的理由是 2026-08-30 使用者的原话：「我无法快速的识别是否真的换了新的声纹模型」。
+#: `describe()` 报的 `model` 是一条绝对路径，而「换过型没有」这个问题要在**一眼之内**
+#: 答完。放在这里而不是页面里：关于模型的知识只该有一个出处，页面再抄一份就会在下一次
+#: 换型时静默过期。
+MODEL_LABELS: dict[str, str] = {
+    "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx": "CAM++ zh-cn common",
+    "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx": "ERes2Net base（已取代）",
+}
+
+
+def model_label(path: str | Path) -> str:
+    """一条模型路径 -> 短名。表里没有就退回文件名（**不退回整条路径**）。"""
+    name = Path(path).name
+    return MODEL_LABELS.get(name, name)
+
+#: 进 embedding 模型前归一化到的峰值。
+#:
+#: 0.7 而不是 1.0：留 3 dB 余量。归一化到满幅会让任何后续处理（重采样的插值、模型内部的
+#: 预加重）碰到轨，而那等于自己制造削波。
+EMBED_TARGET_PEAK = 0.7
+
+#: 低于这个峰值就不归一化。一段几乎无声的缓冲被放大 100 倍之后是一段响亮的噪声，
+#: 而它算出来的 embedding 毫无意义 —— 那种输入该被质量门拒掉，不该被放大。
+EMBED_MIN_PEAK = 1e-3
+
+
+def normalise_for_embedding(samples: Any, target_peak: float = EMBED_TARGET_PEAK) -> Any:
+    """按峰值归一化一段音频，给声纹模型用。
+
+    **注册与校验必须走同一个函数**，否则两侧电平不同，相似度就测的是「音量差」而不是
+    「说话人差」。见 ``SpeakerVerificationProvider.embed`` 的注释里那组实测数字。
+    """
+    values = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if values.size == 0:
+        return values
+    peak = float(np.max(np.abs(values)))
+    if peak < EMBED_MIN_PEAK:
+        return values
+    return (values * (float(target_peak) / peak)).astype(np.float32)
 
 
 def load_speaker_config(path: str | Path | None = None) -> dict[str, Any]:
@@ -48,6 +109,10 @@ def load_speaker_config(path: str | Path | None = None) -> dict[str, Any]:
         "min_enroll_seconds": 1.5,
         "buffer_seconds": 3.0,
         "verify_seconds": 1.5,
+        #: 唤醒之后给多少秒开口。见 `capture._recognize` —— 端点检测在**没听到任何语音**
+        #: 时 2.4 秒就触发一次（`rule1_min_trailing_silence`），此前那一下会直接把聆听结束
+        #: 掉、还不通知任何人：球一直停在「在听」，而采集已经回到唤醒模式了。
+        "listen_grace_s": 8.0,
         # Gate-hardening limits (2026-08-24). Quality floors reject junk audio
         # before it reaches the model; the cooldown throttles brute-force wake
         # attempts. They are heuristics, NOT anti-replay spoof detection --
@@ -189,6 +254,34 @@ class SpeakerVerificationProvider:
         self._extractor: Any = None
         self._manager: Any = None
         self._dim = 0
+        #: 因维度不符而被丢弃的档案 -> 丢了几条向量。换 embedding 模型时非空。
+        #: 报出来是必需的：症状（一个人都没注册）和「文件丢了」长得一样。
+        self.stale_profiles: dict[str, int] = {}
+
+        #: --- 存储变更检测 -------------------------------------------------
+        #:
+        #: **这是「注册完了却唤不醒」的修法。** 档案落在文件里，但校验比的是内存里的
+        #: `SpeakerEmbeddingManager`，而它只在 `load()` 时装载一次。于是：
+        #:
+        #: - `scripts/enroll_speaker.py` 在**另一个进程**里注册 -> 文件变了，正在跑的
+        #:   控制台一无所知，门继续拿旧档案（或者一个空的档案表）打分；
+        #: - 更糟的组合（2026-08-30 实机）：控制台 02:51 启动、页面上删掉一个人、脚本
+        #:   02:55 注册了新的 —— 删除在同进程内生效（manager 也删了），新增只落了文件，
+        #:   于是门的档案表是**空的**，每次唤醒都拒，理由 `no speaker enrolled`。
+        #:   而脚本自己的闭环校验是 0.819「通过」，控制台页面上也显示新档案在 —— 三处
+        #:   读数各说各话，唯独真正做决定的那一处是旧的。
+        #:
+        #: 指纹用 (mtime_ns, size) 而不是内容哈希：这是每次唤醒都要做一次的 `stat()`，
+        #: 而唤醒本来就不频繁。同尺寸同 mtime 的覆写理论上会被漏掉，NTFS 的 100 ns
+        #: 分辨率让它不会在真实使用里发生。
+        self._store_stamp_seen: tuple[int, int] | None = None
+        #: 重装是「造一个新的 manager 装满，再一次赋值换过去」，锁只为避免两个线程
+        #: （音频线程做校验、HTTP 线程读状态）同时重复造。
+        self._refresh_lock = threading.Lock()
+        #: 重装次数与失败次数。失败时**保留旧档案**（一个空的门比一个旧的门更糟），
+        #: 所以这个数字是唯一能看出「重装一直在失败」的地方。
+        self.store_reloads = 0
+        self.store_reload_errors = 0
 
     @property
     def available(self) -> bool:
@@ -232,14 +325,71 @@ class SpeakerVerificationProvider:
             {"engine": "sherpa-onnx", "dim": self._dim, "enrolled": enrolled, "threshold": self.threshold},
         )
 
-    def _restore(self) -> list[str]:
-        """Re-register persisted embeddings into a fresh manager."""
+    def _restore(self, manager: Any = None) -> list[str]:
+        """Re-register persisted embeddings into a fresh manager.
+
+        ``manager`` 让调用方把档案装进一个**还没接上**的 manager 里，装满之后再一次赋值
+        换过去（见 ``refresh``）。默认装进当前那个，也就是 ``load()`` 的用法。
+
+        维度不符的向量被丢掉 —— 那是 fail-closed 的正确方向，但**必须说出来**：换一个
+        embedding 模型（例如 ERes2Net dim 512 → CAM++ dim 192）会让全部既有档案作废，
+        而症状是「一个人都没注册」，和「文件丢了」长得完全一样。2026-08-29 换 CAM++ 时
+        这条注释和下面这个计数就是为那次换型加的。
+        """
+        target = self._manager if manager is None else manager
+        # **先取指纹再读文件。** 反过来的话，两者之间发生的那次写入会被记成「已经看过」，
+        # 于是那次注册永远不会被装载 —— 正是这个类要修的那个 bug 的另一种形态。
+        stamp = self._store_stamp()
         restored: list[str] = []
+        self.stale_profiles = {}
         for name, vectors in self.store.load().items():
             usable = [v for v in vectors if len(v) == self._dim]
-            if usable and self._manager.add(name, usable):
+            stale = len(vectors) - len(usable)
+            if stale:
+                self.stale_profiles[name] = stale
+            if usable and target.add(name, usable):
                 restored.append(name)
+        self._store_stamp_seen = stamp
         return sorted(restored)
+
+    def _store_stamp(self) -> tuple[int, int] | None:
+        """存储文件的「变了没有」指纹。文件不在时是 ``None``。"""
+        try:
+            info = self.store.path.stat()
+        except OSError:
+            return None
+        return (int(info.st_mtime_ns), int(info.st_size))
+
+    def refresh(self) -> bool:
+        """存储在盘上变过就重新装载档案，返回是否真的重装了。
+
+        **门必须按盘上的档案判，不是按进程启动那一刻的快照判。** 另一个进程注册
+        （`scripts/enroll_speaker.py`）、另一个控制台实例删档案、或者手工换掉
+        `enrollment/voiceprints.json`，都只改文件；不重读的话，正在跑的那个进程会一直
+        拿旧数据打分，而它的页面（`describe()` 直接读文件）却显示新数据 —— 两处读数
+        矛盾，而做决定的是看不见的那一处。
+
+        没变就什么都不做（一次 ``stat()``）。装载失败**保留旧档案**：把门清空会让本人
+        也进不来，而那比「用旧档案多拒一次」严重得多。
+        """
+        if self._extractor is None or self._manager is None:
+            return False
+        if self._store_stamp() == self._store_stamp_seen:
+            return False
+        with self._refresh_lock:
+            # 拿到锁之后再看一次：另一个线程可能已经重装完了。
+            if self._store_stamp() == self._store_stamp_seen:
+                return False
+            try:
+                sherpa = importlib.import_module("sherpa_onnx")
+                fresh = sherpa.SpeakerEmbeddingManager(self._dim)
+                self._restore(fresh)
+            except Exception:  # noqa: BLE001 - 计数并保留旧档案
+                self.store_reload_errors += 1
+                return False
+            self._manager = fresh
+            self.store_reloads += 1
+            return True
 
     def _require(self) -> None:
         if self._extractor is None:
@@ -254,6 +404,20 @@ class SpeakerVerificationProvider:
 
         ``samples`` is any float32 buffer the sherpa stream accepts. It is
         consumed and dropped -- nothing reaches the filesystem.
+
+        **进模型之前先按峰值归一化。** 这不是美化，是让注册和校验可比的唯一办法：
+
+        - 注册走的路和校验走的路**音量不一样**。注册可能来自浏览器 `getUserMedia`
+          （带浏览器自己的自动增益）或 `scripts/enroll_speaker.py`（`sd.rec` 裸录），
+          校验来自 `sounddevice` 的采集回调。三条路的电平各不相同。
+        - 2026-08-29 实测：同一个人、同一台机器，相似度稳定落在 0.339–0.484，也就是这个
+          模型「不同人」的区间（它自己测试集上同人 0.736 / 不同人 0.370）。而使用者把
+          Windows 输入音量从默认降到 **7** 之后唤醒才开始命中 —— 一个要靠调系统音量才能
+          用的门，本质上是在要求人手动做归一化。
+        - 归一化放在 `embed()` 里而不是采集里，是因为**这里是两条路唯一的交汇点**。放在
+          采集里只归一化校验那一侧，注册那一侧仍然是原样，错配照旧。
+
+        全静音不归一化（不做除零）—— 那种输入该被质量门拒掉，而不是被放大成噪声。
         """
         self._require()
         duration = len(samples) / float(sample_rate)
@@ -263,7 +427,9 @@ class SpeakerVerificationProvider:
                 f"< {self.min_verify_seconds}s"
             )
         stream = self._extractor.create_stream()
-        stream.accept_waveform(sample_rate=sample_rate, waveform=samples)
+        stream.accept_waveform(
+            sample_rate=sample_rate, waveform=normalise_for_embedding(samples)
+        )
         stream.input_finished()
         if not self._extractor.is_ready(stream):
             raise ProviderUnavailable("speaker extractor did not accept enough audio")
@@ -283,18 +449,36 @@ class SpeakerVerificationProvider:
         name = (name or "").strip()
         if not name:
             raise ValueError("speaker name must not be empty")
-        vectors: list[list[float]] = []
-        total_seconds = 0.0
-        for chunk in chunks:
-            total_seconds += len(chunk) / float(sample_rate)
-            vectors.append(self.embed(chunk, sample_rate))
-        if not vectors:
+
+        # 注册也必须过质量门,和 verify() 同一道 —— 而且**先把所有段验一遍再做任何嵌入**。
+        #
+        # **为什么这是必需的而不是对称性洁癖。** 此前只有 verify() 查质量,enroll() 不查,
+        # 于是一段近乎无声的注册音频会被**接受**,落成几个噪声向量。后果不是「注册失败」
+        # 而是「注册成功、然后本人永远唤不醒」—— 门看起来配好了、describe() 照报样本数、
+        # 每次唤醒被拒的原因写着 below threshold,根因在注册那一侧却看不出来。
+        #
+        # 这条路真实存在:控制台注册走浏览器 getUserMedia,取系统默认输入设备,而 Windows
+        # 上一个被静音/被隐私设置拒绝的默认设备是**静默而不是报错**的（见
+        # core/audio/capture.py 的死麦克风检测,本机实测默认设备录 1 秒 peak=0.00003）。
+        # 采集侧和注册侧会同时中招,而此前只有采集侧有检测。
+        #
+        # 全部先验再嵌入,有两个好处:坏在第三段时不会先白算两次嵌入,而且报出来的段号
+        # 与模型是否可用无关 —— 拒绝的理由是音频本身,不该被一次嵌入失败盖过去。
+        samples = list(chunks)
+        if not samples:
             raise ValueError("enrollment needs at least one sample chunk")
+        for index, chunk in enumerate(samples):
+            issue = self._audio_quality_issue(chunk)
+            if issue is not None:
+                raise ProviderUnavailable(f"enrollment sample {index + 1} rejected: {issue}")
+
+        total_seconds = sum(len(chunk) / float(sample_rate) for chunk in samples)
         if total_seconds < self.min_enroll_seconds:
             raise ProviderUnavailable(
                 f"enrollment audio too short: {total_seconds:.2f}s "
                 f"< {self.min_enroll_seconds}s"
             )
+        vectors: list[list[float]] = [self.embed(chunk, sample_rate) for chunk in samples]
         speakers = self.store.load()
         speakers.setdefault(name, []).extend(vectors)
         self.store.save(speakers, dim=self._dim)
@@ -305,8 +489,20 @@ class SpeakerVerificationProvider:
 
     # -- verification --------------------------------------------------------
 
-    def verify(self, samples: Any, *, sample_rate: int = 16000) -> VerificationResult:
+    def verify(
+        self, samples: Any, *, sample_rate: int = 16000, throttle: bool = True
+    ) -> VerificationResult:
         """Decide whether in-memory audio belongs to an enrolled speaker.
+
+        ``throttle=False`` 把这一次校验从**暴力防护**里摘出去：不看冷却、不累计连续拒绝、
+        不动 ``gate_stats``。**只给本机控制台的「试一句」用。**
+
+        为什么必需（2026-08-31 实机）：控制台那颗按钮走的是同一个 `verify()`，于是它每一次
+        失败都算作一次「连续拒绝」。使用者连点几下试一句（而那时它因为另一个 bug 固定返回
+        0 分），第 5 次就把**真实唤醒门**推进了 30 秒冷却 —— 日志里是
+        `声纹拒绝「你好小沃」：verification cooling down for 25.4s`，而使用者看到的是
+        「说了唤醒词但根本没检测到」。一个本机、已鉴权、由人点出来的诊断不是暴力尝试，
+        它不该消耗那个额度。
 
         This never raises for an ordinary rejection. Every failure path --
         cooldown, bad audio quality, model missing, nobody enrolled, embedding
@@ -317,7 +513,7 @@ class SpeakerVerificationProvider:
         # Cheap input-side gates run before anything expensive or
         # environment-dependent, so their verdicts stay reachable even on a
         # host with no model installed.
-        if self._cooldown_active():
+        if throttle and self._cooldown_active():
             self.gate_stats["rejected_cooldown"] += 1
             remaining = round(self._cooldown_until - self._clock(), 1)
             return VerificationResult(
@@ -325,18 +521,21 @@ class SpeakerVerificationProvider:
             )
         quality = self._audio_quality_issue(samples)
         if quality is not None:
-            self.gate_stats["rejected_quality"] += 1
+            self._tally("rejected_quality", throttle=throttle)
             return self._after_input_rejection(
-                VerificationResult(False, None, 0.0, quality)
+                VerificationResult(False, None, 0.0, quality), throttle=throttle
             )
         try:
             self._require()
         except ProviderUnavailable as exc:
             return VerificationResult(False, None, 0.0, str(exc))
+        # 盘上的档案变了就先重读。**这一步不能省**：另一个进程注册的档案只在文件里，
+        # 而这里比的是内存里那份。见 `refresh` 的注释与 2026-08-30 的实机时间线。
+        self.refresh()
         if self._manager.num_speakers == 0:
             return VerificationResult(False, None, 0.0, "no speaker enrolled")
         if self.verify_windows > 1:
-            return self._verify_multi_window(samples, sample_rate)
+            return self._verify_multi_window(samples, sample_rate, throttle=throttle)
         try:
             vector = self.embed(samples, sample_rate)
         except Exception as exc:
@@ -345,26 +544,66 @@ class SpeakerVerificationProvider:
         if name is None:
             return VerificationResult(False, None, 0.0, "no comparable enrollment")
         if score >= self.threshold:
-            self._rejection_streak = 0
-            self.gate_stats["consecutive_rejections"] = 0
-            self.gate_stats["accepted"] += 1
+            if throttle:
+                self._rejection_streak = 0
+                self.gate_stats["consecutive_rejections"] = 0
+                self.gate_stats["accepted"] += 1
             return VerificationResult(True, name, score, "match")
-        self.gate_stats["rejected_below_threshold"] += 1
+        self._tally("rejected_below_threshold", throttle=throttle)
+        # 把测出来的输入质量附上。「below threshold 0.5」单独出现时把人引向「调阈值」或
+        # 「换模型」,而实机日志里真正的毛病是 peak=1.000 的削波 —— 那件事此前完全不可见,
+        # 因为削波不到 5% 时质量门是放行的。见 input_quality 的注释。
+        quality = self.input_quality(samples)
+        detail = f"below threshold {self.threshold}"
+        if quality["clip"] > 0.0:
+            detail += f"；输入削波 {quality['clip']:.1%}（峰值 {quality['peak']:.3f}）—— 麦克风增益偏高会削掉说话人特征"
+        elif quality["rms"] < self.min_rms * 3:
+            detail += f"；输入偏轻（rms {quality['rms']:.4f}）"
         return self._after_input_rejection(
-            VerificationResult(False, None, score, f"below threshold {self.threshold}")
+            VerificationResult(False, None, score, detail), throttle=throttle
         )
 
-    def _cooldown_active(self) -> bool:
-        return self._clock() < self._cooldown_until
+    def _tally(self, key: str, *, throttle: bool) -> None:
+        """记一次门的统计。``throttle=False``（试一句）不进统计 —— 一次诊断混进唤醒漏斗
+        会让「门拒了几次」这个数字说不清是谁在敲门。"""
+        if throttle:
+            self.gate_stats[key] += 1
 
-    def _after_input_rejection(self, result: VerificationResult) -> VerificationResult:
+    def _cooldown_active(self) -> bool:
+        """冷却是否仍在生效。**服刑期满即销账。**
+
+        以前这里只是比一下时间，而 ``_rejection_streak`` 要等到「距上次拒绝超过 60 秒」
+        才归零 —— 于是 30 秒的冷却结束后计数还停在 5，**再拒一次就立刻又是 30 秒**。
+        实测（2026-08-29 使用者的实机日志）：`cooling down for 0.5s` → 一次真实校验
+        0.484 → 紧接着 `cooling down for 25.2s`。也就是本人被压到**每 30 秒只有一次
+        真实尝试**，而每次都在阈值边缘，于是永远进不来。
+
+        暴力防护的目的是**限速**，不是累加惩罚。等满了就该重新给满额度：现在是
+        「每 30 秒 5 次」，仍然挡得住穷举，但不会把一个正在调声纹的本人锁死。
+        """
+        if self._clock() < self._cooldown_until:
+            return True
+        if self._cooldown_until:
+            self._cooldown_until = 0.0
+            self._rejection_streak = 0
+            self.gate_stats["consecutive_rejections"] = 0
+        return False
+
+    def _after_input_rejection(
+        self, result: VerificationResult, *, throttle: bool = True
+    ) -> VerificationResult:
         """Feed one input-driven rejection into the brute-force throttle.
 
         Model-missing and nobody-enrolled rejections say nothing about the
         input, so they never reach here -- only junk or unmatched audio does.
         A streak older than one cooldown period starts over: yesterday's
         pressure must not lock the owner out today.
+
+        ``throttle=False`` 原样返回：控制台「试一句」的失败不是一次暴力尝试，
+        不该占用本人的额度。见 ``verify`` 的注释与 2026-08-31 的实机日志。
         """
+        if not throttle:
+            return result
         now = self._clock()
         if now - self._last_rejection_at > max(self.cooldown_s, 60.0):
             self._rejection_streak = 0
@@ -377,6 +616,26 @@ class SpeakerVerificationProvider:
         ):
             self._cooldown_until = now + self.cooldown_s
         return result
+
+    def input_quality(self, samples: Any) -> dict[str, float]:
+        """这段音频的 RMS 与削波比例。**给拒绝原因用的，不做判决。**
+
+        为什么需要它：使用者 2026-08-29 的实机日志里，每一次唤醒的块峰值都是 **1.000**，
+        而拒绝原因只写「below threshold 0.5」。那句话把人引向「阈值不对」或「模型不行」，
+        而真实情况是**输入在削波** —— 麦克风增益太高，波形贴着轨走，说话人特征被削掉了
+        一部分，于是相似度稳定落在 0.34–0.48 这个「不同人」的区间里。
+
+        削波不到 ``max_clip_ratio``（5%）时质量门是**放行**的，所以它此前完全不可见。
+        把测出来的数字附在拒绝原因里，这件事就不用猜了。
+        """
+        values = np.asarray(samples, dtype=np.float32)
+        if values.size == 0:
+            return {"rms": 0.0, "clip": 0.0, "peak": 0.0}
+        return {
+            "rms": float(np.sqrt(np.mean(np.square(values)))),
+            "clip": float(np.mean(np.abs(values) >= 0.99)),
+            "peak": float(np.max(np.abs(values))),
+        }
 
     def _audio_quality_issue(self, samples: Any) -> str | None:
         """Reject silence or clipping before any model runs.
@@ -396,7 +655,9 @@ class SpeakerVerificationProvider:
             return f"audio is clipped/saturated ({clip_ratio:.2f} at rail; limit {self.max_clip_ratio})"
         return None
 
-    def _verify_multi_window(self, samples: Any, sample_rate: int) -> VerificationResult:
+    def _verify_multi_window(
+        self, samples: Any, sample_rate: int, *, throttle: bool = True
+    ) -> VerificationResult:
         """Every equal window must match the same speaker above threshold.
 
         Stricter than a single pass: flukes and short splices must survive
@@ -414,7 +675,8 @@ class SpeakerVerificationProvider:
                     0.0,
                     f"not enough audio for {self.verify_windows}-window verification:"
                     f" {len(values)} samples < {self.verify_windows} x {minimum}",
-                )
+                ),
+                throttle=throttle,
             )
         best_score = 0.0
         agreed_speaker: str | None = None
@@ -430,7 +692,8 @@ class SpeakerVerificationProvider:
                         None,
                         best_score,
                         f"window {index} below threshold {self.threshold}",
-                    )
+                    ),
+                    throttle=throttle,
                 )
             if agreed_speaker is None:
                 agreed_speaker = name
@@ -441,11 +704,13 @@ class SpeakerVerificationProvider:
                         None,
                         best_score,
                         f"windows disagree on speaker: {agreed_speaker} vs {name}",
-                    )
+                    ),
+                    throttle=throttle,
                 )
-        self._rejection_streak = 0
-        self.gate_stats["consecutive_rejections"] = 0
-        self.gate_stats["accepted"] += 1
+        if throttle:
+            self._rejection_streak = 0
+            self.gate_stats["consecutive_rejections"] = 0
+            self.gate_stats["accepted"] += 1
         return VerificationResult(True, agreed_speaker, best_score, "all windows match")
 
     def _best_match(self, vector: list[float]) -> tuple[str | None, float]:
@@ -490,13 +755,19 @@ class SpeakerVerificationProvider:
 
         Enrollment data is biometric, so this is the single sanctioned way to
         report on it. Callers must not reach into ``store`` directly.
+
+        开头先 ``refresh()``：这份状态是给人看「门现在认谁」的，而 ``speakers`` 读的是
+        文件、门读的是内存。不先对齐的话，页面会显示一个门还没看见的名字 —— 那正是
+        2026-08-30 那次「明明重新录过了却认不出」里最误导人的一环。
         """
+        self.refresh()
         try:
             speakers = self.store.load()
         except ProviderUnavailable as exc:
             return {
                 "available": self.available,
                 "model": str(self.model_path),
+                "model_label": model_label(self.model_path),
                 "store": str(self.store.path),
                 "loaded": self._extractor is not None,
                 "speakers": [],
@@ -505,12 +776,20 @@ class SpeakerVerificationProvider:
         return {
             "available": self.available,
             "model": str(self.model_path),
+            # 短名，给界面用。一眼看不出「换型了没有」的话，这份状态就答不了最常问的
+            # 那个问题 —— 见 MODEL_LABELS 的注释。
+            "model_label": model_label(self.model_path),
             "store": str(self.store.path),
             "loaded": self._extractor is not None,
             "dim": self._dim,
             "threshold": self.threshold,
             "speakers": sorted(speakers),
             "samples_per_speaker": {name: len(v) for name, v in speakers.items()},
+            # 因 embedding 维度不符而作废的档案。**非空时上面那个 speakers 是骗人的** ——
+            # 文件里有这个名字，但它的向量对当前模型无意义，门会照常拒绝。换 embedding
+            # 模型（2026-08-29 ERes2Net dim 512 → CAM++ dim 192）就会出现这种状态。
+            "stale_profiles": dict(self.stale_profiles),
+            "needs_reenrollment": sorted(self.stale_profiles),
             "gate": {
                 "min_rms": self.min_rms,
                 "max_clip_ratio": self.max_clip_ratio,
@@ -519,6 +798,12 @@ class SpeakerVerificationProvider:
                 "cooldown_s": self.cooldown_s,
             },
             "gate_stats": dict(self.gate_stats),
+            # 门**当前内存里**认的那些名字。和上面的 `speakers`（读文件）分开报：两者
+            # 不一致就说明有人在这个进程之外改过档案，而那正是「注册了却唤不醒」的形状。
+            # 正常情况下它们相同 —— `refresh()` 在这个方法开头已经把它们对齐了。
+            "live_speakers": sorted(self._manager.all_speakers) if self._manager is not None else [],
+            "store_reloads": int(self.store_reloads),
+            "store_reload_errors": int(self.store_reload_errors),
         }
 
     def close(self) -> None:

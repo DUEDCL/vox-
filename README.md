@@ -49,7 +49,7 @@ Windows 平台上的 Vox 本地优先语音唤醒对话平台。
 | VAD | Silero VAD | — |
 | ASR | streaming Zipformer zh-14M | faster-whisper / SenseVoiceSmall |
 | TTS | MeloTTS VITS | Kokoro-82M |
-| 声纹准入 | 3D-Speaker ERes2Net（经 sherpa-onnx，零新依赖） | 同系列 200k 通用模型 |
+| 声纹准入 | 3D-Speaker CAM++（经 sherpa-onnx，零新依赖；dim 192） | 同系列 ERes2Net（2026-08-29 起改为备选） |
 | agent 接入 | headless CLI 子进程 + ACP + OpenAI 兼容 HTTP | EvoX 桥接 |
 | 工具扩展 | MCP over stdio（三层默认关） | — |
 | 记忆 | SQLite + FTS5 单文件 + Markdown | 明确不做向量检索 |

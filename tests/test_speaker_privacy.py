@@ -14,6 +14,7 @@ asserting here are precisely the ones that must hold when the model is absent.
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
@@ -218,6 +219,34 @@ def test_stop_clears_retained_audio():
     assert len(capture._ring) == 0
 
 
+def test_recent_audio_hands_out_a_copy_not_the_buffer():
+    """注册（`ConsoleApi.capture_clip`）现在从这里取音频，而它会**握着那个数组几秒钟**
+    等下一段。给出视图的话，采集回调会在这几秒里从底下把它改掉 —— 注册用的样本于是
+    既不是当时录的那一段，也不是任何一段完整的音频。"""
+    import numpy as np
+
+    capture = _capture(require_verification=False)
+    capture._callback(_block(160, 0.5), 160, None, None)
+
+    taken = capture.recent_audio(1.0)
+    assert taken.size > 0
+    taken[:] = 0.0
+
+    assert float(np.max(np.abs(capture.recent_audio(1.0)))) > 0.0, "外面改动不许影响缓冲"
+    assert capture.buffer_seconds > 0
+
+
+def test_forget_recent_audio_drops_the_window():
+    capture = _capture(require_verification=False)
+    capture._callback(_block(160), 160, None, None)
+    assert len(capture._ring) > 0
+
+    capture.forget_recent_audio()
+
+    assert len(capture._ring) == 0
+    assert capture.recent_audio(1.0).size == 0
+
+
 # -- fail-closed at the capture boundary ------------------------------------
 
 
@@ -229,14 +258,76 @@ def test_start_refuses_when_verification_is_required_but_absent(monkeypatch):
     assert capture._stream is None, "a refused gate must not leave a device open"
 
 
-def test_start_refuses_when_nobody_is_enrolled(monkeypatch):
-    monkeypatch.setitem(sys.modules, "sounddevice", object())
+def test_nobody_enrolled_opens_the_device_only_for_enrolling(monkeypatch):
+    """**2026-08-31 改了这一条，而且它不是放宽。**
+
+    此前「一个人都没注册」也抛，于是形成一个死锁：声纹门不许开麦，而控制台的注册要从
+    采集缓冲取音频 —— 第一次注册只能用命令行脚本。使用者的要求是「希望在控制台能进行
+    全部的设置，包括第一次录制声纹」。
+
+    现在走 ``enroll_only``：设备开着、缓冲照常填，但 ``wake_held`` 恒真，``_authorise``
+    永远不会被调到。真正不许绕过的断言是「唤醒不经校验不许通过」—— 下面那两行钉的就是它。
+    """
+    opened = {}
+
+    class Stream:
+        def __init__(self, **kwargs):
+            opened.update(kwargs)
+
+        def start(self):
+            opened["started"] = True
+
+    monkeypatch.setitem(sys.modules, "sounddevice", SimpleNamespace(InputStream=Stream))
     capture = _capture(verifier=StubVerifier(speakers=()))
-    with pytest.raises(ProviderUnavailable, match="nobody is enrolled"):
-        capture.start()
+
+    capture.start()
+
+    assert capture.enroll_only is True
+    assert capture.wake_held is True, "注册模式下唤醒判定必须一直被按住"
+    # 一整块正常电平的音频进来，也绝不许产生唤醒。
+    woke = []
+    capture.on_wake = lambda *a: woke.append(a)
+    capture.keyword_provider.hits = ["你好问问"]
+    capture._callback(_block(160), 160, None, None)
+    assert woke == [], "enroll_only 下不许有任何唤醒被接受"
+    assert capture.kws_hits == 0, "连 KWS 都不该被喂到"
 
 
-def test_start_refuses_when_the_model_is_missing(monkeypatch, tmp_path):
+def test_enrolling_from_the_console_arms_the_wake_without_a_restart():
+    """**「注册完就会响应唤醒词」必须是真的。**
+
+    ``enroll_only`` 只在 ``start()`` 里判一次，而控制台注册发生在麦克风已经跑起来之后。
+    2026-09-01 实机：使用者在页面上注册成功，页面写着注册完就会响应唤醒词，可
+    ``wake_held`` 仍然恒真 —— 喊什么都没反应，必须重启。页面上那句话就是这个方法。
+    """
+    verifier = StubVerifier(speakers=())
+    capture = _capture(verifier=verifier, require_verification=True)
+    capture.enroll_only = True
+
+    # 注册前：解不开，因为档案表还是空的。
+    assert capture.arm_after_enrollment() is False
+    assert capture.wake_held is True
+
+    verifier.speakers = ["du"]  # 注册成功（控制台走的是同一个 verifier 实例）
+
+    assert capture.arm_after_enrollment() is True
+    assert capture.enroll_only is False
+    assert capture.wake_held is False, "注册成功之后唤醒判定必须自己解开，不该要求重启"
+    # 幂等：已经解开了就不再报「刚解开」。
+    assert capture.arm_after_enrollment() is False
+
+
+def test_arming_never_runs_the_other_way():
+    """**只从「按住」走向「正常」。** 关掉唤醒的判定权仍然只属于 `_check_gate_preconditions`
+    —— 一个能把 `enroll_only` 打开的公开方法等于给「让唤醒失效」开了一个远程开关。"""
+    capture = _capture(verifier=StubVerifier(speakers=()), require_verification=True)
+
+    assert capture.enroll_only is False
+    assert capture.arm_after_enrollment() is False
+    assert capture.enroll_only is False, "这个方法不许把注册模式打开"
+
+
+def test_start_still_refuses_when_the_model_is_missing(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "sounddevice", object())
     verifier = SpeakerVerificationProvider(
         model_path=tmp_path / "absent.onnx", store_path=tmp_path / "store.json"

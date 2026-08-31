@@ -13,6 +13,7 @@ sentence instead would mean an unauthorised speaker has already seen the orb.
 from __future__ import annotations
 
 import importlib
+import time
 from typing import Any
 
 from .base import ProviderUnavailable
@@ -47,6 +48,12 @@ class SounddeviceWakeCapture:
         asr_provider: Any = None,
         on_recognized: Any = None,
         on_verified: Any = None,
+        on_input_silent: Any = None,
+        on_kws_hit: Any = None,
+        auto_gain: Any = None,
+        silent_peak: float = 1e-4,
+        silent_grace_s: float = 4.0,
+        listen_grace_s: float = 8.0,
     ) -> None:
         self.keyword_provider = keyword_provider
         self.on_wake = on_wake
@@ -86,6 +93,100 @@ class SounddeviceWakeCapture:
         #: Count only business/callback exceptions; never retain their messages.
         self.callback_errors = 0
         self.last_callback_error: str | None = None
+
+        #: --- 死麦克风检测 -------------------------------------------------
+        #:
+        #: **为什么需要它。** Windows 上一个被静音、被隐私设置拒绝、或者根本不在用的输入
+        #: 设备**不会报错** —— 它照常打开、回调照常以正确速率触发、每一块样本全是零。
+        #: 于是 KWS 永远不命中，而每一层都报告自己健康。实测（2026-08-29，本机默认设备
+        #: `麦克风阵列 (Realtek(R) Audio)`）：1.2 秒采集的 peak 是 **0.00003**，而同一
+        #: 时刻另一个设备（耳机）是 **0.027**。前者是数值噪声，不是房间。
+        #:
+        #: 那次的表现是「自定义唤醒词唤不醒」，于是词表、阈值、音素、声纹阈值被逐个怀疑
+        #: 了好几轮 —— 而没有一层坏。**一个静默失败的输入设备比一个打不开的设备糟得多**，
+        #: 所以这里把它变成可观测的事实。
+        #:
+        #: 判据是 peak 而不是 RMS：一段正常的静音房间 RMS 也很低，但 peak 会有噪声底。
+        #: 全零的设备两个都没有。1e-4（-80 dBFS）把上面那两个实测值分在两侧，余量很宽。
+        self.on_input_silent = on_input_silent
+        self.silent_peak = silent_peak
+        self.silent_grace_s = silent_grace_s
+        #: KWS 命中的出口，在声纹门**之前**。见 ``_authorise`` 里那段注释：一次被声纹
+        #: 拒绝的唤醒和一次根本没命中的唤醒在用户眼里一样，而根因完全不同。
+        self.on_kws_hit = on_kws_hit
+        #: KWS 命中总次数（含被拒的）。和 ``on_kws_hit`` 分开：计数是给「就绪清单」用的，
+        #: 回调是给日志用的，而一个没接回调的调用方仍然该能看到数字。
+        self.kws_hits = 0
+        #: 自适应输入增益（``core/audio/gain.AutoGain``）。``None`` = 不处理，原样透传 ——
+        #: 测试与验收脚本要能拿到未经处理的电平。
+        self.auto_gain = auto_gain
+        #: 「唤醒被接受但没进聆听」的次数与最后一次的原因。**这是「命中之后没有后文」
+        #: 唯一的读数** —— 缺 ASR 与缺 on_recognized 在用户那里长得一样。
+        self.listen_refusals = 0
+        self.last_listen_refusal = ""
+        #: 同一件事的回调出口，让 runtime 把它写进运行日志。
+        self.on_listen_refused: Any = None
+
+        #: --- 聆听宽限期 ---------------------------------------------------
+        #:
+        #: **修的是「唤醒后不马上说话就再也不听了」。** 流式识别器的端点检测在一个字都没
+        #: 解出来时也会报端点 —— `rule1_min_trailing_silence=2.4`，也就是静默 2.4 秒。
+        #: 此前 `_recognize` 收到那一下就把聆听结束掉：`_listening=False`、流 reset、
+        #: 转写是空的所以**不通知任何人**。后果有两层，而且都是静默的：
+        #:
+        #: 1. 状态机还停在 LISTENING（唤醒球一直显示「在听」），而采集已经回到 KWS 模式 ——
+        #:    球在说谎；
+        #: 2. 使用者停顿两秒后再说话，那些话只喂给 KWS，于是「它不听我了」。
+        #:
+        #: 现在：端点报空转写时，还在宽限期内就**换一条新的识别流继续听**（中途停顿因此
+        #: 不致命），超过了才结束并调 ``on_listen_expired`` —— 那一步让状态退回 IDLE，
+        #: 「它不听了」这件事因此可见。
+        self.listen_grace_s = float(listen_grace_s)
+        self.on_listen_expired: Any = None
+        #: 宽限期内换过几次识别流 / 因超时结束过几次聆听。给诊断读。
+        self.listen_restarts = 0
+        self.listen_expiries = 0
+        self._listen_started_at = 0.0
+        #: 本次 start() 以来见过的最大绝对样本值。诊断与就绪清单读它。
+        self.input_peak = 0.0
+        #: 已收到的音频块数。乘 blocksize/sample_rate 就是流时长。
+        self.input_blocks = 0
+        #: 判定成立时置位；只报一次，不每块都喊。
+        self.input_silent = False
+        self._silent_reported = False
+
+        #: --- 输出静音窗 ---------------------------------------------------
+        #:
+        #: **为什么需要它。** 唤醒命中之后有两件事同时发生：识别器开始听（``_start_listening``），
+        #: 以及确认音从**扬声器**放出来（``VoiceRuntime._greet``）。麦克风听得见扬声器，
+        #: 所以那 0.8–1.6 秒的「你说吧」会被采进识别器，而它一放完就是一段静音 ——
+        #: 端点检测正好在这时触发。两个结局都是坏的：
+        #:
+        #: - 转写非空（比如就是「你说吧」）-> 拿确认音自己当请求跑了一整轮，
+        #:   而 ``_listening`` 已经归零，使用者真正要说的话没有一个字被听见；
+        #: - 转写为空 -> 「空转写不开启回合」，直接回 KWS 模式，同样没有后文。
+        #:
+        #: 表现就是使用者 2026-08-30 报的「**有几率**在唤醒后不能进行后续的对话」——
+        #: 「有几率」正是因为它取决于人有没有在确认音放完之前开口。更讽刺的是出厂那四句
+        #: 是**按「喂回 ASR 能不能识别回原文」挑出来的**（见 acks.py 那张表），也就是说
+        #: 它们恰好是最容易劫持转写的那一批。
+        #:
+        #: 做法是在这段窗口里**整块丢弃**，不是喂静音：喂静音会让识别器内部的时间继续走，
+        #: 端点照样可能触发；丢弃则让识别器停在原地等真正的人声。代价是人如果抢在确认音
+        #: 上说话，那几个字会丢 —— 而它们本来也和确认音混在一起，转写不出什么。
+        self._mute_until = 0.0
+        #: 被静音窗丢掉的块数。给「就绪清单」和诊断读 —— 一个静音窗如果因为哪里算错了
+        #: 一直不解除，症状会是「完全不响应」，那时这个数字是唯一的读数。
+        self.muted_blocks = 0
+        #: 唤醒判定被按住到什么时候。见 ``hold_wake_for`` —— 控制台取样期间用。
+        self._wake_held_until = 0.0
+        self.wake_holds = 0
+        #: 被 VAD 判成语音的块数。``speech_blocks / input_blocks`` 就是「这段时间里
+        #: 有多少是人在说话」—— 一个长期为 0 的比例说明麦克风只收到了房间。
+        self.speech_blocks = 0
+        #: ``start(enroll_only=True)`` 置位：设备开着、缓冲照常填，但**唤醒永不判定**。
+        #: 存在的理由见 ``start`` 的注释 —— 第一次注册的鸡生蛋问题。
+        self.enroll_only = False
 
     # -- lifecycle helpers ----------------------------------------------------
 
@@ -175,8 +276,17 @@ class SounddeviceWakeCapture:
     def _check_gate_preconditions(self) -> None:
         """Refuse to start when the configured gate cannot possibly hold.
 
-        Every branch here raises. There is no path that logs a warning and opens
-        the microphone anyway -- that is what fail-closed means in practice.
+        缺 verifier、模型读不出来 —— 这两条一律抛。**没有一条路是「记个警告然后照样开麦」**，
+        那才是 fail-closed 的实际含义。
+
+        「一个人都没注册」是**唯一**的例外，而且它不是放宽：这种情况下走
+        ``enroll_only`` —— 设备开着、缓冲照常填，但 ``wake_held`` 恒真，``_authorise``
+        永远不会被调到，所以没有任何唤醒能被接受。真正不许绕过的断言是「唤醒不经校验不许
+        通过」，那一条仍然成立。
+
+        为什么要这个例外：此前它是一个死锁 —— 声纹门不许开麦，而控制台注册要从采集缓冲取
+        音频，于是**第一次注册只能用命令行脚本**。使用者的要求是「希望在控制台能进行全部
+        的设置，包括第一次录制声纹」，而一个必须先开终端才能用的产品配不上「成熟」这个词。
         """
         if not self.require_verification:
             return
@@ -193,10 +303,9 @@ class SounddeviceWakeCapture:
                 f"speaker verification is required but unusable: {status.details['reason']}"
             )
         if not self.verifier.speakers:
-            raise ProviderUnavailable(
-                "speaker verification is required but nobody is enrolled; "
-                "run scripts/enroll_speaker.py first"
-            )
+            # 死锁的出口，不是放宽：进 enroll_only 之后 `wake_held` 恒真，`_authorise`
+            # 永远不会被调到，所以「唤醒不经校验不许通过」这条断言仍然成立。
+            self.enroll_only = True
 
     def _report_verified(self, speaker: str | None) -> None:
         """Deliver the gate's identity verdict without letting it break the wake.
@@ -212,8 +321,26 @@ class SounddeviceWakeCapture:
         except Exception as exc:  # noqa: BLE001 - counted, never propagated
             self._record_callback_error(exc)
 
+    def _note_kws_hit(self, keyword: str) -> None:
+        """报一次 KWS 命中。计数总是加，回调可选且不许把音频线程带走。"""
+        self.kws_hits += 1
+        if self.on_kws_hit is None:
+            return
+        try:
+            self.on_kws_hit(keyword)
+        except Exception as exc:  # noqa: BLE001 - 和其他 sink 同一个姿态
+            self._record_callback_error(exc)
+
     def _authorise(self, keyword: str) -> None:
         """Decide one wake hit, then drop the audio it was decided on."""
+        # KWS 命中先报，再判门。**这两件事必须分开可见**：一次被声纹拒绝的唤醒和一次
+        # 根本没命中的唤醒，在用户眼里长得一模一样（都是「没反应」），而根因完全不同 ——
+        # 前者要调声纹/重注册，后者要调词表/阈值/麦克风。实机诊断里正是靠这一层的分离
+        # 才看出「KWS 命中 16/16、声纹 0/16」。
+        #
+        # 报在最前面：下面每一条路（无门放行、verifier 抛异常、拒绝、接受）都已经算作
+        # 「命中之后发生的事」。
+        self._note_kws_hit(keyword)
         # Clear first, unconditionally. Every path below either leaves this
         # standing (no gate, error, rejection) or replaces it with a verified
         # name. There is no ordering in which a previous speaker's identity
@@ -246,15 +373,42 @@ class SounddeviceWakeCapture:
 
     def _start_listening(self) -> None:
         """Enter ASR mode after an accepted wake, so the follow-up speech is
-        transcribed rather than fed to KWS."""
-        if self.asr_provider is None or self.on_recognized is None:
+        transcribed rather than fed to KWS.
+
+        **不能声地返回。** 这两个前提缺任何一个，症状都是使用者 2026-08-29 报的那句
+        「命中唤醒后没有后文，也不听我的后续指令」—— 球弹出来了、确认音也响了（那两件事
+        走 ``on_wake``），但识别器从来没开，于是没有一个字被转写。此前这里是一句静默的
+        ``return``，所以那个状态在任何地方都看不见。
+        """
+        if self.asr_provider is None:
+            self._note_listen_refused("没有 ASR provider —— 唤醒之后不会转写任何东西")
+            return
+        if self.on_recognized is None:
+            self._note_listen_refused("没有接 on_recognized —— 转写出来也没人接")
             return
         self._asr_stream = self.asr_provider.create_stream()
         self._listening = True
+        self._listen_started_at = time.monotonic()
+
+    def _note_listen_refused(self, reason: str) -> None:
+        """记下「唤醒被接受了但没进聆听」。计数总是加，回调可选。"""
+        self.listen_refusals += 1
+        self.last_listen_refusal = reason
+        if self.on_listen_refused is None:
+            return
+        try:
+            self.on_listen_refused(reason)
+        except Exception as exc:  # noqa: BLE001 - 和其他 sink 同一个姿态
+            self._record_callback_error(exc)
 
     def _recognize(self, samples: Any) -> None:
         """Feed the recognizer; on an endpoint, deliver the final text and
-        return to KWS mode."""
+        return to KWS mode.
+
+        **空转写不等于「不听了」。** 端点检测在一个字都没解出来时也会报端点（静默 2.4 秒），
+        而此前那一下会直接结束聆听且不通知任何人 —— 见 ``listen_grace_s`` 那段注释。
+        现在空转写在宽限期内只是换一条新的识别流：人想两秒再开口是正常的。
+        """
         if self._asr_stream is None:
             self._listening = False
             return
@@ -263,15 +417,207 @@ class SounddeviceWakeCapture:
             return
         asr_stream = self._asr_stream
         text = self.asr_provider.finalize(asr_stream)
+        if not text.strip():
+            self._restart_or_expire(asr_stream)
+            return
         # Detach first so a reset/callback failure cannot trigger a second reset
         # from the outer recovery path.
         self._listening = False
         self._asr_stream = None
         self.asr_provider.reset(asr_stream)
-        if text.strip():
-            self.on_recognized(text.strip())
+        self.on_recognized(text.strip())
+
+    def _restart_or_expire(self, asr_stream: Any) -> None:
+        """端点到了但一个字都没有：还在宽限期内就继续听，否则结束聆听并报出来。"""
+        self.asr_provider.reset(asr_stream)
+        waited = time.monotonic() - self._listen_started_at
+        if waited < self.listen_grace_s:
+            # 换一条新的流而不是复用：reset 之后的流能再用，但换一条让「这一段静默不算」
+            # 这件事在状态上干净，也避免任何残留的解码状态跨过这次停顿。
+            self._asr_stream = self.asr_provider.create_stream()
+            self.listen_restarts += 1
+            return
+        self._listening = False
+        self._asr_stream = None
+        self.listen_expiries += 1
+        if self.on_listen_expired is None:
+            return
+        try:
+            self.on_listen_expired(round(waited, 1))
+        except Exception as exc:  # noqa: BLE001 - 和其他 sink 同一个姿态
+            self._record_callback_error(exc)
+
+    # -- 注册用的音频（和校验同一份缓冲）--------------------------------------
+
+    @property
+    def listening(self) -> bool:
+        """现在是不是在「唤醒之后的聆听」阶段。
+
+        公开它是因为控制台要据此拒绝取样：聆听期间音频**全部喂给识别器、一个样本都不进
+        环形缓冲**，那时取快照只会拿到一段空的。
+        """
+        return bool(self._listening)
+
+    def hold_wake_for(self, seconds: float) -> None:
+        """这段时间内不判唤醒词，但**照常写环形缓冲**。
+
+        存在的理由是 2026-08-31 实机报的「试一句经常 0 分」。控制台取样时会让人说话，而
+        页面上提示说的正是唤醒词 —— 于是 KWS 真的命中：`_authorise` 走完之后 `finally`
+        里 `_ring.clear()` 把刚录的清了，紧接着 `_start_listening()` 把模式切成聆听，
+        之后的块**不再进环形缓冲**。取样结束时快照几乎是空的，质量门判「太轻」，
+        分数 0。顺带还白弹一次球、白播一次确认音、白开一次聆听。
+
+        所以取样期间要把唤醒这条路**按住**：不喂 KWS 就不会命中，缓冲照常填。
+        这不放宽任何安全边界 —— 它让唤醒**更难**发生，而且只在本机已鉴权的取样窗口内。
+        """
+        try:
+            span = float(seconds)
+        except (TypeError, ValueError):
+            return
+        self._wake_held_until = time.monotonic() + span if span > 0 else 0.0
+
+    def release_wake(self) -> None:
+        """立刻恢复唤醒判定。"""
+        self._wake_held_until = 0.0
+
+    def arm_after_enrollment(self) -> bool:
+        """注册完之后重判一次 ``enroll_only``。解开了返回 ``True``。
+
+        **不重判就等于骗人。** ``enroll_only`` 只在 ``start()`` 里判一次，而控制台注册
+        是在麦克风已经跑起来之后发生的 —— 2026-09-01 实机：使用者在页面上注册成功，
+        页面写着「注册完就会响应唤醒词」，可 ``wake_held`` 仍然恒真，喊什么都没有反应，
+        必须重启才行。页面上那句话是这个方法的存在理由。
+
+        **只从「按住」走向「正常」，反向不做。** 关掉唤醒的判定权仍然只属于
+        ``_check_gate_preconditions``：这里复用它的那一条前提（有人注册了吗），
+        没有人注册就原样按住 —— 所以「唤醒不经校验不许通过」仍然成立。
+        """
+        if not self.enroll_only:
+            return False
+        if self.verifier is None or not getattr(self.verifier, "speakers", ()):
+            return False
+        self.enroll_only = False
+        return True
+
+    @property
+    def wake_held(self) -> bool:
+        # ``enroll_only`` 是永久的按住：那一路开麦只为了录注册样本。
+        return self.enroll_only or time.monotonic() < self._wake_held_until
+
+    def has_speech(self, samples: Any) -> bool:
+        """这一段音频里有没有人在说话。没接 VAD 时**放行**（返回 True）。
+
+        控制台的取样 / 注册 / 试一句据此拒绝。用 VAD 而不是一条峰值线，是因为峰值分不清
+        「轻的语音」和「放大后的底噪」—— 实测底噪 ×10 判 False，而真人声缩到峰值 0.01
+        仍判 True。
+        """
+        gate = self.speech_gate
+        checker = getattr(gate, "has_speech", None)
+        if not callable(checker):
+            return True
+        try:
+            return bool(checker(samples))
+        except Exception:  # noqa: BLE001 - 判不了就放行，它不是安全边界
+            return True
+
+    #: 环形缓冲的容量（秒）。调用方靠它知道最多能要多长。
+    @property
+    def buffer_seconds(self) -> float:
+        return float(self._ring.seconds)
+
+    def recent_audio(self, seconds: float) -> Any:
+        """最近 ``seconds`` 秒输入音频的**副本**。
+
+        存在的理由是**注册和校验必须同信道**。此前控制台的注册走浏览器 `getUserMedia`：
+        那是**浏览器认为的默认设备**（不是 ``device``），带浏览器自己的 AGC / 降噪 /
+        回声消除和采样率，而校验读的是这里这条流。两条链路各自都「录成功了」，比出来的
+        相似度却是在比链路而不是比人。
+
+        公开这个方法而不是让调用方去摸 ``_ring``：环形缓冲的所有权在这个类，
+        「音频永不落盘、永不出进程」那条红线也守在这个类。
+
+        快照是拷贝，可以在别的线程上取 —— `AudioRingBuffer.snapshot` 就是为此写的。
+        """
+        return self._ring.snapshot(seconds)
+
+    def forget_recent_audio(self) -> None:
+        """丢掉缓冲里的音频。注册前调用一次，免得把上一段的尾巴算进这一段。"""
+        self._ring.clear()
+
+    # -- 输出静音窗 -----------------------------------------------------------
+
+    @property
+    def muted(self) -> bool:
+        """现在是否在静音窗里。"""
+        return time.monotonic() < self._mute_until
+
+    def mute_for(self, seconds: float) -> None:
+        """从现在起丢弃 ``seconds`` 秒的输入。
+
+        语义是**赋值**而不是「取更大的那个」，这是刻意的：调用方的用法是「播放前压一个
+        够长的上限，播放（阻塞）结束后再压一个短尾巴」，第二次调用必须能把窗口收回来，
+        否则每次唤醒都会白聋掉上限那么久。
+
+        没有锁：一次浮点赋值在 GIL 下是原子的，而读侧（音频回调）读到旧值或新值都自洽。
+        为此存的是**绝对截止时刻**而不是「剩余块数」—— 后者需要读改写，那才真的需要锁。
+        """
+        try:
+            span = float(seconds)
+        except (TypeError, ValueError):
+            return
+        self._mute_until = time.monotonic() + span if span > 0 else 0.0
+
+    def unmute(self) -> None:
+        """立刻解除静音窗。"""
+        self._mute_until = 0.0
 
     # -- capture -------------------------------------------------------------
+
+    @staticmethod
+    def _block_peak(samples: Any) -> float:
+        """一块音频的峰值绝对值。对 numpy 走向量化，对别的退回 Python。
+
+        不在模块顶层 import numpy：这个模块此前不依赖它，而 sounddevice 交来的本来就是
+        ndarray。一个喂 list 的测试替身仍然要能跑，所以两条路都留。
+        """
+        try:
+            return float(abs(samples).max())
+        except (TypeError, ValueError, AttributeError):
+            try:
+                return float(max(abs(float(value)) for value in samples))
+            except (TypeError, ValueError):
+                return 0.0
+
+    def _watch_input_level(self, samples: Any) -> None:
+        """记峰值，并在宽限期后判一次「这个设备没在出声」。
+
+        只判一次：一个死设备每 100 ms 喊一遍毫无信息量，而回调线程上的重复调用是真实
+        成本。判定成立后 ``input_silent`` 一直为真，直到下一次 ``start()``。
+        """
+        self.input_blocks += 1
+        peak = self._block_peak(samples)
+        if peak > self.input_peak:
+            self.input_peak = peak
+        if self._silent_reported or self.input_peak > self.silent_peak:
+            return
+        elapsed = self.input_blocks * self.blocksize / max(1, self.sample_rate)
+        if elapsed < self.silent_grace_s:
+            return
+        self._silent_reported = True
+        self.input_silent = True
+        if self.on_input_silent is None:
+            return
+        try:
+            self.on_input_silent(
+                {
+                    "device": self.device if self.device is not None else "(系统默认)",
+                    "peak": self.input_peak,
+                    "seconds": round(elapsed, 1),
+                    "threshold": self.silent_peak,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - 回调不能把音频线程带走
+            self._record_callback_error(exc)
 
     def _callback(self, indata: Any, frames: int, time_info: Any, status: Any) -> None:
         del frames, time_info
@@ -281,14 +627,51 @@ class SounddeviceWakeCapture:
             return
         try:
             samples = indata[:, 0]
+            # 静音窗:自己的扬声器在响,这一块整个丢掉。**放在最前面**,连电平观测也不做 ——
+            # 那一层是「死麦克风检测」,拿我们自己放出去的声音去证明麦克风活着是假证据。
+            if self.muted:
+                self.muted_blocks += 1
+                return
+            # 电平先看,再分流。放在 _listening 判断**之前**是因为一个死设备在聆听阶段
+            # 同样是死的,而那时的症状是「唤醒了但转写永远是空」。
+            self._watch_input_level(samples)
+            # 自适应增益紧跟在电平观测之后:观测要看**设备真实**电平（否则「全零」判定会被
+            # 增益骗过去）。
+            #
+            # **2026-08-31：增益只喂 KWS 与 ASR，环形缓冲存原始音频。** 此前两边都吃加过
+            # 增益的样本，那是一条会伪造现实的路：使用者的设备原始峰值是 0.0587（五分钟
+            # 的最大值），底噪高于 AutoGain 的 floor_peak(0.004)，于是增益一路爬到 ~10 倍，
+            # 缓冲里的「静音」变成 rms 0.21 / peak 0.53 —— 看上去是一段健康的语音。后果是
+            # 三层同时失效：
+            #
+            #   1. 声纹的质量门（min_rms=0.002）跑在增益**之后**，于是永远不可能触发；
+            #   2. 从缓冲注册的档案录到的是**放大后的房间底噪**，不是人声；
+            #   3. 拿新的一段底噪去比那个档案，余弦 0.979「通过」—— 门变成了 fail-open。
+            #
+            # 声纹路径本来就在 `embed()` 里按峰值归一化，所以增益对它**一点好处都没有**，
+            # 只有「让质量门失灵」这一个作用。KWS/ASR 需要接近训练电平，所以增益留给它们。
+            voiced = samples
+            # VAD 先判，因为增益要**只在语音上适应**。见 core/audio/vad.py 的模块头：
+            # 一个跟峰值的 AGC 在原理上分不清「轻的语音」和「没有语音」，而那正是
+            # 2026-08-31 把一道 fail-closed 的门变成 fail-open 的那件事。
+            speaking = self.speech_gate(samples) if self.speech_gate is not None else None
+            if speaking:
+                self.speech_blocks += 1
+            if self.auto_gain is not None:
+                voiced = self.auto_gain.apply(samples, is_speech=speaking)
             if self._listening:
-                self._recognize(samples)
+                self._recognize(voiced)
                 return
             self._ring.write(samples)
-            if self.speech_gate is not None and not self.speech_gate(samples):
+            # **不用 VAD 去闸 KWS。** 它是流式解码器，喂一条被切碎的流可能反而降低命中率，
+            # 而命中率正是要保住的东西。VAD 在这里的作用是驱动增益 + 回答「这一段有语音吗」。
+            # 唤醒判定被按住时只填缓冲、不判词。控制台取样期间走这条 —— 见 hold_wake_for：
+            # 取样提示说的就是唤醒词，真命中会把刚录的缓冲清掉并切进聆听模式。
+            if self.wake_held:
+                self.wake_holds += 1
                 return
             for keyword, _kws_score in self.keyword_provider.feed(
-                self._inference_stream, samples, self.sample_rate
+                self._inference_stream, voiced, self.sample_rate
             ):
                 self._authorise(keyword)
         except Exception as exc:
@@ -304,6 +687,8 @@ class SounddeviceWakeCapture:
             raise ProviderUnavailable("sounddevice is not installed") from exc
         try:
             # Gate first: a refused gate must not leave a device open behind it.
+            # enroll_only 每次 start 重新判定 —— 注册完之后再开麦就该是正常模式。
+            self.enroll_only = False
             self._check_gate_preconditions()
             self._keyword_provider_loaded = True
             status = self.keyword_provider.load()
@@ -317,6 +702,17 @@ class SounddeviceWakeCapture:
                     raise ProviderUnavailable(asr_status.details["reason"])
             self._ring.clear()
             self._callback_faulted = False
+            # 电平统计按「本次会话」计:换设备重开之后,上一次的峰值不该继续背在身上。
+            self.input_peak = 0.0
+            self.input_blocks = 0
+            self.input_silent = False
+            self._silent_reported = False
+            self.speech_blocks = 0
+            # 静音窗同理:上一次会话结束时还挂着的窗口不该让新会话开局就聋着。
+            self._mute_until = 0.0
+            self.muted_blocks = 0
+            self._wake_held_until = 0.0
+            self.wake_holds = 0
             self._stream = sounddevice.InputStream(
                 samplerate=self.sample_rate,
                 blocksize=self.blocksize,

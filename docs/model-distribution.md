@@ -11,7 +11,8 @@
 | `sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/` | 36 MB | **是** | 中文唤醒（KWS） |
 | `sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23/` | 78 MB | 是 | 流式识别（ASR）。关掉 `[asr] enabled` 可跑「只唤醒」模式 |
 | `vits-melo-tts-zh_en/` | 183 MB | 否 | 语音合成（TTS）。缺它回合照常走完，只是不出声 |
-| `3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx` | 38 MB | **是** | 声纹准入。缺它 `capture.start()` fail-closed 拒绝启动 |
+| `3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx` | 27 MB | **是** | 声纹准入（2026-08-29 起的默认）。缺它 `capture.start()` fail-closed 拒绝启动 |
+| `3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx` | 38 MB | 否 | 上一代声纹模型（dim 512），已被 CAM++ 取代，留在盘上只为可回退 |
 | `silero_vad.onnx` | 2.3 MB | 否 | 端点检测。ASR 自带端点检测，这个是备选路径 |
 | `kws.tar.bz2` `asr.tar.bz2` `tts.tar.bz2` | 261 MB | **否** | **可删归档**，解压完就没用了 |
 | 合计 | **597 MB** | | 删掉三个归档后 **336 MB** |

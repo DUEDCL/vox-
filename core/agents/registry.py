@@ -61,7 +61,7 @@ KIND_KEYS: Mapping[str, frozenset[str]] = {
     "cli": frozenset({"command", "args", "output", "cwd", "env_passthrough", "prompt_stdin"}),
     "evox": frozenset({"url"}),
     "acp": frozenset({"command", "args", "cwd", "env_passthrough"}),
-    "http": frozenset({"url", "model"}),
+    "http": frozenset({"url", "model", "key_env"}),
 }
 REQUIRED_KEYS: Mapping[str, tuple[str, ...]] = {
     "cli": ("command",),
@@ -178,7 +178,11 @@ def build_adapter(
             **extra,
         )
     if kind == "http":
-        extra = {"model": entry["model"]} if "model" in entry else {}
+        # ``key_env`` 只是**变量名**，值永远从环境读。让配置指名变量，是因为一台机器上
+        # 会有好几个中转站/服务商各自的 key —— 2026-08-31 实机就是这个：relay 的有效凭据
+        # 在 `ANTHROPIC_AUTH_TOKEN` 里，而适配器只读 `VOX_AGENT_HTTP_TOKEN`，于是每一轮都
+        # 401（流式路径上服务端直接断连，报出来是 `SSL: UNEXPECTED_EOF_WHILE_READING`）。
+        extra = {key: entry[key] for key in ("model", "key_env") if key in entry}
         return HttpAgentAdapter(url=entry["url"], **common, **extra)
     raise AgentsConfigError(f"kind {kind!r} has no adapter")
 

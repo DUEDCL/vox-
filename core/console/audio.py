@@ -75,18 +75,23 @@ def decode_wav_base64(payload: str, *, expect_rate: int = EXPECTED_RATE) -> np.n
 
 
 def quality(samples: np.ndarray, sample_rate: int = EXPECTED_RATE) -> dict[str, float]:
-    """RMS, clipping ratio and duration -- the same three numbers the gate uses.
+    """RMS, peak, clipping ratio and duration -- the same numbers the gate uses.
 
     Reported back to the page so a bad phrase can be re-recorded immediately
     instead of being discovered at verification time. These are the input-side
     heuristics from the 2026-08-24 hardening, not an anti-spoof measure.
+
+    ``peak`` 是 2026-08-30 加的，理由是它诊断力最强：实机那次「唤醒全被拒」里每一段的
+    peak 都是 **1.000**（削波），而 `clip_ratio` 只有 0.01% —— 不到质量门的 5%，所以那
+    件事在读数里完全看不见。峰值贴轨说明增益偏高，说话人特征已经被削掉一部分。
     """
     if samples.size == 0:
-        return {"duration_s": 0.0, "rms": 0.0, "clip_ratio": 0.0}
+        return {"duration_s": 0.0, "rms": 0.0, "clip_ratio": 0.0, "peak": 0.0}
     return {
         "duration_s": round(float(samples.size) / sample_rate, 3),
         "rms": round(float(np.sqrt(np.mean(np.square(samples)))), 5),
         "clip_ratio": round(float(np.mean(np.abs(samples) >= 0.999)), 5),
+        "peak": round(float(np.max(np.abs(samples))), 5),
     }
 
 

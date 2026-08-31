@@ -80,6 +80,34 @@ def test_the_cache_name_is_derived_from_the_text():
     assert cache_name("嗯哼。") != first
 
 
+def test_the_voice_and_the_instruction_are_both_in_the_cache_name():
+    """换音色、改语气都必须换文件名。
+
+    这是同一个坑的两层。缓存最早只按文本算哈希 —— 换了音色文件名不变，播出来还是上一把
+    声音；`instruction` 更隐蔽：**音色没变、只是语气变了**，文件名照样不变，表现是
+    「把语气调温柔了但那四句还是原来的腔」。两个都为空时保持与最早的缓存同名，所以本机
+    那条路（VITS 没有 voice / instruction 这两个概念）的既有文件不会作废。
+    """
+    plain = cache_name("你说吧")
+    assert cache_name("你说吧", voice="", instruction="") == plain
+    voiced = cache_name("你说吧", voice="longanhuan_v3.6")
+    told = cache_name("你说吧", voice="longanhuan_v3.6", instruction="用温柔的语气说")
+    assert len({plain, voiced, told}) == 3
+
+
+def test_changing_the_instruction_regenerates_the_files(tmp_path):
+    """端到端的那一条：同一句话、同一音色，只改 instruction，就该是另一个文件。"""
+    tts = FakeTts()
+    gentle = AckLibrary(("你说吧",), tts=tts, cache_dir=tmp_path, voice="v1", instruction="温柔")
+    brisk = AckLibrary(("你说吧",), tts=tts, cache_dir=tmp_path, voice="v1", instruction="干脆")
+
+    first = gentle.ensure()
+    second = brisk.ensure()
+
+    assert first[0].name != second[0].name
+    assert tts.calls == ["你说吧", "你说吧"], "改了语气必须重新合成，不能复用旧文件"
+
+
 def test_ensure_synthesises_each_line_once_and_caches_it(tmp_path):
     tts = FakeTts()
     library = AckLibrary(("嗯哼", "我在呢"), tts=tts, cache_dir=tmp_path)
@@ -155,3 +183,72 @@ def test_describe_reports_counts_and_never_audio(tmp_path):
     assert len(view["cached"]) == 1
     assert view["cache_dir"] == str(tmp_path)
     assert "samples" not in view
+
+
+# ------------------------------------------------------------------ polish()
+#
+# 这一组钉死的是使用者 2026-08-29 报的两件事:「预设回复语音太过于戛然而止了不是很自然」
+# 和「有无效语音提示回复」。两条都量出来了:
+#
+# - 音量:同一个 MeloTTS 模型对不同短句给出 peak 0.026-0.239,近 10 倍。一个音量在各次
+#   唤醒之间差这么多的确认音听起来像坏了。
+# - 硬边:模型给的波形结尾没有余量,播完最后一个样本就断。归一化之后这条更明显。
+#
+# 「无效」那一条不是 polish 能修的,是选词:旧的「嗯哼」合出来被 ASR 识别成「你好」,
+# 「嗯」合出来 peak=0.000(整段静音)。所以 DEFAULT_ACKS 换成了回读 3/3 的四句。
+
+
+def test_polish_normalises_every_clip_to_the_same_peak():
+    """归一化的意义就是「不同句子听起来一样响」,所以断言的是同一个数字。"""
+    from core.audio.acks import ACK_TARGET_PEAK, polish
+
+    quiet = np.full(1600, 0.035, dtype=np.float32)
+    loud = np.full(1600, 0.239, dtype=np.float32)
+    a = polish(quiet, 16000)
+    b = polish(loud, 16000)
+    assert float(np.max(np.abs(a))) == pytest.approx(ACK_TARGET_PEAK, abs=1e-4)
+    assert float(np.max(np.abs(b))) == pytest.approx(ACK_TARGET_PEAK, abs=1e-4)
+
+
+def test_polish_leaves_a_silent_tail_so_it_does_not_stop_dead():
+    """尾部必须有静音:设备在最后一个样本上截断听起来就是「戛然而止」。"""
+    from core.audio.acks import ACK_TAIL_S, polish
+
+    out = polish(np.full(1600, 0.2, dtype=np.float32), 16000)
+    tail = out[-int(16000 * ACK_TAIL_S) :]
+    assert float(np.max(np.abs(tail))) == 0.0
+
+
+def test_polish_fades_the_end_instead_of_cutting_it():
+    """淡出:结尾前的那一小段必须是递减的,而不是一路满幅然后突然归零。"""
+    from core.audio.acks import ACK_FADE_S, ACK_TAIL_S, polish
+
+    out = polish(np.full(16000, 0.2, dtype=np.float32), 16000)
+    end = len(out) - int(16000 * ACK_TAIL_S)
+    fade = out[end - int(16000 * ACK_FADE_S) : end]
+    assert fade[0] > fade[len(fade) // 2] > fade[-1]
+
+
+def test_polish_pads_the_head_so_the_device_does_not_pop():
+    from core.audio.acks import ACK_LEAD_S, polish
+
+    out = polish(np.full(1600, 0.2, dtype=np.float32), 16000)
+    head = out[: int(16000 * ACK_LEAD_S)]
+    assert float(np.max(np.abs(head))) == 0.0
+
+
+def test_polish_does_not_divide_by_zero_on_silence():
+    """全静音原样通过(只补头尾)。那种情况本身是个该被看见的失败,不是该被放大的信号 ——
+    实测「嗯」这个字合出来就是 peak 0.000。"""
+    from core.audio.acks import polish
+
+    out = polish(np.zeros(1600, dtype=np.float32), 16000)
+    assert float(np.max(np.abs(out))) == 0.0
+    assert len(out) > 1600  # 头尾静音仍然补上了
+
+
+def test_the_shipped_acks_are_all_at_least_three_characters():
+    """一到两字的叹词这个 TTS 模型做不好 —— 实测「嗯哼」→「你好」、「嗯」→ 静音、
+    「咋了」peak 0.035。出厂词表不该再含那一类。"""
+    for text in parse_acks(DEFAULT_ACKS):
+        assert len(text) >= 3, f"{text!r} 太短,这个模型做不好这种长度"

@@ -374,6 +374,38 @@ main {
 .row.bad .detail { color: var(--ink-danger); }
 .row .act { display: flex; gap: var(--space-2); }
 
+/* 运行日志的行**不能**复用 .row。
+   .row 是四列网格（8px 13em 1fr auto），为就绪清单的 .dot/.name/.detail/.act 而设。
+   日志行只有「一行头 + 一段字段」两个子元素、且不带那些 class，于是网格自动布局把头塞进
+   8px 的第一列、把字段塞进 13em 的第二列 —— 撑爆的第一列压在第二列上，两层文字互相重叠。
+   这不是假想，是实际发生过的显示错乱。所以给它自己的块级行。 */
+.logrow {
+  display: block;
+  padding: var(--space-3) var(--space-2);
+  border-bottom: 1px solid var(--border-soft);
+}
+.logrow:hover { background: color-mix(in oklab, var(--surface-warm), var(--surface) 62%); }
+/* 头一行：时间戳、来源、摘要。baseline 对齐是因为等宽的时间戳和正文字号不同。 */
+.logrow .lg-head {
+  display: flex; gap: var(--space-3); align-items: baseline; flex-wrap: wrap;
+  font-size: var(--text-xs);
+}
+.logrow .lg-head code { color: var(--muted); font-family: var(--font-mono); flex: none; }
+.logrow .lg-head b { flex: none; font-family: var(--font-mono); }
+.logrow .lg-head span { color: var(--fg); min-width: 0; overflow-wrap: anywhere; }
+/* 字段段落紧跟在头下面，而不是 .note 默认的 12px 外边距 —— 它们属于同一条记录。 */
+.logrow .lg-fields { margin: var(--space-1) 0 0; max-width: none; overflow-wrap: anywhere; }
+
+/* 可点的小标签。拉回来的模型名铺成一排 —— <datalist> 的建议按输入框内容过滤，
+   所以列表必须有一个不依赖过滤的出口，否则「拉到 40 个模型」之后下拉里是空的。 */
+.chip {
+  font-family: var(--font-mono); font-size: var(--text-xs);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-soft); border-radius: 6px;
+  background: var(--surface); color: var(--fg-2); cursor: pointer;
+}
+.chip:hover { color: var(--fg); border-color: var(--border); }
+
 /* 三态占位。没有这一条，飞行中的区域和请求失败后的区域长得一模一样。 */
 .state {
   display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
@@ -476,6 +508,15 @@ textarea { min-height: 11em; resize: vertical; line-height: var(--leading-body);
 .line > input, .line > select { flex: 1; min-width: 9em; }
 .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
 .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); }
+/* 唤醒漏斗在出现第四格（「没进聆听」）时改成四列。让它单独掉到第二行占三分之一宽，
+   看起来像页面排错了 —— 而它出现的那一刻正是最需要被读懂的时候。 */
+.grid3.wide4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+/* 页面上唯一一个折叠块（声纹的「原始读数」）。默认的三角形在这套排版里太抢，
+   而它存在的意义正是**平时不占视线** —— 需要原始 JSON 的时候才展开。 */
+details > summary { cursor: pointer; list-style: none; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary::before { content: "▸ "; color: var(--muted); }
+details[open] > summary::before { content: "▾ "; }
 .out {
   margin-top: var(--space-4); white-space: pre-wrap; font-family: var(--font-mono);
   font-size: var(--text-xs); color: var(--fg-2);
@@ -502,12 +543,24 @@ textarea { min-height: 11em; resize: vertical; line-height: var(--leading-body);
 
 /* 声纹三段 */
 .clip { border: 1px solid var(--border-soft); border-radius: var(--radius-md); padding: var(--space-3) var(--space-4); background: var(--surface); }
+/* 注册格子自己排：六句（或更多）不该被写死成三列。auto-fill + minmax 让它按可用宽度
+   决定几列，窄屏自然掉成一列 —— 而 `.grid3` 那种固定列数在 6 格上会挤成一条。 */
+.clips { display: grid; grid-template-columns: repeat(auto-fill, minmax(15em, 1fr)); gap: var(--space-3); }
+.clip .say { display: block; margin-top: 2px; font-size: var(--text-xs); color: var(--fg-2); font-family: inherit; }
+.clip .cond { display: block; font-size: var(--text-xs); color: var(--muted); font-family: inherit; }
+/* 下一句要录的那一格：只描边，不填色 —— 已录的格子用 .filled 的绿边，两者不该撞。 */
+.clip.next { border-color: var(--accent); }
+.clip.next b { color: var(--ink-accent, var(--fg)); }
 .clip b { display: block; font-size: var(--text-sm); font-weight: 600; color: var(--fg-2); }
 .clip span { font-size: var(--text-xs); color: var(--muted); font-family: var(--font-mono); }
 .clip.filled { border-color: color-mix(in oklab, var(--success), var(--surface) 55%); }
 .clip.filled b { color: var(--ink-success); }
 .clip.weak { border-color: color-mix(in oklab, var(--warn), var(--surface) 45%); }
 .clip.weak b { color: var(--fg); }
+/* 只有「没进聆听」用它，而那一格只在非零时出现 —— 它是「唤醒了却没有后文」本身，
+   和「声纹拒绝」（门在正常工作）不是一个量级，所以配色也不该是同一档。 */
+.clip.bad { border-color: color-mix(in oklab, var(--danger), var(--surface) 45%); }
+.clip.bad b { color: var(--ink-danger); }
 .level { flex: 1; min-width: 96px; height: 4px; border-radius: var(--radius-pill); background: var(--ring-track); overflow: hidden; }
 .level i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .1s linear; }
 
@@ -584,7 +637,9 @@ textarea { min-height: 11em; resize: vertical; line-height: var(--leading-body);
   .hero-state .big { font-size: var(--text-2xl); }
   .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .board { grid-template-columns: 1fr; }
-  .kv, .grid2, .grid3 { grid-template-columns: 1fr; }
+  /* `.grid3.wide4` 的特称度比 `.grid3` 高，媒体查询本身不加特称度，所以它必须在这里
+     被点名，否则窄屏上那四格不会塌。 */
+  .kv, .grid2, .grid3, .grid3.wide4 { grid-template-columns: 1fr; }
   .kv { gap: var(--space-1); align-items: start; padding-bottom: var(--space-3); }
   /* 四列行在窄屏塌成两列：点占第一列，名字 / 说明 / 按钮依次落在第二列。 */
   .row { grid-template-columns: 8px 1fr; gap: var(--space-1) var(--space-3); }
@@ -744,6 +799,43 @@ textarea { min-height: 11em; resize: vertical; line-height: var(--leading-body);
       </p>
       <p class="note">配置文件里永不写密钥，只写环境变量名（<code>key_env</code>），值从环境变量读。</p>
     </div>
+
+    <div class="panel glass">
+      <h3>合成音色（云端 TTS）</h3>
+      <p class="note">
+        本机合成（<code>sherpa</code>）读 <code>models/</code> 下的 VITS 模型，没有音色可选。
+        换成 <code>dashscope</code> 之后音色才有意义 —— 下面这两栏写进
+        <code>config/voice.toml</code> 的 <code>[tts]</code>，<b>改完要重启</b>。
+      </p>
+      <div class="line" style="margin-top:11px">
+        <label class="note" for="tv-provider" style="align-self:center">provider</label>
+        <select id="tv-provider" data-od-id="tts-provider">
+          <option value="sherpa">sherpa（本机 VITS，不出网）</option>
+          <option value="dashscope">dashscope（阿里云百炼 CosyVoice）</option>
+        </select>
+      </div>
+      <div class="line" style="margin-top:11px">
+        <label class="note" for="tv-model" style="align-self:center">model</label>
+        <input id="tv-model" list="tv-models" placeholder="cosyvoice-v2" data-od-id="tts-model">
+        <datalist id="tv-models"></datalist>
+        <label class="note" for="tv-voice" style="align-self:center">voice</label>
+        <input id="tv-voice" list="tv-voices" placeholder="longyuan" data-od-id="tts-voice">
+        <datalist id="tv-voices"></datalist>
+      </div>
+      <div class="line" style="margin-top:11px">
+        <button id="tv-try" data-od-id="tts-try">试一句</button>
+        <button id="tv-save" class="primary" data-od-id="tts-save">保存</button>
+        <span class="note" style="margin:0" id="tv-note"></span>
+      </div>
+      <div class="rows" id="tv-rows" style="margin-top:var(--space-4)"></div>
+      <p class="note" id="tv-source"></p>
+      <p class="note">
+        <b>音色表不是实时拉的。</b>百炼没有列举系统预置音色的接口（有列表接口的是「声音复刻」，
+        只列你自己复刻出来的）。所以上面那两栏是<b>可输入的建议</b>而不是封闭下拉：表里没有的
+        音色照样能填，由「试一句」去判 —— 它真发一次合成请求，通不通看得见。
+      </p>
+      <p class="note" id="tv-key"></p>
+    </div>
   </div>
 </section>
 
@@ -771,33 +863,85 @@ textarea { min-height: 11em; resize: vertical; line-height: var(--leading-body);
       <p class="note" id="kw-note"></p>
       <p class="bad" id="kw-error" role="status" hidden></p>
     </div>
+
+    <!-- 唤醒命中检测。三层分开报,因为「喊了没反应」有三个完全不同的根因,而它们在
+         使用者眼里长得一模一样:麦克风没进声音 / 唤醒词没命中 / 声纹把它拒了。 -->
+    <div class="panel glass">
+      <h3>命中检测</h3>
+      <p class="note">
+        对着麦克风喊唤醒词，这里逐层告诉你走到哪一步断的。<b>三层的症状一样，根因完全不同</b> ——
+        麦克风没进声音、唤醒词没命中、声纹把它拒了，页面上都是「没反应」。
+        需要麦克风在跑（用 <code>run_console.py --voice</code> 启动）。
+      </p>
+      <div class="line" style="margin-top:11px">
+        <label for="wk-follow" class="note" style="align-self:center">
+          <input type="checkbox" id="wk-follow" checked> 自动跟随（每秒一次）
+        </label>
+        <button id="wk-refresh" data-od-id="keywords-wake-refresh">刷新</button>
+      </div>
+      <div class="grid3" id="wk-funnel" style="margin-top:var(--space-4)"></div>
+      <p class="note" id="wk-input"></p>
+      <div class="rows" id="wk-rows" style="margin-top:var(--space-3)"></div>
+    </div>
   </div>
 </section>
 
 <!-- ========================================================= 3 声纹 -->
 <section class="view" id="v-speaker" data-od-id="view-speaker" hidden>
   <h2 data-od-id="speaker-title">声纹</h2>
-  <p class="sub">3 段「你好问问」。音频只在内存里，永不落盘；写下去的只有向量。</p>
+  <p class="sub">六句各不相同的长句，从 <b>Vox 自己那支麦克风</b>录 —— 和唤醒时校验的是同一条信道。
+    音频只在内存里，永不落盘；写下去的只有向量。</p>
 
   <div class="stack">
     <div class="panel glass">
       <h3>注册</h3>
       <div class="line">
         <input id="sp-name" placeholder="你的名字" aria-label="你的名字" autocomplete="off" style="max-width:13em" data-od-id="speaker-name">
+        <button id="sp-mic" hidden data-od-id="speaker-mic">开麦克风</button>
         <button id="sp-record" data-od-id="speaker-record">录一段</button>
         <button id="sp-clear" data-od-id="speaker-clear">清空</button>
-        <div class="level" aria-hidden="true"><i id="sp-level"></i></div>
         <button id="sp-enroll" class="primary" disabled data-od-id="speaker-enroll">注册</button>
       </div>
-      <div class="grid3" id="sp-clips" style="margin-top:var(--space-4)"></div>
+      <div class="clips" id="sp-clips" style="margin-top:var(--space-4)"></div>
       <p class="note" id="sp-count"></p>
       <p class="bad" id="sp-error" role="status" hidden></p>
+      <!-- 输入音量：**这一格是 Windows 那一侧的设置**，不是软件增益。同一时刻实测
+           「耳机」0.01、「麦克风阵列」0.82 —— 唤不醒和一说就削波是同一个数字的两端，
+           而它此前在界面上完全不存在。「校准」是闭环的：量说话峰值 → 改音量 → 复测。 -->
+      <div class="line" style="margin-top:var(--space-4)">
+        <button id="sp-cal" data-od-id="speaker-calibrate">校准输入音量</button>
+        <span class="note" id="sp-level">读取输入设备…</span>
+      </div>
+      <p class="note" id="sp-cal-out" style="white-space:pre-line" hidden></p>
+      <!-- 为什么不再用浏览器录：注册和校验必须同信道，否则相似度比的是两条录音链路的
+           差别而不是两个人的差别。浏览器 getUserMedia 拿的是**浏览器认为的默认设备**
+           （不是 [input] device），还带它自己的 AGC / 降噪 / 回声消除和采样率。 -->
+      <p class="note">
+        录的是 Vox 采集缓冲里的音频，所以这里的读数能预测唤醒时的读数。
+        判断「有没有人在说话」用的是 VAD（silero），不是音量线 —— 峰值和 RMS 分不清
+        「轻的语音」和「放大后的底噪」，而那正是一段静音曾经拿到 0.979 的原因。
+      </p>
     </div>
 
     <div class="panel glass">
       <h3>已注册</h3>
       <div class="rows" id="sp-list"></div>
+      <!-- 一行「这道门当前是什么」+ 一个折叠起来的原始读数。此前这里是 describe() 的
+           整份 JSON 摊在一行里，于是最常问的那个问题（换型了没有？）反而看不出来 ——
+           2026-08-30 使用者的原话是「我无法快速的识别是否真的换了新的声纹模型」。 -->
       <p class="note" id="sp-config"></p>
+      <p class="bad" id="sp-stale" hidden></p>
+      <!-- 「试一句」= 脚本里那段闭环校验，搬到页面上。它走的是和唤醒**同一条**路
+           （同一个采集缓冲、同一个门），所以这个分数能预测唤醒时的分数 —— 不必喊一声
+           唤醒词再去翻日志。 -->
+      <div class="line" style="margin-top:var(--space-3)">
+        <button id="sp-try" data-od-id="speaker-try">试一句</button>
+        <span class="note" id="sp-try-out">对着它说「你好小沃」再停下 —— 取的是尾部那一段，和唤醒时那个窗口同一个形状。</span>
+      </div>
+      <details id="sp-raw" hidden>
+        <summary class="note">原始读数</summary>
+        <p class="note" id="sp-raw-body" style="word-break:break-all;font-family:var(--font-mono)"></p>
+      </details>
       <p class="note">
         模型缺失、无人注册、校验抛异常，一律落在<b>拒绝</b>一侧 —— 这道门是 fail-closed 的，
         拒绝也是它在工作。质量门（时长 / rms / 削波）挡的是不可用的录音，
@@ -1274,6 +1418,9 @@ function setView(name) {
   try { history.replaceState(null, "", location.pathname + location.search + "#" + view); } catch {}
   try { localStorage.setItem("vox.console.view", view); } catch {}
   syncSky();
+  /* 进「唤醒词」那一栏立刻拉一次，不要等下一个轮询周期 —— 人切过来就是为了看那三个数。
+     函数在下面才定义，所以这里判一下存在性（脚本是自上而下执行的一整块）。 */
+  if (view === "keywords" && typeof pullWakeFunnel === "function") pullWakeFunnel();
 }
 for (const link of document.querySelectorAll(".rail a")) {
   link.onclick = (e) => { e.preventDefault(); setView(link.dataset.view); };
@@ -2111,6 +2258,9 @@ function kindBlock(kind, section) {
   block.appendChild(keyState);
 
   block.appendChild(options);
+  /* 拉回来的模型名铺在这里（见 pullModelNames 里的注释：datalist 会按输入框内容过滤，
+     所以不能只靠它）。空的时候不占地方。 */
+  block.appendChild(el("div", { class: "line", id: "mk-" + kind + "-fetched" }));
   block.appendChild(endpointNote);
   block.appendChild(note);
   sync();
@@ -2222,6 +2372,27 @@ async function pullModelNames(kind, slug, base, proto, keyEnv, options, button) 
     });
     options.textContent = "";
     for (const name of result.models) options.appendChild(el("option", { value: name }));
+    /* 光填 <datalist> 不够，这是使用者报的「拉取到多个模型时下拉框不显示模型」的真因：
+       datalist 的建议是**按输入框当前内容过滤**的。而这个框在渲染时已经被填成配置里的
+       模型名（例如 deepseek-chat），拉回来的名字几乎没有一个包含那段文本，于是过滤完
+       是空的 —— 列表在那里，只是被过滤掉了。
+
+       所以除了 datalist，再把名字铺成一排可点的行：它不依赖任何过滤行为，点一下就填进去。
+       datalist 保留，手打仍然有补全。 */
+    const list = document.getElementById("mk-" + kind + "-fetched");
+    if (list) {
+      list.textContent = "";
+      for (const name of result.models) {
+        const row = el("button", { class: "chip", type: "button" }, name);
+        row.onclick = () => {
+          const box = list.parentElement.querySelector("input[list]");
+          if (box) { box.value = name; box.dispatchEvent(new Event("input")); }
+        };
+        list.appendChild(row);
+      }
+      list.appendChild(el("span", { class: "note" },
+        `　拉到 ${result.count} 个 —— 点一个就填进上面那个框。`));
+    }
     const how = result.authenticated ? `带 $${result.key_env} 的凭据拉到的` : "不带凭据就能列出";
     const shown = result.models.slice(0, 12).join("\n");
     const rest = result.count > 12 ? `\n…另外还有 ${result.count - 12} 个` : "";
@@ -2262,9 +2433,9 @@ function renderLog() {
   host.textContent = "";
   /* 最新的在上：查「刚才那次为什么失败」的人不该先滚到底。 */
   for (const entry of rows.slice(-200).reverse()) {
-    const row = el("div", { class: "row" });
+    const row = el("div", { class: "logrow" });
     const when = new Date(entry.at * 1000).toTimeString().slice(0, 8);
-    const head = el("div", { class: "line" });
+    const head = el("div", { class: "lg-head" });
     head.appendChild(el("code", null, when));
     head.appendChild(el("b", { class: logLevelClass(entry.level) }, entry.source));
     head.appendChild(el("span", null, entry.message));
@@ -2275,7 +2446,7 @@ function renderLog() {
         !(value && typeof value === "object" && Object.keys(value).length === 0)
     );
     if (fields.length) {
-      row.appendChild(el("p", { class: "note" },
+      row.appendChild(el("p", { class: "note lg-fields" },
         fields.map(([key, value]) =>
           `${key} = ${typeof value === "object" ? JSON.stringify(value) : value}`).join("　·　")));
     }
@@ -2330,6 +2501,73 @@ setInterval(() => {
 }, 2000);
 
 $("mp-select").onchange = () => { currentProfile = $("mp-select").value; renderModels(); };
+
+/* ================================================================ 合成音色
+
+   音色表是钉住的（百炼没有列举系统音色的接口），所以这里做成 datalist 建议而不是
+   封闭下拉 —— 表外的音色能填，由「试一句」去判。 */
+async function pullVoices() {
+  try {
+    const view = await api("/api/voices");
+    $("tv-provider").value = view.provider === "dashscope" ? "dashscope" : "sherpa";
+    $("tv-model").value = view.model || "";
+    $("tv-voice").value = view.voice || "";
+    const models = $("tv-models");
+    models.textContent = "";
+    for (const name of view.models) models.appendChild(el("option", { value: name }));
+    const voices = $("tv-voices");
+    voices.textContent = "";
+    const host = $("tv-rows");
+    host.textContent = "";
+    for (const item of view.voices) {
+      voices.appendChild(el("option", { value: item.voice }, `${item.name} · ${item.languages}`));
+      const row = el("div", { class: "logrow" });
+      const head = el("div", { class: "lg-head" });
+      head.appendChild(el("code", null, item.voice));
+      head.appendChild(el("b", null, item.name));
+      head.appendChild(el("span", null, item.languages));
+      row.appendChild(head);
+      if (item.scenes) row.appendChild(el("p", { class: "note lg-fields" }, item.scenes));
+      host.appendChild(row);
+    }
+    $("tv-source").textContent =
+      `音色表出处：${view.source}（${view.checked} 核实，共 ${view.voices.length} 个）`;
+    $("tv-key").textContent = view.key_present
+      ? `密钥 ${view.key_env} 已有值。`
+      : `密钥 ${view.key_env} 还没有值 —— 到「密钥」那一栏存进去，或写进 .env。`;
+  } catch (err) {
+    $("tv-note").textContent = `读不到音色表：${err.message}`;
+  }
+}
+
+$("tv-try").onclick = async () => {
+  $("tv-note").textContent = "合成中（云端两次往返，可能要几秒）…";
+  try {
+    const out = await api("/api/voices/try", {
+      method: "POST",
+      body: { model: $("tv-model").value.trim(), voice: $("tv-voice").value.trim() },
+    });
+    $("tv-note").textContent = out.ok
+      ? `通了：${out.model} + ${out.voice}，${out.elapsed_ms}ms，${out.seconds}s 音频，${out.sample_rate}Hz`
+      : `不通：${out.reason}`;
+  } catch (err) {
+    $("tv-note").textContent = `试不了：${err.message}`;
+  }
+};
+
+$("tv-save").onclick = async () => {
+  const updates = {
+    "tts.provider": $("tv-provider").value,
+    "tts.model": $("tv-model").value.trim(),
+    "tts.voice": $("tv-voice").value.trim(),
+  };
+  try {
+    await api("/api/config", { method: "PUT", body: { file: "voice.toml", updates } });
+    $("tv-note").textContent = "已写进 config/voice.toml —— [tts] 是启动时读的，要重启才生效。";
+  } catch (err) {
+    $("tv-note").textContent = `保存失败：${err.message}`;
+  }
+};
 
 /* ================================================================= 重启
 
@@ -2489,6 +2727,119 @@ function renderWake() {
     `保存后**要重启控制台才生效**。`;
 }
 
+/* ---------------------------------------------------- 唤醒命中检测（三层分离）
+
+   为什么值得单独一块：「喊了没反应」有三个完全不同的根因，而它们在使用者眼里长得
+   一模一样 —— ① 麦克风没进声音（Windows 上被静音/被隐私设置拒绝的设备**不报错**，
+   样本全零）② 唤醒词没命中 ③ 声纹把它拒了。实机诊断读出「KWS 命中 16/16、声纹接受
+   0/16」正是靠这个分离，合成一个数字就什么也答不了。
+
+   数据来自 /api/state 的 wake 与 input_level 两块，都不带音频、不带向量。 */
+let wakeFunnelTimer = null;
+
+function funnelCell(label, value, tone) {
+  const cell = el("div", { class: tone ? `clip ${tone}` : "clip" });
+  cell.appendChild(el("b", null, String(value)));
+  cell.appendChild(el("span", null, label));
+  return cell;
+}
+
+function renderWakeFunnel(payload) {
+  const host = $("wk-funnel");
+  host.textContent = "";
+  const funnel = (payload && payload.wake) || { kws: 0, accepted: 0, rejected: 0, recent: [] };
+  /* KWS 那一格永远不着色：它是「听见了」而不是「成了」。接受为绿、拒绝为琥珀（等你处理）。 */
+  host.appendChild(funnelCell("唤醒词命中", funnel.kws, null));
+  host.appendChild(funnelCell("声纹通过", funnel.accepted, funnel.accepted ? "filled" : null));
+  host.appendChild(funnelCell("声纹拒绝", funnel.rejected, funnel.rejected ? "weak" : null));
+  /* 第四格只在非零时出现：它是「通过了声纹但识别器没开起来」—— 也就是「唤醒了却没有
+     后文」本身。平时是 0，占一格纯属噪声；一旦非零它是最重要的那个数字。 */
+  host.classList.toggle("wide4", Boolean(funnel.listen_refused));
+  if (funnel.listen_refused) {
+    host.appendChild(funnelCell("没进聆听", funnel.listen_refused, "bad"));
+  }
+
+  /* 输入电平单独一行文字而不是第四格：它是连续量，而上面三个是计数。 */
+  const level = payload && payload.input_level;
+  const note = $("wk-input");
+  if (!payload || !payload.mic_running) {
+    note.textContent = "麦克风没在跑 —— 用 run_console.py --voice 启动，否则这三个数永远是 0。";
+  } else if (!level) {
+    note.textContent = "麦克风在跑，还没有电平数据。";
+  } else if (level.silent) {
+    note.textContent =
+      `输入设备在出零（峰值 ${level.peak}，已听 ${level.seconds}s）—— 唤醒不可能命中。` +
+      `检查麦克风是否被静音，或「设置 → 隐私和安全性 → 麦克风 → 允许桌面应用访问麦克风」。`;
+  } else {
+    /* 设备名和 OS 音量排在峰值前面：峰值是结果，那两个是原因。实测同一时刻「耳机」的
+       Windows 输入音量是 1%、「麦克风阵列」是 82% —— 唤不醒和一说就削波是同一个数字的
+       两端，而在这一行出现之前它们都只表现为「峰值不对」。 */
+    const os = level.os;
+    note.textContent =
+      `设备 ${level.device || "(认不出)"}` +
+      (os ? `　·　Windows 输入音量 ${Math.round(os.level * 100)}%${os.muted ? "（已静音）" : ""}` : "") +
+      `　·　输入峰值 ${level.peak}（已听 ${level.seconds}s）` +
+      (level.too_quiet ? `　·　低于 ${level.want_peak}，太轻 —— 去「声纹」页点「校准输入音量」` : "") +
+      (level.peak >= 0.999 ? "　·　到轨了（削波），去「声纹」页点「校准输入音量」" : "");
+  }
+  if (funnel.last_listen_refusal) {
+    note.textContent += `　·　没进聆听：${funnel.last_listen_refusal}`;
+  }
+  /* 注册模式排在最前面：这一格非空时上面那三个计数**必然**全是 0，而那不是故障。
+     不说出来的话，「唤醒判定被按住」和「KWS 根本没装上」在页面上长得一模一样。 */
+  if (funnel.enroll_only) {
+    note.textContent =
+      "还没有人注册 —— 现在是注册模式：麦克风在跑、缓冲在填，但唤醒判定被按住，" +
+      "所以上面三个数会一直是 0。去「声纹」页录那几句并注册，注册成功即刻解开（不用重启）。　·　" +
+      note.textContent;
+  }
+
+  const rows = $("wk-rows");
+  rows.textContent = "";
+  const recent = funnel.recent || [];
+  if (!recent.length) {
+    rows.appendChild(el("p", { class: "note" }, "还没有唤醒尝试 —— 对着麦克风喊一声。"));
+    return;
+  }
+  for (const entry of recent) {
+    const row = el("div", { class: "logrow" });
+    const head = el("div", { class: "lg-head" });
+    head.appendChild(el("code", null, new Date(entry.at * 1000).toTimeString().slice(0, 8)));
+    const verdict = entry.verdict === "accepted" ? ["note", "通过"]
+      : entry.verdict === "rejected" ? ["warn", "声纹拒绝"]
+      : entry.verdict === "listen_refused" ? ["bad", "没进聆听"]
+      : entry.verdict === "listen_expired" ? ["note", "没人说话"]
+      : ["note", "命中"];
+    head.appendChild(el("b", { class: verdict[0] }, verdict[1]));
+    head.appendChild(el("span", null, entry.keyword ? `「${entry.keyword}」` : ""));
+    row.appendChild(head);
+    const bits = [];
+    if (entry.score !== null && entry.score !== undefined) bits.push(`相似度 = ${entry.score}`);
+    if (entry.reason) bits.push(`原因 = ${entry.reason}`);
+    if (entry.verdict === "kws") bits.push("这一层通过了，接下来看声纹");
+    if (bits.length) row.appendChild(el("p", { class: "note lg-fields" }, bits.join("　·　")));
+    rows.appendChild(row);
+  }
+}
+
+async function pullWakeFunnel() {
+  try {
+    renderWakeFunnel(await api("/api/state"));
+  } catch (err) {
+    $("wk-input").textContent = `读不到 /api/state：${err.message}`;
+  }
+}
+
+$("wk-refresh").onclick = () => pullWakeFunnel();
+
+/* 一秒一次，只在这一栏可见且标签页在前台时 —— 唤醒是个瞬时事件，两秒的间隔会让人
+   喊完之后盯着一个没动的页面怀疑是不是没记上。 */
+setInterval(() => {
+  if (document.hidden || currentView !== "keywords") return;
+  if (!$("wk-follow").checked) return;
+  pullWakeFunnel();
+}, 1000);
+
 /* 空白、半角逗号、全角逗号、顿号、分号都当分隔符 —— 用户从别处粘一行词进来，
    分隔符是哪个取决于他从哪粘的，挑一个当唯一合法的会把这件事变成猜谜。 */
 function parseWakeInput(raw) {
@@ -2540,130 +2891,69 @@ $("kw-reset").onclick = () => {
 
 /* ================================================================= 声纹
 
-   录音路径沿用上一版，一个字没改：AudioContext 取 Float32 → 自己降采样到 16 kHz →
-   自己写 WAV 头 → base64。这样后端只需要标准库的 wave，不需要编解码器。
-   MediaRecorder 给的是 webm/opus，那要在服务端解容器。 */
+   **录音在服务端，不在浏览器里。** 上一版走 getUserMedia → 自己降采样 → 自己写 WAV 头
+   → base64 上传，那条路的问题不是代码，是**信道**：注册和校验必须来自同一条录音链路，
+   否则相似度比的是两条链路的差别而不是两个人的差别。浏览器拿的是**浏览器认为的默认
+   设备**（不是 `[input] device`），还带它自己的 AGC / 降噪 / 回声消除和采样率；而校验
+   读的是 `SounddeviceWakeCapture` 那条流。
 
-const TARGET_RATE = 16000;
+   现在页面只发一个请求，服务端从**门读的那个环形缓冲**取 3 秒。同信道因此是构造上成立
+   的，不靠谁记得选对设备；顺带音频也不再经过 HTTP。降采样、WAV 编码、base64 三段代码
+   随之删掉 —— 它们各自都对，但那条路整体是错的。 */
+
 const CLIP_SECONDS = 3.0;
+/* 每段的读数（duration_s / rms / peak / clip_ratio），由 /api/speaker/capture 返回。
+   样本本身留在服务端内存里，浏览器这边只有数字。 */
 const clips = [];
-
-function downsample(input, fromRate) {
-  if (fromRate === TARGET_RATE) return input;
-  const ratio = fromRate / TARGET_RATE;
-  const out = new Float32Array(Math.floor(input.length / ratio));
-  for (let i = 0; i < out.length; i++) {
-    /* 盒式平均而不是取最近点：抽点会把高频折回来，听起来像底噪，而声纹模型吃的正是这段频谱。 */
-    const start = Math.floor(i * ratio);
-    const end = Math.min(input.length, Math.floor((i + 1) * ratio));
-    let sum = 0;
-    for (let j = start; j < end; j++) sum += input[j];
-    out[i] = end > start ? sum / (end - start) : 0;
-  }
-  return out;
-}
-
-function encodeWav(samples) {
-  const buffer = new ArrayBuffer(44 + samples.length * 2);
-  const view = new DataView(buffer);
-  const ascii = (offset, text) => {
-    for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
-  };
-  ascii(0, "RIFF");
-  view.setUint32(4, 36 + samples.length * 2, true);
-  ascii(8, "WAVEfmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, TARGET_RATE, true);
-  view.setUint32(28, TARGET_RATE * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  ascii(36, "data");
-  view.setUint32(40, samples.length * 2, true);
-  for (let i = 0; i < samples.length; i++) {
-    const clamped = Math.max(-1, Math.min(1, samples[i]));
-    view.setInt16(44 + i * 2, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
-  }
-  let binary = "";
-  const bytes = new Uint8Array(buffer);
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-  }
-  return btoa(binary);
-}
-
-function measure(samples) {
-  let sum = 0, clipped = 0;
-  for (const value of samples) {
-    sum += value * value;
-    if (Math.abs(value) >= 0.999) clipped++;
-  }
-  return {
-    seconds: samples.length / TARGET_RATE,
-    rms: Math.sqrt(sum / Math.max(1, samples.length)),
-    clip: clipped / Math.max(1, samples.length),
-  };
-}
-
-async function recordClip() {
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false },
-  });
-  const context = new (window.AudioContext || window.webkitAudioContext)();
-  const source = context.createMediaStreamSource(stream);
-  const chunks = [];
-  const level = $("sp-level");
-  /* ScriptProcessor 是废弃 API，但在没有构建步骤的单文件页面里它是最短的可用路径，
-     AudioWorklet 需要一个独立的模块 URL。录 3 秒用不着担心它的延迟缺点。 */
-  const node = context.createScriptProcessor(4096, 1, 1);
-  node.onaudioprocess = (event) => {
-    const data = event.inputBuffer.getChannelData(0);
-    chunks.push(new Float32Array(data));
-    let peak = 0;
-    for (const v of data) peak = Math.max(peak, Math.abs(v));
-    level.style.width = Math.min(100, peak * 170) + "%";
-  };
-  source.connect(node);
-  node.connect(context.destination);
-  await new Promise((resolve) => setTimeout(resolve, CLIP_SECONDS * 1000));
-  node.disconnect();
-  source.disconnect();
-  stream.getTracks().forEach((track) => track.stop());
-  const rate = context.sampleRate;
-  await context.close().catch(() => {});
-  level.style.width = "0";
-
-  const total = chunks.reduce((n, c) => n + c.length, 0);
-  const merged = new Float32Array(total);
-  let offset = 0;
-  for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.length; }
-  const resampled = downsample(merged, rate);
-  return { wav: encodeWav(resampled), stats: measure(resampled) };
-}
+/* 要念的那几句，由 /api/speaker 给（出处 core/audio/enroll_prompts.py）。
+   页面不自己写一份 —— 脚本和页面共用同一份，两条路的提示才不会各自漂移。 */
+let enrollPrompts = [];
+/* 麦克风在不在跑，以及是不是「注册模式」（一个人都没注册时唤醒判定被永久按住）。
+   第一次注册**要能在这一页里做完** —— 此前那是个死锁：门不许开麦，而注册要从采集缓冲
+   取音频，于是只能先开终端跑脚本。 */
+let micRunning = false;
+let enrollOnly = false;
 
 function renderClips() {
   const host = $("sp-clips");
   host.textContent = "";
-  for (let i = 0; i < 3; i++) {
+  /* 格子数 = 服务端给的那几句（core/audio/enroll_prompts.py），不写死。每格显示**要念哪句**：
+     六句各不相同是刻意的 —— 同一句念六遍练出来的质心对那一句的音素组合过拟合，而唤醒时
+     说的是唤醒词、之后说的是任意请求。 */
+  const plan = enrollPrompts.length ? enrollPrompts : [{ condition: "", text: "" }];
+  for (let i = 0; i < plan.length; i++) {
     const clip = clips[i];
-    const weak = clip && clip.stats.rms < 0.01;
-    const div = el("div", { class: "clip" + (clip ? (weak ? " filled weak" : " filled") : ""), od: "clip-" + (i + 1) });
-    div.appendChild(el("b", null, clip ? `第 ${i + 1} 段` : `第 ${i + 1} 段 · 未录`));
+    const weak = clip && clip.rms < 0.01;
+    const next = i === clips.length;
+    const div = el("div", {
+      class: "clip" + (clip ? (weak ? " filled weak" : " filled") : (next ? " next" : "")),
+      od: "clip-" + (i + 1),
+    });
+    div.appendChild(el("b", null, clip ? `第 ${i + 1} 段 · 已录` : next ? `第 ${i + 1} 段 · 下一句` : `第 ${i + 1} 段`));
+    div.appendChild(el("span", { class: "say" }, "「" + plan[i].text + "」"));
+    div.appendChild(el("span", { class: "cond" }, plan[i].condition));
     div.appendChild(el("span", null, clip
-      ? `${clip.stats.seconds.toFixed(2)}s · rms ${clip.stats.rms.toFixed(4)}` +
-        (weak ? " · 偏轻，建议重录" : "") + (clip.stats.clip > 0.05 ? " · 削波" : "")
-      : "点「录一段」"));
+      ? `${clip.duration_s.toFixed(2)}s · rms ${clip.rms.toFixed(4)} · peak ${clip.peak.toFixed(3)}` +
+        (weak ? " · 偏轻，建议重录" : "") +
+        (clip.peak >= 0.999 ? " · 到轨了，调低麦克风音量" : clip.clip_ratio > 0.05 ? " · 削波" : "")
+      : next ? "点「录一段」，念上面这句" : "还没到"));
     host.appendChild(div);
   }
-  /* 界面上写着「3 段」、画着 3 个格子，但 1 段就能提交 —— 中间那两格的空白不该由用户
-     自己去猜是「还差」还是「可选」。这里只说进度和倾向，不编后端的阈值。 */
+  /* 画着 N 个格子，但 1 段就能提交 —— 空格子不该由用户自己去猜是「还差」还是「可选」。
+     这里只说进度和倾向，不编后端的阈值。实测支撑：1 段 0.706 / 2 段 0.772 / 3 段 0.794。 */
   const n = clips.filter(Boolean).length;
+  const total = plan.length;
   $("sp-count").textContent = n === 0
-    ? "还没录。建议录满 3 段：都说「你好问问」，正常音量、正常语速。"
-    : n < 3
-      ? `已录 ${n} / 3 段。少于 3 段也能提交，但样本越少，声纹门越容易把你本人也拒掉 —— 拒的那一侧是 fail-closed，不会放错人进来。`
-      : "3 段齐了。注册后音频不落盘，只留下向量。";
+    ? `还没录。建议录满 ${total} 段，每段念格子里那一句，正常音量、正常语速 —— 后两句请退开两步。`
+    : n < total
+      ? `已录 ${n} / ${total} 段。少于 ${total} 段也能提交，但样本越少质心越飘（实测 1 段 0.706 / 2 段 0.772 / 3 段 0.794），声纹门就越容易把你本人也拒掉 —— 拒的那一侧是 fail-closed，不会放错人进来。`
+      : `${total} 段齐了。注册后音频不落盘，只留下向量。`;
+  if (enrollOnly) {
+    $("sp-count").textContent += " 现在是注册模式：麦克风开着，但唤醒判定被按住 —— 注册成功后立刻解开，不用重启。";
+  }
+  const mic = $("sp-mic");
+  mic.hidden = micRunning;
+  $("sp-record").disabled = !micRunning;
   $("sp-enroll").disabled = clips.length === 0 || !$("sp-name").value.trim();
 }
 
@@ -2674,6 +2964,13 @@ async function renderSpeakers() {
   try { view = await api("/api/speaker"); }
   catch (err) { failed(host, err.message, renderSpeakers); $("sp-config").textContent = ""; return; }
   host.textContent = "";
+  /* 要念的那几句跟着这份状态一起来。拿到之后重画格子 —— 服务端加一句，页面自动多一格。 */
+  if (Array.isArray(view.prompts) && view.prompts.length) {
+    enrollPrompts = view.prompts;
+    micRunning = !!view.mic_running;
+    enrollOnly = !!view.enroll_only;
+    renderClips();
+  }
   const names = view.speakers || [];
   if (!names.length) {
     host.appendChild(rowOf("gap", "(无)", view.available
@@ -2682,7 +2979,7 @@ async function renderSpeakers() {
   } else {
     for (const name of names) {
       const drop = el("button", { class: "danger" }, "删除");
-      drop.onclick = () => overlay("删掉这个人的声纹？", `${name}\n\n删掉后他唤醒不了。这一步不可撤销 —— 要恢复只能重新录 3 段。`, [
+      drop.onclick = () => overlay("删掉这个人的声纹？", `${name}\n\n删掉后他唤醒不了。这一步不可撤销 —— 要恢复只能重新录一遍那几句。`, [
         { label: "取消" },
         { label: "删掉", primary: true, run: async () => {
           try { await api("/api/speaker/remove", { method: "POST", body: { name } }); await renderSpeakers(); await refreshState(); }
@@ -2692,33 +2989,69 @@ async function renderSpeakers() {
       host.appendChild(rowOf("ok", name, "已注册", [drop], "speaker-" + name));
     }
   }
-  /* describe() 给什么就显示什么：计数与配置。向量永不出现在这里。 */
-  const config = Object.entries(view).filter(([k]) => !["speakers", "available", "reason"].includes(k));
-  $("sp-config").textContent = config.length
-    ? "门的配置：" + config.map(([k, v]) => `${k}=${JSON.stringify(v)}`).join("  ")
-    : "";
+  /* describe() 给什么就显示什么：计数与配置。向量永不出现在这里。
+     但**不是原样摊开** —— 一行 300 字符的 JSON 里，「用的是哪个模型」这个最常问的问题
+     反而是最难找的。所以先给一句人话，原始读数折起来。 */
+  const gate = view.gate || {};
+  /* 「未加载」单独说清楚是哪一种：文件不在（要去下载）和文件在但还没进内存（懒加载，
+     开麦时才加载）都会让 loaded=false，而这两件事该做的事完全不同。 */
+  const loadState = view.available === false
+    ? "模型文件缺失"
+    : view.loaded ? "已加载" : "未加载（开麦时才加载）";
+  const summary = [
+    view.model_label ? `模型 ${view.model_label}` : "",
+    view.dim ? `dim ${view.dim}` : "",
+    loadState,
+    view.threshold === undefined ? "" : `阈值 ${view.threshold}`,
+    gate.cooldown_s === undefined ? "" : `冷却 ${gate.cooldown_s}s`,
+  ].filter(Boolean);
+  $("sp-config").textContent = summary.join("　·　");
+
+  /* 作废的档案要单独喊：它非空的时候，上面那份「已注册」名单是骗人的 —— 名字在文件里，
+     但向量对当前模型无意义，门会照常拒绝。 */
+  const stale = view.needs_reenrollment || [];
+  show($("sp-stale"), stale.length
+    ? `这些人的档案是上一个模型留下的，必须重新注册：${stale.join("、")}`
+    : "");
+
+  const rest = Object.entries(view).filter(([k]) =>
+    !["speakers", "available", "reason", "model_label", "dim", "loaded", "threshold"].includes(k));  $("sp-raw-body").textContent = rest.map(([k, v]) => `${k}=${JSON.stringify(v)}`).join("  ");
+  $("sp-raw").hidden = rest.length === 0;
 }
 
 $("sp-record").onclick = async (event) => {
   const button = event.currentTarget;
-  if (clips.length >= 3) { show($("sp-error"), "已经录了 3 段，先注册或清空", "warn"); return; }
+  /* 上限 = 服务端给的那几句的条数（core/audio/enroll_prompts.py），页面不写死。
+     2026-09-01 实机：这里曾硬编码 3，于是页面画着 6 个格子、录到第 4 段被自己拦下 ——
+     后两句「往后退两步」永远录不到，而那两句正是「不同距离也能唤醒」的全部依据。
+     条数还没拿到时**不拦**：真正的那道闸在服务端（capture_clip 的 409），一个客户端
+     猜出来的上限只会和它不一致。 */
+  const cap = enrollPrompts.length;
+  if (cap && clips.length >= cap) { show($("sp-error"), `已经录了 ${cap} 段，先注册或清空`, "warn"); return; }
   show($("sp-error"), "");
   button.disabled = true;
   button.textContent = "录音中…";
-  try { clips.push(await recordClip()); renderClips(); }
-  catch (err) { show($("sp-error"), "拿不到麦克风：" + err.message); }
+  /* 服务端从采集缓冲取 3 秒，所以这次请求会阻塞那么久 —— 交互和原来一样：
+     点一下、说一句、拿到读数。区别在于录的是**门读的那条流**。 */
+  try { clips.push(await api("/api/speaker/capture", { method: "POST", body: { seconds: CLIP_SECONDS } })); renderClips(); }
+  catch (err) { show($("sp-error"), err.message); }
   finally { button.disabled = false; button.textContent = "录一段"; }
 };
-$("sp-clear").onclick = () => { clips.length = 0; renderClips(); show($("sp-error"), ""); };
+$("sp-clear").onclick = async () => {
+  clips.length = 0;
+  renderClips();
+  show($("sp-error"), "");
+  try { await api("/api/speaker/capture_clear", { method: "POST", body: {} }); } catch { /* 清空失败不值得打断 */ }
+};
 $("sp-name").oninput = renderClips;
 $("sp-enroll").onclick = async (event) => {
   const button = event.currentTarget;
   show($("sp-error"), "");
   button.disabled = true;
   try {
-    const result = await api("/api/speaker/enroll", {
+    const result = await api("/api/speaker/enroll_captured", {
       method: "POST",
-      body: { name: $("sp-name").value.trim(), clips: clips.map((c) => c.wav) },
+      body: { name: $("sp-name").value.trim() },
     });
     clips.length = 0;
     renderClips();
@@ -2726,9 +3059,97 @@ $("sp-enroll").onclick = async (event) => {
     await refreshState();
     show($("sp-error"),
       `已注册 ${result.speaker}：${result.samples_used} 个向量 · ${result.total_seconds}s · ` +
-      `dim=${result.dim} · audio_saved=${result.audio_saved}`, "good");
+      `dim=${result.dim} · audio_saved=${result.audio_saved}` +
+      (result.wake_armed ? " · 唤醒判定已解开，现在可以喊唤醒词了（不用重启）" : ""), "good");
   } catch (err) { show($("sp-error"), err.message, "bad"); }
   finally { button.disabled = false; }
+};
+
+$("sp-mic").onclick = async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = "打开中…";
+  show($("sp-error"), "");
+  try {
+    const out = await api("/api/mic/start", { method: "POST", body: {} });
+    micRunning = !!out.running;
+    enrollOnly = !!out.enroll_only;
+    renderClips();
+    await refreshState();
+    await renderInputLevel();
+  } catch (err) {
+    show($("sp-error"), err.message, "bad");
+  } finally {
+    button.disabled = false;
+    button.textContent = "开麦克风";
+  }
+};
+
+/* 输入设备 + Windows 那一侧的输入音量。**软件增益救不了削波**（它发生在 ADC 里），
+   所以这一端只能在 OS 那一侧解决，而这里就是那一侧。 */
+async function renderInputLevel() {
+  const out = $("sp-level");
+  try {
+    const state = await api("/api/state");
+    const level = state.input_level;
+    if (!state.mic_running || !level) { out.textContent = "麦克风没在跑 —— 先点「开麦克风」。"; return; }
+    const os = level.os;
+    out.textContent =
+      `设备：${level.device || "(认不出)"}　·　` +
+      (os ? `Windows 输入音量 ${Math.round(os.level * 100)}%${os.muted ? "（已静音！）" : ""}` : `音量读不到：${level.os_reason || "不支持"}`) +
+      `　·　实时峰值 ${level.peak}` + (level.too_quiet ? `（低于 ${level.want_peak}，太轻）` : "");
+  } catch (err) { out.textContent = err.message; }
+}
+
+$("sp-cal").onclick = async (event) => {
+  const button = event.currentTarget;
+  const out = $("sp-cal-out");
+  button.disabled = true;
+  button.textContent = "校准中，请一直说话…";
+  show(out, "念注册格子里的任意一句，别停 —— 它要量你说话时的峰值，每轮 2 秒。", "note");
+  try {
+    const r = await api("/api/mic/calibrate", { method: "POST", body: { seconds: 2.0 } });
+    /* 把整条轨迹显示出来。校准是闭环的，「调了几轮、每轮量到多少」正是判断它有没有
+       真的生效的唯一依据 —— 只报一个结果的诊断没法和「什么都没做」区分。 */
+    const steps = (r.trail || []).map((s) => s.silent
+      ? `${Math.round(s.level * 100)}% → 没听到说话`
+      : `${Math.round(s.level * 100)}% → 峰值 ${s.peak}`).join("　→　");
+    show(out,
+      `${r.device}：${Math.round(r.before.level * 100)}% → ${Math.round(r.after.level * 100)}%` +
+      `　·　目标带 ${r.band[0]}–${r.band[1]}　·　${r.settled ? "已进目标带" : "未进目标带"}` +
+      (steps ? `\n${steps}` : "") + (r.hint ? `\n${r.hint}` : ""),
+      r.settled ? "good" : "warn");
+    await renderInputLevel();
+  } catch (err) { show(out, err.message, "bad"); }
+  finally { button.disabled = false; button.textContent = "校准输入音量"; }
+};
+
+$("sp-try").onclick = async (event) => {
+  const button = event.currentTarget;
+  const out = $("sp-try-out");
+  button.disabled = true;
+  button.textContent = "听着…";
+  out.className = "note";
+  out.textContent = "说一句话…";
+  try {
+    const r = await api("/api/test/speaker_live", { method: "POST", body: { seconds: CLIP_SECONDS } });
+    const bits = [
+      r.accepted ? "通过" : "拒绝",
+      `相似度 ${r.score}${r.threshold === null || r.threshold === undefined ? "" : " / 阈值 " + r.threshold}`,
+      r.speaker ? r.speaker : "",
+      r.reason,
+      `窗长 ${r.window_s}s（和唤醒时一致）`,
+      `peak ${Number(r.peak || 0).toFixed(3)} · rms ${Number(r.rms || 0).toFixed(4)}`,
+    ].filter(Boolean);
+    out.textContent = bits.join("　·　");
+    out.className = r.accepted ? "note good" : "note bad";
+  } catch (err) {
+    out.textContent = err.message;
+    out.className = "note bad";
+  } finally {
+    button.disabled = false;
+    button.textContent = "试一句";
+  }
 };
 
 /* ============================================================ 本机 Agent */
@@ -3093,8 +3514,10 @@ busy($("sk-tools"), "等运行时报出工具清单…");
 refreshState();
 loadModels();
 loadWake();
+pullVoices();
 pullLog();
 renderSpeakers();
+renderInputLevel();
 renderAgents();
 renderAgentConfig();
 renderProfile();

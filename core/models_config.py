@@ -48,7 +48,13 @@ KINDS: tuple[str, ...] = ("asr", "tts", "llm")
 
 #: Every key a ``[profiles.NAME.KIND]`` table may carry. This doubles as the
 #: console's write allow-list -- there is no second list to keep in sync.
-FIELDS: tuple[str, ...] = ("provider", "model", "base", "proto", "key_env")
+#:
+#: ``voice`` is here because a TTS section that cannot name its voice does not
+#: describe a TTS setup: 每个云端合成模型只支持一组特定的音色（见 `config/voice.toml`
+#: 的实测表），所以「模型」和「音色」是同一个决定的两半。少了它的后果不是「少一个可选
+#: 项」—— 音色只能写在 `config/voice.toml` 里，于是同一件事有了两个配置来源，而其中一个
+#: 没有读侧。2026-09-01 的 TTS 401 就是那个分裂的账（两边的 `key_env` 指向不同的变量）。
+FIELDS: tuple[str, ...] = ("provider", "model", "voice", "base", "proto", "key_env")
 
 #: Request shapes an adapter can speak. ``custom`` means "a human will wire it".
 PROTOS: tuple[str, ...] = ("openai", "anthropic", "ollama", "custom")

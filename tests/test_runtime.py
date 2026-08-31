@@ -10,13 +10,17 @@ Evidence level: AUTO (fake dispatcher, no subprocess, no socket).
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 import vox_plugin.runtime as runtime_module
 from core.agents.contract import AgentChunk
+from core.audio.acks import ACK_MUTE_CAP_S, ACK_MUTE_TAIL_S
 from core.dispatch.dispatcher import DispatchResult
 from core.state import VoiceState
-from vox_plugin.runtime import VoiceRuntime
+from vox_plugin.runtime import WAKE_LOG_MAX, VoiceRuntime
 
 
 class FakeDispatcher:
@@ -96,7 +100,72 @@ def test_attach_microphone_only_enqueues_on_the_audio_thread():
     # The wake callbacks are pointed at the plugin too, so barge-in still works.
     # 现在中间隔了一层 ``_woken``：状态机那一步照旧，额外做的是弹球 + 应一声。
     assert capture.on_wake == runtime._woken
-    assert capture.on_reject == runtime.plugin.wake_rejected
+    # ``on_reject`` 同样隔了一层（``_wake_rejected``）：多做的事是记进唤醒漏斗和运行日志。
+    # 一次被声纹拒绝的唤醒是使用者最需要看见的事件 —— 它和「根本没命中」长得一样。
+    assert capture.on_reject == runtime._wake_rejected
+    # KWS 命中（声纹之前）也要能被看见，否则「喊了没反应」分不清是麦克风还是声纹。
+    assert capture.on_kws_hit == runtime._kws_hit
+
+
+def test_the_wake_funnel_counts_all_three_layers_separately():
+    """命中 / 接受 / 拒绝必须分开数。
+
+    这三个数字合并之后就回答不了那个真正的问题了：「喊了没反应」到底是麦克风没进声音、
+    唤醒词没命中，还是声纹把它拒了。实机诊断正是靠这个分离读出「KWS 16/16、声纹 0/16」。
+    """
+    runtime = VoiceRuntime(with_desktop=False)
+    runtime.plugin.start()
+
+    runtime._kws_hit("你好小沃")
+    runtime._wake_rejected("你好小沃", "below threshold 0.5", 0.482)
+    runtime._kws_hit("你好小沃")
+    runtime._woken("你好小沃", 0.71)
+
+    assert runtime.wake_stats == {
+        "kws": 2,
+        "accepted": 1,
+        "rejected": 1,
+        "listen_refused": 0,
+        "listen_expired": 0,
+    }
+    verdicts = [entry["verdict"] for entry in runtime.wake_recent]
+    assert verdicts == ["accepted", "kws", "rejected", "kws"], "新的在前"
+    rejected = next(e for e in runtime.wake_recent if e["verdict"] == "rejected")
+    assert rejected["score"] == 0.482
+    assert rejected["reason"] == "below threshold 0.5"
+
+
+def test_the_fourth_layer_of_the_funnel_is_wired_and_not_just_counted():
+    """「唤醒接受了但识别器没开起来」这一层。
+
+    capture 里那个计数器 2026-08-29 就加了，但 ``attach_microphone`` 没有接它的回调，
+    也没有任何界面读它 —— 于是它增长的时候日志里一个字都不出现，和它不存在没有区别。
+    这条断言钉的是**接线**，不是计数器本身：漏接是这一类缺陷的实际形态。
+    """
+    capture = MutableCapture()
+    runtime = _wired(capture)
+    written: list[dict] = []
+    runtime.logbook = type(
+        "Book", (), {"write": lambda _self, source, message, **f: written.append({**f, "source": source})}
+    )()
+
+    assert callable(capture.on_listen_refused), "sink 必须被接上，否则计数器是死的"
+    capture.on_listen_refused("没有 ASR provider —— 唤醒之后不会转写任何东西")
+
+    assert runtime.wake_stats["listen_refused"] == 1
+    entry = runtime.wake_recent[0]
+    assert entry["verdict"] == "listen_refused"
+    assert "ASR" in entry["reason"]
+    # error 级而不是 warn：它就是「唤醒了却没有后文」本身，不是一次正常的拒绝。
+    assert written and written[0]["level"] == "error"
+
+
+def test_the_wake_funnel_is_capped_and_never_grows_without_bound():
+    runtime = VoiceRuntime(with_desktop=False)
+    for _ in range(WAKE_LOG_MAX * 2):
+        runtime._kws_hit("你好小沃")
+    assert len(runtime.wake_recent) == WAKE_LOG_MAX
+    assert runtime.wake_stats["kws"] == WAKE_LOG_MAX * 2, "计数不受环形上限影响"
 
 
 def test_the_wake_wrapper_still_walks_the_state_machine():
@@ -127,6 +196,152 @@ def test_greeting_never_raises_when_there_is_no_bridge_and_no_acks():
     runtime = VoiceRuntime(with_desktop=False, with_memory=False)
 
     runtime._greet()  # 不抛就是通过
+
+
+class MutableCapture:
+    """记下静音窗被压了几次、每次多久。"""
+
+    def __init__(self) -> None:
+        self.on_wake = None
+        self.on_reject = None
+        self.on_recognized = None
+        self.windows: list[float] = []
+
+    def mute_for(self, seconds: float) -> None:
+        self.windows.append(seconds)
+
+
+class BlockingAcks:
+    """一个卡在播放里的应答音库，用来把「播放期间」这个瞬间钉住。"""
+
+    def __init__(self, capture: MutableCapture) -> None:
+        self.capture = capture
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.window_at_play: list[float] | None = None
+        self.played = 0
+        self.failed: dict[str, str] = {}
+
+    def ensure(self):
+        return []
+
+    def play(self, **_kwargs):
+        self.window_at_play = list(self.capture.windows)
+        self.entered.set()
+        self.release.wait(2.0)
+        self.played += 1
+        return "ack-x.wav"
+
+
+def _wired(capture: MutableCapture) -> VoiceRuntime:
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+    runtime._started = True
+    runtime.plugin.start()
+    runtime.attach_microphone(capture)
+    return runtime
+
+
+def test_the_confirmation_sound_mutes_the_input_while_it_plays():
+    """使用者 2026-08-30 报的「**有几率**在唤醒后不能进行后续的对话」。
+
+    确认音是从扬声器出来的，而识别器在唤醒的同一个回调里就开了。没有静音窗的话，
+    那 0.8–1.6 秒会被同一支麦克风采回去，端点在人开口之前就触发 —— 这一轮的「请求」
+    于是是确认音自己或者一段空转写，两种都表现为「唤醒了但没有后文」。
+
+    两件事都要断言：**窗口在唤醒那个线程上就开好**（晚一步识别器已经吃到确认音的开头），
+    以及**播完之后窗口被收回来**（否则把一个偶发缺陷换成一个必然缺陷）。
+    """
+    capture = MutableCapture()
+    runtime = _wired(capture)
+    acks = BlockingAcks(capture)
+    runtime.attach_acks(acks)
+
+    capture.on_wake("你好问问", 0.91)
+
+    assert capture.windows == [ACK_MUTE_CAP_S], "静音窗必须在唤醒那个线程上同步开好"
+    assert acks.entered.wait(2.0), "应答音没被播"
+    assert acks.window_at_play == [ACK_MUTE_CAP_S], "播放的时候窗口必须已经开着"
+
+    acks.release.set()
+    for _ in range(200):
+        if len(capture.windows) >= 2:
+            break
+        time.sleep(0.01)
+
+    assert capture.windows == [ACK_MUTE_CAP_S, ACK_MUTE_TAIL_S]
+    assert acks.played == 1
+
+
+def test_a_failed_confirmation_sound_still_gives_the_microphone_back():
+    """播放抛异常也要收窗。一次播放失败不该让麦克风聋满 ``ACK_MUTE_CAP_S``。"""
+
+    class BoomAcks:
+        failed: dict[str, str] = {}
+
+        def ensure(self):
+            return []
+
+        def play(self, **_kwargs):
+            raise RuntimeError("扬声器坏了")
+
+    capture = MutableCapture()
+    runtime = _wired(capture)
+    runtime.attach_acks(BoomAcks())
+
+    with pytest.raises(RuntimeError):
+        runtime._greet()  # 直接调，不经过那个 daemon 线程，异常才看得见
+
+    assert capture.windows == [ACK_MUTE_TAIL_S]
+
+
+def test_a_runtime_without_acks_never_mutes_the_input():
+    """没有应答音就没有要盖住的声音。压一个窗口只会白白聋掉那么久。"""
+    capture = MutableCapture()
+    runtime = _wired(capture)
+
+    capture.on_wake("你好问问", 0.91)
+    time.sleep(0.05)
+
+    assert capture.windows == []
+    assert runtime.acks is None
+
+
+def test_an_expired_listen_puts_the_state_back_instead_of_lying():
+    """使用者 2026-08-30 报的：「唤醒后不立即说话，球会一直卡在在听阶段」。
+
+    采集侧的聆听会自己结束（端点检测静默 2.4 秒就报一次，宽限期用完就收），但此前没有
+    任何一条路把这件事告诉状态机 —— 它停在 LISTENING，球显示「在听」，而麦克风已经回到
+    唤醒模式。**一个说谎的状态比「已经不听了」糟得多**：使用者会对着一个不听的球说话。
+    """
+    capture = MutableCapture()
+    runtime = _wired(capture)
+    capture.on_wake("你好问问", 0.91)
+    assert runtime.plugin.machine.state is VoiceState.LISTENING
+
+    capture.on_listen_expired(8.0)
+
+    assert runtime.plugin.machine.state is VoiceState.IDLE
+    assert runtime.wake_stats["listen_expired"] == 1
+    assert runtime.wake_recent[0]["verdict"] == "listen_expired"
+    kinds = [event["type"] for event in runtime.seen]
+    assert kinds[-1] == "state.changed", "退回待机这一步必须发事件，否则球不会收"
+
+
+def test_an_expiry_that_lands_after_a_turn_started_changes_nothing():
+    """竞争条件：人恰好在超时的同一刻说了话，回合已经开始。
+
+    这时把状态拽回 IDLE 会打断一个正在进行的回合 —— 所以 ``listening_expired`` 在
+    非 LISTENING 状态下是空操作，而不是抛错、也不是强制归位。
+    """
+    capture = MutableCapture()
+    runtime = _wired(capture)
+    capture.on_wake("你好问问", 0.91)
+    runtime.plugin.submit_text("现在几点")
+    assert runtime.plugin.machine.state is VoiceState.THINKING
+
+    capture.on_listen_expired(8.0)
+
+    assert runtime.plugin.machine.state is VoiceState.THINKING
 
 
 def test_a_hide_timer_is_not_started_without_a_bridge():

@@ -70,8 +70,35 @@ _SCHEMA: dict[str, dict[str, Any]] = {
         "acks": DEFAULT_ACKS,
     },
     "asr": {"enabled": True, "num_threads": 2},
-    "tts": {"enabled": True, "speaker_id": 0, "speed": 1.0, "num_threads": 2},
-    "input": {"device": "", "sample_rate": 16000, "blocksize": 1600},
+    # provider 选本机还是云端。**这是 2026-08-29 新加的四个键** —— 在那之前 TTS 只有
+    # 本机 sherpa 一条路，所以「在控制台把合成换成 cosyvoice、音色 longyuan」在任何一层
+    # 都做不到（见 core/audio/tts_cloud.py 模块头列的三条原因）。
+    #
+    # provider = "sherpa"     读 tts_dir 下的本机 VITS 模型，speaker_id / speed 生效
+    # provider = "dashscope"  走阿里云百炼非实时 HTTP 合成，model / voice / key_env 生效
+    #
+    # key_env 只写**变量名**，值一律从环境变量读 —— 与 agents.toml 同一条规矩。
+    "tts": {
+        "enabled": True,
+        "provider": "sherpa",
+        "speaker_id": 0,
+        "speed": 1.0,
+        "num_threads": 2,
+        "model": "",
+        "voice": "",
+        "instruction": "",
+        "key_env": "VOX_DASHSCOPE_KEY",
+    },
+    "input": {
+        "device": "",
+        "sample_rate": 16000,
+        "blocksize": 1600,
+        # 自适应输入增益。默认开 —— 实测这套东西的可用音量窗口很窄（Windows 输入音量
+        # 默认 100 时削波、调到 7 才开始命中），而窗口位置取决于用哪只麦克风、戴不戴耳机、
+        # 离多远。让人每次自己去声音设置里试是把工程问题外包给用户。
+        # 它修的是「偏轻」那一端；削波救不回来（发生在 ADC 里），只报告。见 core/audio/gain.py。
+        "auto_gain": True,
+    },
     # visible 默认 false = 待机时桌面上没有球。它在唤醒命中之后才弹出，回合结束几秒后
     # 收回去 —— 一个常驻在桌面上的球是个永久的视觉噪声，而它 99% 的时间无事可做。
     "orb": {"enabled": True, "visible": False, "hide_after_s": 10.0},

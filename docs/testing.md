@@ -60,12 +60,16 @@ python -m venv .venv
 | Silero VAD | `models/silero_vad.onnx` | 2.3 MB | 端点检测 |
 | MeloTTS VITS | `models/vits-melo-tts-zh_en/` | 183 MB | 中英合成 |
 | (未清理归档) | `models/kws.tar.bz2` + `tts.tar.bz2` | 192 MB | 可删除 |
-| 声纹 3D-Speaker ERes2Net | `models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx` | 37.8 MB | 声纹准入(**已下载**,dim 512) |
+| 声纹 3D-Speaker CAM++ | `models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx` | 27 MB | 声纹准入(**已下载**,dim 192,2026-08-29 起的默认) |
+| 声纹 3D-Speaker ERes2Net | `models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx` | 37.8 MB | 上一代(dim 512),已被取代,留着可回退 |
 
 Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3`
-声纹模型 SHA-256:`1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b`(39,593,761 字节,embedding dim **512**,2026-08-02 下载并自检)
+声纹模型(CAM++,当前默认)SHA-256:`f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11`(28,281,138 字节,embedding dim **192**)
+声纹模型(ERes2Net,已取代)SHA-256:`1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b`(39,593,761 字节,embedding dim **512**,2026-08-02 下载并自检)
 
-声纹模型来源(核实等级:**官方文档确认**,k2-fsa.github.io):`https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx`。release tag 里 `recongition` 的拼写是官方笔误,不是本文档写错。
+两个模型在同一个 release tag 下。来源(核实等级:**官方文档确认**,k2-fsa.github.io):`https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx`。release tag 里 `recongition` 的拼写是官方笔误,不是本文档写错。
+
+**换型会让既有注册全部作废**:512 维向量对 192 维模型没有意义。`_restore()` 把它们记进 `stale_profiles` 并由 `describe()` 报出来 —— 那件事必须可见,否则症状(「一个人都没注册」)和「文件丢了」长得完全一样。选 CAM++ 的依据是实测判别力而不是上游宣称:见 `THIRD_PARTY_NOTICES.md` 与 `core/audio/speaker.py` 模块头那张表。
 
 模型-测试的分工是有意设计的:**`tests/test_speaker.py` 与 `tests/test_speaker_privacy.py` 的 30 个用例全部不依赖此模型** —— 需要守的性质(fail-closed、音频不落盘、`describe()` 不含向量)恰恰是模型缺失时必须成立的那些。只有 `tests/integration/test_speaker_model.py` 需要权重,模型缺失时它 skip 而不是 fail。
 

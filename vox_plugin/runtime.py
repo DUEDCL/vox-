@@ -29,12 +29,14 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
 from core.agents.contract import AgentDescriptor, Task
 from core.agents.registry import load_agents_config, open_agents
+from core.audio.acks import ACK_MUTE_CAP_S, ACK_MUTE_TAIL_S
 from core.desktop_bridge import DesktopBridge, DesktopBridgeError, find_desktop_binary
 from core.dispatch import DefaultAggregator, DefaultRouter, Dispatcher, DispatchResult
 from core.dispatch.breaker import CircuitBreaker
@@ -48,6 +50,11 @@ from vox_plugin.plugin import VoicePlugin
 
 #: Event types the orb answers rather than merely displays.
 _ANSWERED = frozenset({"tool.confirm_required"})
+
+#: 唤醒漏斗留最近多少次尝试。**只在内存里**，不落盘 —— 它带关键词和相似度，那是
+#: 「谁在什么时候试图唤醒」的记录，和运行日志同一个姿态（环形、进程内、不进磁盘）。
+#: 30 条约等于一次调声纹的完整过程，够回答「刚才那几次为什么被拒」。
+WAKE_LOG_MAX = 30
 
 
 @dataclass
@@ -89,6 +96,23 @@ class VoiceRuntime:
     hide_after_s: float = 10.0
     #: 收球的定时器。每次回合结束重置，所以连着说话时球不会中途消失。
     _hide_timer: Any = field(default=None, init=False, repr=False)
+    #: 唤醒漏斗的计数与最近几次尝试。**给控制台看的**，不进事件（事件扇出到每个通道，
+    #: 而「谁被拒了、分数多少」是个人数据的边缘）。
+    #:
+    #: 为什么要分三层数：一次被声纹拒绝的唤醒和一次根本没命中的唤醒在用户眼里长得一模
+    #: 一样（都是「喊了没反应」），而根因完全不同 —— 前者要重注册声纹，后者要看麦克风
+    #: 和词表。把 kws / accepted / rejected 分开报，这个问题在页面上就是一眼的事。
+    wake_stats: dict[str, int] = field(
+        default_factory=lambda: {
+            "kws": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "listen_refused": 0,
+            "listen_expired": 0,
+        }
+    )
+    #: 最近的唤醒尝试（新的在前），最多 ``WAKE_LOG_MAX`` 条。带关键词、判定、分数、原因。
+    wake_recent: list[dict[str, Any]] = field(default_factory=list)
     plugin: VoicePlugin = field(default_factory=VoicePlugin)
     bridge: DesktopBridge | None = None
     dispatcher: Dispatcher | None = None
@@ -397,11 +421,104 @@ class VoiceRuntime:
 
         ``on_wake`` 走一层包装（``_woken``）：状态机那一步照旧，额外做的两件事是弹出唤醒球
         和应一声 —— 两件都在另一个线程上，理由和上面同一条（音频回调不能被占住）。
+
+        ``on_input_silent`` 也在这里接上：一个全零的输入设备**不会报错**（见
+        ``core/audio/capture.py`` 的死麦克风检测），所以它必须主动进日志，否则症状是
+        「唤醒词唤不醒」而每一层都报告自己健康。
+
+        ``on_kws_hit`` 与 ``on_reject`` 同理：唤醒漏斗的三层（命中 / 接受 / 拒绝）都要
+        能被看见，否则「喊了没反应」分不清是麦克风、词表，还是声纹。
         """
+        capture.on_input_silent = self._input_silent
+        capture.on_kws_hit = self._kws_hit
+        # 「唤醒接受了但识别器没开起来」。**这个 sink 必须接上**：capture 里那个计数器
+        # 2026-08-29 就加了，但没有任何人接它、也没有任何界面读它 —— 于是它增长的时候
+        # 一个字都不会出现在日志里，和它不存在没有区别。
+        capture.on_listen_refused = self._listen_refused
+        # 「唤醒之后一直没人说话」。不接它的后果不是少一条日志：状态机会停在 LISTENING，
+        # 唤醒球一直显示「在听」，而采集早就回到唤醒模式了 —— 一个说谎的状态。
+        capture.on_listen_expired = self._listen_expired
         report = self.plugin.attach_capture(
-            capture, on_recognized=self.utterances.put, on_wake=self._woken
+            capture,
+            on_recognized=self.utterances.put,
+            on_wake=self._woken,
+            on_reject=self._wake_rejected,
         )
         return report
+
+    def _record_wake(self, **fields: Any) -> None:
+        """往唤醒漏斗记一条。只记计数与判定，不记音频、不记向量。"""
+        entry = {"at": time.time(), **fields}
+        self.wake_recent.insert(0, entry)
+        del self.wake_recent[WAKE_LOG_MAX:]
+
+    def _kws_hit(self, keyword: str) -> None:
+        """KWS 命中，声纹之前。这一条是「第 2 层通过了」的唯一证据。"""
+        self.wake_stats["kws"] += 1
+        self._record_wake(keyword=keyword, verdict="kws")
+        self.log("kws", f"唤醒词命中「{keyword}」（还没过声纹）", keyword=keyword)
+
+    def _listen_refused(self, reason: str) -> None:
+        """唤醒被接受了，但识别器没开起来。**error 级，而且它就是「没有后文」本身。**
+
+        球弹出来了、确认音也响了（那两件事走 ``on_wake``），可是没有一个字会被转写。
+        这个状态此前在任何地方都看不见 —— capture 里的计数器没人接，界面也不读，
+        于是它和「我说的话它听不懂」长得完全一样。
+        """
+        self.wake_stats["listen_refused"] = self.wake_stats.get("listen_refused", 0) + 1
+        self._record_wake(verdict="listen_refused", reason=reason)
+        self.log("wake", f"唤醒接受了但没进聆听：{reason}", level="error", reason=reason)
+
+    def _listen_expired(self, seconds: float) -> None:
+        """唤醒之后一直没人开口，聆听到点结束 —— **把状态退回待机并说出来。**
+
+        不做这一步的后果不是少一条日志：状态机会停在 LISTENING，唤醒球一直显示「在听」，
+        而采集其实已经回到唤醒模式了。使用者看到的是「球卡在在听，而且之后说话也不识别」。
+
+        info 级而不是 warn：这不是故障，是正常的超时。但它必须留痕，否则「它怎么不听了」
+        在日志里查不到。
+        """
+        self.wake_stats["listen_expired"] = self.wake_stats.get("listen_expired", 0) + 1
+        self._record_wake(verdict="listen_expired", reason=f"{seconds:g}s 内没有语音")
+        self.log("wake", f"聆听结束：{seconds:g} 秒内没听到说话，退回待机", seconds=seconds)
+        for event in self.plugin.listening_expired(seconds):
+            self.on_event(event)
+        self._schedule_hide()
+
+    def _wake_rejected(self, keyword: str, reason: str = "", score: float = 0.0) -> Any:
+        """声纹拒了一次唤醒。**warn 级** —— 它不是错误（门在正常工作），但它是
+        「我喊了它没反应」这句话在日志里的样子，所以必须显眼。
+        """
+        self.wake_stats["rejected"] += 1
+        self._record_wake(
+            keyword=keyword, verdict="rejected", score=round(float(score), 3), reason=reason
+        )
+        self.log(
+            "wake",
+            f"声纹拒绝「{keyword}」：{reason}",
+            level="warn",
+            keyword=keyword,
+            score=round(float(score), 3),
+            reason=reason,
+        )
+        return self.plugin.wake_rejected(keyword, reason, score)
+
+    def _input_silent(self, details: Any) -> None:
+        """输入设备在出零 —— 这是 error 级，不是 warn。
+
+        它意味着**唤醒功能整体不工作**，而且从外面看不出来。用 error 级是为了让控制台
+        「只看错误」那一档也能抓到它：一个人打开日志正是因为「喊了没反应」。
+        """
+        try:
+            fields = dict(details) if isinstance(details, Mapping) else {"detail": details}
+        except Exception:  # noqa: BLE001 - 诊断路径不能自己炸
+            fields = {}
+        self.log(
+            "input",
+            "输入设备没有声音（全零样本）—— 唤醒不可能命中，检查麦克风是否被静音或被系统隐私设置拒绝",
+            level="error",
+            **fields,
+        )
 
     def _woken(self, keyword: str, score: float | None = None) -> Any:
         """唤醒命中：状态机先走，然后弹球 + 应一声。
@@ -410,17 +527,40 @@ class VoiceRuntime:
         没有（被拒绝的唤醒走的是 ``on_reject``，根本不到这里）。
         """
         events = self.plugin.wake_detected(keyword, score)
+        self.wake_stats["accepted"] += 1
+        self._record_wake(
+            keyword=keyword,
+            verdict="accepted",
+            score=None if score is None else round(float(score), 3),
+        )
         self.log("wake", f"命中「{keyword}」", keyword=keyword, score=score)
+        # 静音窗要在**这个线程上**开，不能留给 _greet：这里跑在音频回调上，而
+        # `_authorise` 紧接着就会 `_start_listening()` 开识别器。晚一步开窗，识别器就已经
+        # 吃到了确认音的开头。见 core/audio/capture.py 的 `_mute_until` 那段注释。
+        if self.acks is not None:
+            self._mute_input(ACK_MUTE_CAP_S)
         threading.Thread(target=self._greet, daemon=True, name="vox-greet").start()
         return events
+
+    def _mute_input(self, seconds: float) -> None:
+        """让采集在这段时间里丢弃输入。没接麦克风时什么也不做。"""
+        capture = getattr(self.plugin, "audio_capture", None)
+        muter = getattr(capture, "mute_for", None)
+        if not callable(muter):
+            return
+        try:
+            muter(seconds)
+        except Exception:  # noqa: BLE001 - 静音窗失败不该让唤醒失败
+            pass
 
     def _greet(self) -> None:
         """把球显示出来，再应一声。两个都吞异常：欢迎动作失败绝不能让唤醒失败。
 
-        **已知缺口**：应答音是从扬声器出来的，而识别器此刻已经开着，所以「嗯哼」可能被采进
-        转写的开头。正确的修法是让 capture 在播放期间不喂识别器（一个静音窗口），那要改
-        采集层；现在的取舍是宁可多一句噪声，也不要让人以为没听见而重复喊 —— 重复喊的第二遍
-        同样会进转写，而且更长。
+        应答音是从扬声器出来的，而识别器此刻已经开着 —— 所以播放期间采集侧挂着一个
+        **静音窗**（``_woken`` 里开、这里收）。没有它的话，那 0.8–1.6 秒会被采进转写：
+        要么确认音自己变成了这一轮的请求，要么端点在人开口之前就触发，两种都表现为
+        「唤醒了但没有后文」。窗口的准确长度由这里决定 —— ``play()`` 是阻塞的，它返回
+        就是真的放完了，那时再压一个 ``ACK_MUTE_TAIL_S`` 的尾巴收尾。
         """
         self._cancel_hide()
         if self.bridge is not None:
@@ -428,8 +568,13 @@ class VoiceRuntime:
                 self.bridge.set_visible(True)
             except Exception:  # noqa: BLE001 - 球是增强，不是前提
                 pass
-        if self.acks is not None:
+        if self.acks is None:
+            return
+        try:
             self.acks.play()
+        finally:
+            # 无论播成没播成都要收窗：一次播放失败不该让麦克风聋满 ACK_MUTE_CAP_S。
+            self._mute_input(ACK_MUTE_TAIL_S)
 
     def _cancel_hide(self) -> None:
         timer = self._hide_timer

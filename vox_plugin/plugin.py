@@ -172,6 +172,21 @@ class VoicePlugin:
         wake_event = self._event("wake.detected", {"keyword": keyword, "score": score})
         return [wake_event, state_event]
 
+    def listening_expired(self, seconds: float = 0.0) -> list[dict]:
+        """聆听结束了，什么都没听到 -> 退回待机。
+
+        **这一步存在的理由是一个说谎的状态。** 唤醒之后没人开口时，采集侧的聆听会结束
+        （流式识别器静默 2.4 秒就报一次端点），而此前没有任何一条路把这件事告诉状态机 ——
+        于是它停在 LISTENING，唤醒球一直显示「在听」，而麦克风其实已经回到唤醒模式了。
+
+        不用 ``cancel()``：那一步会发 ``turn.cancelled``，而这里根本没有过一个回合。
+        不在 LISTENING 时是**空操作**（不抛）—— 这个调用来自音频线程，而人可能刚好在
+        超时的同一刻说了话、回合已经开始了；那种情况下什么都不该做。
+        """
+        if self.machine.state != VoiceState.LISTENING:
+            return []
+        return [self._state_event(VoiceState.IDLE, f"listening expired after {seconds:g}s")]
+
     def wake_rejected(self, keyword: str, reason: str, score: float = 0.0) -> dict:
         """Record a wake hit the speaker gate refused.
 
@@ -297,7 +312,12 @@ class VoicePlugin:
         return {"tts_attached": tts is not None}
 
     def attach_capture(
-        self, capture: Any = None, *, on_recognized: Any = None, on_wake: Any = None
+        self,
+        capture: Any = None,
+        *,
+        on_recognized: Any = None,
+        on_wake: Any = None,
+        on_reject: Any = None,
     ) -> dict:
         """Wire a microphone capture in and point its callbacks here.
 
@@ -322,12 +342,14 @@ class VoicePlugin:
         ``on_wake`` 同理：默认就是 ``wake_detected``（状态机该走的那一步），调用方要在命中
         之后**额外**做点什么（弹出唤醒球、应一声）就传自己的包装，在里面调 ``wake_detected``。
         把「显示窗口」和「播确认音」放进这个类会让状态机知道桌面和扬声器的存在，而那是
-        ``VoiceRuntime`` 的知识。
+        ``VoiceRuntime`` 的知识。``on_reject`` 与 ``on_wake`` 对称，理由相同：一次被声纹
+        拒绝的唤醒是使用者最需要看见的事件（它和「根本没命中」长得一样而根因不同），
+        而「把它记到哪」是调用方的知识。
         """
         self.audio_capture = capture
         if capture is not None:
             capture.on_wake = on_wake or self.wake_detected
-            capture.on_reject = self.wake_rejected
+            capture.on_reject = on_reject or self.wake_rejected
             capture.on_recognized = on_recognized or self.submit_text
             capture.on_verified = self.set_verified_speaker
         else:

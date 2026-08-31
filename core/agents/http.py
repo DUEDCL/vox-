@@ -41,9 +41,15 @@ from urllib.request import Request, urlopen
 from core.outbound import API_USER_AGENT
 
 from .contract import AgentChunk, AgentDescriptor, Task, render_prompt
+from .environment import speech_system_prompt
 
-#: Environment variable carrying the optional bearer token. Not in the config
-#: schema -- a credential has no key there, exactly as ADR 003 decided.
+#: 默认的凭据变量名。配置里可以用 ``key_env`` 指名另一个 —— 那是**变量名**，不是值，
+#: 凭据永不进配置文件（和 `config/voice.toml` 的 `tts.key_env` 同一条规矩）。
+#:
+#: 为什么需要指名：一台机器上会有好几个中转站/服务商各自的 key。2026-08-31 实机就是这个 ——
+#: relay（`api.justwoker.icu`）的有效凭据在 `ANTHROPIC_AUTH_TOKEN` 里，而这里只读
+#: `VOX_AGENT_HTTP_TOKEN`，于是每一轮都被拒。**这个变量名不可从网页修改**（不在
+#: `AGENT_EDITABLE` 里）：让网页决定读哪个环境变量，等于让它决定把哪个凭据发到哪个端点。
 TOKEN_ENV = "VOX_AGENT_HTTP_TOKEN"
 
 #: The OpenAI Chat Completions path, appended to the configured base URL. A URL
@@ -69,8 +75,11 @@ class HttpAgentAdapter:
     #: Model name to send. ``default`` is the honest placeholder for a gateway
     #: that routes on its own; a host that needs a specific model sets it here.
     model: str = "default"
-    #: ``None`` means "read ``VOX_AGENT_HTTP_TOKEN``". An empty string means
-    #: none -- the correct value for an unauthenticated local gateway.
+    #: 去读哪个环境变量。**名字，不是值。** 空 = 用默认的 ``TOKEN_ENV``。
+    key_env: str = ""
+    #: ``None`` means "read the environment variable named by ``key_env``". An
+    #: empty string means none -- the correct value for an unauthenticated local
+    #: gateway.
     token: str | None = None
     _live: dict[str, Any] = field(default_factory=dict, repr=False)
     _cancelled: set[str] = field(default_factory=set, repr=False)
@@ -80,7 +89,7 @@ class HttpAgentAdapter:
         self.capabilities = frozenset(self.capabilities)
         self._validate_url()
         if self.token is None:
-            self.token = os.getenv(TOKEN_ENV) or ""
+            self.token = os.getenv(self.key_env or TOKEN_ENV) or ""
 
     # -- contract ---------------------------------------------------------
 
@@ -139,6 +148,10 @@ class HttpAgentAdapter:
             "endpoint": self._safe_endpoint(),
             "model": self.model,
             "token_configured": bool(self.token),
+            # 报**变量名**，不是值。这一行存在的理由是 2026-08-31：凭据在
+            # ANTHROPIC_AUTH_TOKEN 里而适配器读的是 VOX_AGENT_HTTP_TOKEN，两边都"有 token"，
+            # 于是 `token_configured: true` 反而把人引向别处。名字必须报出来。
+            "key_env": self.key_env or TOKEN_ENV,
         }
 
     # -- internals --------------------------------------------------------
@@ -176,10 +189,16 @@ class HttpAgentAdapter:
         return f"{parsed.scheme}://{parsed.hostname}{port}"
 
     def _build_request(self, prompt: str) -> Request:
+        # system message 是必需的，不是可选的礼貌。不发它时模型看到的唯一 system prompt
+        # 是**端点自己注入的那份** —— 实测中转站注入的那份说「操作系统是 linux，工作目录
+        # 是 /」，于是它给 Windows 用户建议 X11 和 PulseAudio。见 core/agents/environment.py。
         body = json.dumps(
             {
                 "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": [
+                    {"role": "system", "content": speech_system_prompt()},
+                    {"role": "user", "content": prompt},
+                ],
                 "stream": True,
             }
         ).encode("utf-8")

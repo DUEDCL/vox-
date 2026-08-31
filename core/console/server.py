@@ -26,6 +26,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import secrets
+import socket
 import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -61,6 +62,28 @@ def loopback_problem(host: str) -> str | None:
     )
 
 
+def port_is_served(host: str, port: int, *, timeout: float = 0.3) -> bool:
+    """这个端口上是不是已经有人在服务了。
+
+    **正向探测，不靠「绑定会失败」来判断** —— 那个判断在 Windows 上是错的。
+    `HTTPServer` 把 `allow_reuse_address` 设成 1（即 `SO_REUSEADDR`）；POSIX 上它只影响
+    TIME_WAIT 的重绑，一个已经在 LISTEN 的地址仍然绑不上，而 **Windows 上它允许第二个
+    进程绑同一个地址**。于是第二次 `start()` 成功、打印一个带**新 token** 的 URL，而内核
+    可能把连接投给先起来的那个进程 —— 打开那个 URL 得到的是 `a console token is required`。
+
+    2026-08-30 实测：`netstat -ano` 上 127.0.0.1:8899 有**两个** LISTENING（两次
+    `run_console.py --voice`，相隔 100 秒），浏览器的 ESTABLISHED 连的是先起来的那个，
+    而 URL 里的 token 属于后起来的那个。两个进程都报告自己启动成功。
+
+    端口 0（「随便挑一个」）不探测：那是让内核选，不存在冲突。
+    """
+    if not port:
+        return False
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(timeout)
+        return probe.connect_ex((host, port)) == 0
+
+
 @dataclass
 class ConsoleServer:
     """One HTTP server over one ``ConsoleApi``. ``start`` binds, ``stop`` closes."""
@@ -92,6 +115,18 @@ class ConsoleServer:
     def start(self) -> str:
         if self._httpd is not None:
             return self.url
+        # 先探一下端口。见 `port_is_served`：Windows 上第二次绑同一个端口**不报错**，
+        # 于是「启动成功」这句话本身变得不可信。失败要在这里、带着能照做的下一步，
+        # 而不是让使用者拿着一个 401 的页面去猜。
+        if port_is_served(self.host, self.port):
+            raise ConsoleError(
+                f"{self.host}:{self.port} 上已经有一个控制台在服务了。"
+                "先停掉它（Windows：`Get-NetTCPConnection -LocalPort "
+                f"{self.port} -State Listen | Select-Object OwningProcess`，再 "
+                "`Stop-Process -Id <那个 PID>`），或者用 `--port` 换一个端口。"
+                "不能两个一起跑：Windows 允许两个进程绑同一个端口，"
+                "而连接会被投给其中一个，另一个打印的 token 就成了错的。"
+            )
         handler = _make_handler(self)
         try:
             self._httpd = ThreadingHTTPServer((self.host, self.port), handler)
@@ -156,6 +191,8 @@ class ConsoleServer:
                 return api.events(int((query.get("since") or ["0"])[0] or 0))
             if path == "/api/agents":
                 return api.agents()
+            if path == "/api/devices":
+                return api.input_devices()
             if path == "/api/config":
                 return api.config_view()
             if path == "/api/speaker":
@@ -174,6 +211,8 @@ class ConsoleServer:
                 return api.models_view()
             if path == "/api/wake":
                 return api.wake_view()
+            if path == "/api/voices":
+                return api.voices_view()
             if path == "/api/secrets":
                 return api.secrets_view()
             if path == "/api/log":
@@ -187,12 +226,28 @@ class ConsoleServer:
                 return api.text(str(payload.get("text", "")))
             if path == "/api/speaker/enroll":
                 return api.enroll(str(payload.get("name", "")), list(payload.get("clips") or ()))
+            # 从**采集缓冲**录、注册、试一句 —— 和唤醒时校验的是同一条信道。
+            # 都是 POST 而不是 GET：`capture` 会阻塞几秒并改服务端状态。
+            if path == "/api/speaker/capture":
+                return api.capture_clip(float(payload.get("seconds", 3.0) or 3.0))
+            if path == "/api/speaker/capture_clear":
+                return api.clear_clips()
+            if path == "/api/speaker/enroll_captured":
+                return api.enroll_captured(str(payload.get("name", "")))
             if path == "/api/speaker/remove":
                 return api.remove_speaker(str(payload.get("name", "")))
             if path == "/api/mic/start":
                 return api.mic_start()
             if path == "/api/mic/stop":
                 return api.mic_stop()
+            # 输入音量：改的是 **Windows 那一侧**的设置，所以两条都是 POST。
+            # `calibrate` 会阻塞好几秒（它要量说话的峰值），和 `capture` 一样。
+            if path == "/api/mic/level":
+                return api.set_input_level(
+                    float(payload.get("level", 0.0) or 0.0), str(payload.get("device", ""))
+                )
+            if path == "/api/mic/calibrate":
+                return api.calibrate_input(float(payload.get("seconds", 2.0) or 2.0))
             if path == "/api/test/tts":
                 return api.test_tts(
                     str(payload.get("text", "")), play=bool(payload.get("play", True))
@@ -203,6 +258,8 @@ class ConsoleServer:
                 return api.test_kws(str(payload.get("clip", "")))
             if path == "/api/test/speaker":
                 return api.test_speaker(str(payload.get("clip", "")))
+            if path == "/api/test/speaker_live":
+                return api.verify_captured(float(payload.get("seconds", 3.0) or 3.0))
             if path == "/api/test/agent":
                 return api.test_agent(str(payload.get("agent", "")), str(payload.get("text", "")))
             if path == "/api/test/tool":
@@ -250,6 +307,14 @@ class ConsoleServer:
                 return api.restart()
             if path == "/api/log/clear":
                 return api.log_clear()
+            # 试听是 POST 而不是 PUT：它不改任何状态，但会**花掉配额**（一次真实合成），
+            # 所以不能是 GET —— 一个能被预取或刷新重放的 URL 不该扣费。
+            if path == "/api/voices/try":
+                return api.voice_try(
+                    str(payload.get("text", "")),
+                    str(payload.get("model", "")),
+                    str(payload.get("voice", "")),
+                )
         elif method == "PUT":
             payload = body if isinstance(body, dict) else {}
             if path == "/api/config":
@@ -357,4 +422,11 @@ def _make_handler(server: ConsoleServer):
     return Handler
 
 
-__all__ = ["MAX_BODY_BYTES", "STATIC_DIR", "ConsoleError", "ConsoleServer", "loopback_problem"]
+__all__ = [
+    "MAX_BODY_BYTES",
+    "STATIC_DIR",
+    "ConsoleError",
+    "ConsoleServer",
+    "loopback_problem",
+    "port_is_served",
+]

@@ -35,13 +35,19 @@ provider = "sherpa-local"
 model = "zipformer-zh-14M"
 
 [profiles.local.tts]
-provider = "sherpa-local"
-model = "vits-zh-single"
+provider = "custom"
+model = "qwen-audio-3.0-tts-plus"
+base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+proto = "openai"
+key_env = "VOX_TTS_KEY"
 
 # 本机 LLM 走 Ollama。明文 HTTP 只许回环地址 —— 与 EvoX 桥接同一条约束。
 [profiles.local.llm]
-provider = "ollama"
-model = "qwen2.5:7b"
+provider = "custom"
+model = "claude-opus-5"
+base = "https://api.justwoker.icu/v1"
+proto = "openai"
+key_env = "VOX_DASHSCOPE_KEY"
 
 # ---------------------------------------------------------------- 云端 LLM
 # 语音仍然本机（红线不动），只有 LLM 出网。这是最常用的一套。

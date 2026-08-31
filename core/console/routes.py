@@ -33,7 +33,9 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from core.audio.config import load_voice_config, repo_root
+from core.audio import winlevel
+from core.audio.config import load_voice_config, repo_root, resolve_device
+from core.audio.enroll_prompts import DEFAULT_ROUNDS, as_json as enroll_prompts_json
 from core.audio.keywords import (
     MAX_KEYWORDS,
     MAX_KEYWORD_CHARS,
@@ -55,6 +57,35 @@ from core.models_config import (
     write_profile_kind,
 )
 from core.outbound import API_USER_AGENT
+
+#: 「试一句」与取样要求的**原始**峰值下限。
+#:
+#: 2026-08-31 实机：使用者什么都没说，试一句报「相似度 0.979 · 通过」。数字是真算出来的，
+#: 但两边都是放大后的房间底噪 —— 环形缓冲当时存的是加过增益的样本（约 10 倍），一段静音
+#: 于是看上去是 rms 0.21 的健康语音。缓冲已改为存原始音频，这条线是第二道保险：低于它的
+#: 窗口和「麦克风是死的」区分不开，报错比报一个 0.979 诚实。
+#:
+#: 0.1 的出处是两个实测状态，它把它们分在两侧且余量都很宽：这台机器坏掉的时候，五分钟内
+#: 原始峰值的**最大值**是 **0.0587**（而那期间使用者在说话）；同一台机器早先能唤醒时，
+#: 块峰值是 **1.000**（那时反而是削波）。一只工作正常的麦克风说话时峰值在 0.2–0.7。
+#:
+#: 它是**启发式**，不是判决：它拦的是「这段窗口和一只死麦克风区分不开」，不是「这不是
+#: 本人」。真正判断「这里有没有语音」该用 VAD（`models/silero_vad.onnx` 已在盘上，
+#: `capture` 的 `speech_gate` 钩子还空着），那是下一步。
+LIVE_MIN_PEAK = 0.10
+
+#: 校准输入音量的目标带：说话时的**原始**峰值落在这个带里就不动它。
+#:
+#: 带宽的两端各有出处。下界 0.35：低于它软件增益要放大 2 倍以上，而增益放大的是信号也是
+#: 底噪。上界 0.80：留 2 dB 余量给「偶尔一句说得响」—— 2026-09-01 实机的第三段注册样本
+#: 峰值 1.000（削波），而削波发生在 ADC 里，任何软件增益只能等比缩小那一排平顶。
+#: `CALIBRATE_TARGET` 只是报给界面的带中心（算法本身是二分，不朝某个点收敛）；它取在中间
+#: 偏下，因为过冲的代价（削波，不可恢复）比欠冲（增益补一点）大得多。
+CALIBRATE_BAND = (0.35, 0.80)
+CALIBRATE_TARGET = 0.55
+#: 最多调几轮、每轮量多久。4 × 2 s ≈ 8 秒连续说话，正好是念一句提示句的长度。
+CALIBRATE_ROUNDS = 4
+CALIBRATE_SECONDS = 2.0
 
 #: How long the endpoint probe waits. Short on purpose: "this route does not work"
 #: is a useful answer, and a page waiting 30 seconds for it is not.
@@ -97,8 +128,18 @@ ANTHROPIC_VERSION = "2023-06-01"
 USER_AGENT = API_USER_AGENT
 
 #: 除了服务商预设表和 ``models.toml`` 里出现过的 ``key_env`` 之外，还允许设值的变量名。
-#: 这两个不在那两处：一个是 http agent 的 token，一个是 claude CLI 走中转站的凭据。
-EXTRA_SECRET_NAMES = frozenset({"VOX_AGENT_HTTP_TOKEN", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"})
+#: 前两个不在那两处：一个是 http agent 的 token，一个是 claude CLI 走中转站的凭据。
+#: ``VOX_DASHSCOPE_KEY`` 是云端 TTS（阿里云百炼 CosyVoice）的密钥 —— 它由
+#: ``config/voice.toml`` 的 ``tts.key_env`` 指名，而那个文件不在 ``models.toml`` 的
+#: 扫描范围里，所以要在这里点名，否则页面上存不进去。
+EXTRA_SECRET_NAMES = frozenset(
+    {
+        "VOX_AGENT_HTTP_TOKEN",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "VOX_DASHSCOPE_KEY",
+    }
+)
 
 
 def allowed_secret_names() -> frozenset[str]:
@@ -145,6 +186,78 @@ def _fetch_headers(proto: str, key: str) -> dict[str, str]:
     return headers
 
 
+#: 「试一句」的超时。比拉列表的宽:一次真实推理要等模型出字,而拉列表只是查表。
+#: 30 秒够慢模型出 16 个 token,又不至于让页面看起来卡死。
+CHAT_TIMEOUT_S = 30.0
+
+
+def _chat_request(proto: str, model: str) -> tuple[str, dict[str, Any]]:
+    """「试一句」的路径与请求体,按协议分。
+
+    **这个函数此前不存在**,而 `models_try` 在调它 —— 所以「试一句」那颗按钮从来没成功过
+    一次,点它换回的是 `NameError`。使用者 2026-08-29 报的「tts llm asr 试一句报错
+    console failed: NameError」就是这个。全量测试当时是绿的,因为那些用例只走到
+    `ApiError` 的几条早退分支(没填模型名、没有 HTTP 端点),没有一条真的走到发请求这一步。
+
+    请求刻意做到最小:一句 ping、上限 16 个 token、不流式。够证明「这个 key 对这个模型
+    有调用权」,又不至于为了一次测试烧掉可观的配额 —— 而这正是列表端点答不了的问题。
+    """
+    if proto == "anthropic":
+        return (
+            "/messages",
+            {
+                "model": model,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "ping"}],
+            },
+        )
+    return (
+        "/chat/completions",
+        {
+            "model": model,
+            "max_tokens": 16,
+            "stream": False,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+
+
+def _chat_reply(payload: Any) -> str:
+    """从回包里取那句话。认 OpenAI 与 Anthropic 两种形状,其余返回空字符串。
+
+    返回空而不是抛:调用方要把「通了但读不出回答」和「没通」分开报,那两件事的下一步
+    不一样(一个去查响应格式,一个去查网络)。这和 `_model_names` 是同一个立场。
+    """
+    if not isinstance(payload, Mapping):
+        return ""
+    # OpenAI: choices[0].message.content（有些网关把它放在 delta 里,也认）
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, Mapping):
+            for key in ("message", "delta"):
+                block = first.get(key)
+                if isinstance(block, Mapping):
+                    text = block.get("content")
+                    if isinstance(text, str) and text.strip():
+                        return text.strip()
+            text = first.get("text")
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+    # Anthropic: content[].text
+    content = payload.get("content")
+    if isinstance(content, list):
+        parts = [
+            str(item.get("text", ""))
+            for item in content
+            if isinstance(item, Mapping) and item.get("type") in (None, "text")
+        ]
+        joined = "".join(parts).strip()
+        if joined:
+            return joined
+    return ""
+
+
 def _model_names(payload: Any) -> list[str]:
     """从见过的三种形状里取模型名，去重后按名字排。
 
@@ -183,6 +296,19 @@ EDITABLE: dict[str, tuple[str, ...]] = {
         "asr.enabled",
         "asr.num_threads",
         "tts.enabled",
+        # 2026-08-29:合成的 provider / 模型 / 音色可从页面改 —— 这正是「控制台不能配置
+        # 云端 TTS」缺的最后一环(前三环是:没有云端 provider、schema 没有这几个键、
+        # models.toml 没有读侧)。
+        #
+        # **`tts.key_env` 刻意不在这里。** 它是「去读哪个环境变量」,让网页改它等于让网页
+        # 决定把哪个凭据发给百炼 —— 例如指到 ANTHROPIC_AUTH_TOKEN 上。密钥的**值**走
+        # /api/secret(白名单校验),变量**名**留在文件里。
+        "tts.provider",
+        "tts.model",
+        "tts.voice",
+        # instruction 只有 qwen-audio-3.0-tts-* 支持。它是把声音调成「温柔」的正确杠杆:
+        # 音色决定是谁在说,这一行决定她怎么说。
+        "tts.instruction",
         "tts.speaker_id",
         "tts.speed",
         "tts.num_threads",
@@ -342,6 +468,17 @@ class ConsoleApi:
         #: 的知识，而 ``ConsoleApi`` 只知道「有人按了重启」。没注入时 ``restart()`` 报 501
         #: 而不是假装成功 —— 一个点了没反应的重启按钮比一个明确说「这里不支持」的更难查。
         self.restart_hook: Any = None
+        #: 从**采集环形缓冲**取来的注册片段（内存里，永不落盘、永不出进程）。
+        #:
+        #: 为什么不是浏览器录的：注册和校验必须走**同一条信道**，否则相似度比的是两个
+        #: 录音链路的差别而不是两个人的差别。浏览器 `getUserMedia` 拿的是**浏览器认为的
+        #: 默认设备**（不是 `[input] device`），还带它自己的 AGC / 降噪 / 回声消除和它自己
+        #: 的采样率；Vox 校验时读的是 `SounddeviceWakeCapture` 那条流。两条不同的链路
+        #: 各自都「录成功了」，而门比出来的分数没有意义。
+        #:
+        #: 现在这几段就是**门读的那个缓冲**里的样本（`capture._ring`），所以「同一条信道」
+        #: 不是靠约定，是构造上就成立的。
+        self._enroll_clips: list[Any] = []
         #: 运行日志。``runtime.logbook`` 指向同一个对象 —— 写的人是派发器和 runtime，
         #: 读的人是这个 API。已经有一个就用它，免得两边各记一半。
         existing = getattr(runtime, "logbook", None)
@@ -371,6 +508,8 @@ class ConsoleApi:
             "state": getattr(self.runtime.plugin.machine.state, "value", "unknown"),
             "turns": getattr(self.runtime, "turns", 0),
             "mic_running": self.mic_running,
+            "input_level": self._input_level(),
+            "wake": self._wake_funnel(),
             "readiness": self.stack.readiness() if self.stack is not None else [],
             "warnings": list(self.stack.warnings) if self.stack is not None else [],
             "pending_confirmation": self._pending_confirmation(),
@@ -391,6 +530,86 @@ class ConsoleApi:
         if not pending:
             return None
         return {"tool": (pending.get("payload") or {}).get("tool", "shell.run"), "where": "orb"}
+
+    def _wake_funnel(self) -> dict[str, Any]:
+        """唤醒漏斗：命中 / 接受 / 拒绝 / 接受了但没进聆听，加最近几次尝试。
+
+        **四层必须分开报。** 「喊了没反应」有四个完全不同的根因，而它们在使用者眼里
+        长得一模一样：麦克风没进声音、唤醒词没命中、声纹把它拒了、以及**接受了但识别器
+        没开起来**。实机诊断读出「KWS 命中 16/16、声纹接受 0/16」正是靠这个分离 ——
+        合成一个数字就什么也答不了。
+
+        ``muted`` 是确认音期间被丢掉的音频块数（见 `core/audio/capture.py` 的静音窗）。
+        它正常时是个不大的数；如果它一直涨，说明窗口没被收回来，而那个症状是「完全没
+        反应」—— 那时这一格是唯一的读数。
+
+        带相似度和原因，不带音频、不带向量。这份数据只到本机控制台（和运行日志同一个
+        扇出面），不进事件流。
+        """
+        stats = dict(getattr(self.runtime, "wake_stats", {}) or {})
+        recent = list(getattr(self.runtime, "wake_recent", []) or [])
+        capture = self.stack.capture if self.stack is not None else None
+        return {
+            "kws": int(stats.get("kws", 0)),
+            "accepted": int(stats.get("accepted", 0)),
+            "rejected": int(stats.get("rejected", 0)),
+            "listen_refused": int(stats.get("listen_refused", 0)),
+            "last_listen_refusal": str(getattr(capture, "last_listen_refusal", "") or ""),
+            "muted": int(getattr(capture, "muted_blocks", 0) or 0),
+            # 「喊了没反应」的第五个根因，也是唯一一个**不是故障**的：注册模式。一个人都
+            # 没注册时麦克风照常跑、电平照常涨，但唤醒判定被按住 —— 上面四个计数会全是 0
+            # 而每一层看起来都健康。不报出来的话，这个状态和「KWS 装不上」长得一样。
+            "enroll_only": bool(getattr(capture, "enroll_only", False)),
+            "held": int(getattr(capture, "wake_holds", 0) or 0),
+            "recent": [dict(entry) for entry in recent[:20]],
+        }
+
+    def _input_level(self) -> dict[str, Any] | None:
+        """麦克风到底有没有在出声。``None`` = 还没开麦。
+
+        为什么这一项值得占就绪清单一格：Windows 上一个被静音、被隐私设置拒绝、或者根本
+        不在用的输入设备**不报错** —— 流照常打开、回调照常触发、样本全是零。表现是
+        「唤醒词唤不醒」，而配置、词表、模型、声纹每一层都显示健康。实测本机默认设备
+        peak 是 0.00003（数值噪声），同一时刻另一个设备是 0.027。
+
+        报的是峰值而不是 RMS：安静房间的 RMS 也很低，但峰值有噪声底；全零的设备两个都没有。
+        """
+        capture = self.stack.capture if self.stack is not None else None
+        if capture is None or not self.mic_running:
+            return None
+        peak = float(getattr(capture, "input_peak", 0.0) or 0.0)
+        blocks = int(getattr(capture, "input_blocks", 0) or 0)
+        rate = int(getattr(capture, "sample_rate", 16000) or 16000)
+        size = int(getattr(capture, "blocksize", 1600) or 1600)
+        gain = getattr(capture, "auto_gain", None)
+        selector, device_name = self._device_in_use()
+        os_side: dict[str, Any] | None = None
+        os_reason = ""
+        if device_name:
+            try:
+                os_side = winlevel.read_level(device_name).describe()
+            except Exception as exc:  # noqa: BLE001 - 读不到就说读不到
+                os_reason = str(exc)
+        return {
+            "peak": round(peak, 6),
+            "seconds": round(blocks * size / max(1, rate), 1),
+            "silent": bool(getattr(capture, "input_silent", False)),
+            # **在用哪只设备，报名字。** 索引会漂（实测 `device = "2"` 从「耳机」变成了
+            # 「麦克风阵列」），而一个只报索引的界面让这件事永远不可见。
+            "device": device_name or (None if selector is None else str(selector)),
+            # **Windows 那一侧的输入音量。** 同一时刻实测「耳机」0.01、「麦克风阵列」0.82
+            # —— 「设备坏了」和「音量是 1%」此前在界面上长得一模一样。
+            "os": os_side,
+            "os_reason": os_reason,
+            # **原始峰值够不够用**，单独报一格。0.0587 这种量级和「麦克风是死的」区分不开，
+            # 而在缓冲存加增益样本的那个版本里，它被 10 倍增益盖成了一段「健康语音」。
+            "too_quiet": bool(peak and peak < LIVE_MIN_PEAK),
+            "want_peak": LIVE_MIN_PEAK,
+            # 自适应增益在放多少倍。**这个数字必须能看见**：它越大说明设备来的越轻，
+            # 而它放大的是信号也是底噪 —— 增益爬到 10 倍以上时下游看到的「语音」很可能
+            # 只是被抬起来的房间。
+            "gain": (gain.describe() if gain is not None and hasattr(gain, "describe") else None),
+        }
 
     def events(self, since: int = 0) -> dict[str, Any]:
         """Envelopes the runtime has seen, from ``since`` onward.
@@ -901,6 +1120,89 @@ class ConsoleApi:
             "restart_required": True,
         }
 
+    # ---------------------------------------------------------------- 合成音色
+
+    def voices_view(self) -> dict[str, Any]:
+        """云端 TTS 能选哪些音色，以及这份表是**从哪来的**。
+
+        使用者要求「tts 模型配置应该能拉取到目标模型的音色」。核实结果是：**百炼没有
+        列举系统预置音色的 API**（有列表 API 的是声音复刻，只列你自己复刻的）。所以这里
+        回的是一张带出处与核实日期的钉住表，而界面把它做成**可输入的建议列表**而不是
+        封闭下拉 —— 表里没有的音色照样能填，由「试一句」去判，不由这张表判合法性。
+
+        这个区别必须在响应里就说出来（``source`` / ``checked`` / ``live``），否则界面上
+        一个下拉框会让人以为它是实时的。
+        """
+        from core.audio.voices import (
+            CLOUD_TTS_MODELS,
+            INSTRUCTION_MODELS,
+            VOICE_LIST_CHECKED,
+            VOICE_LIST_SOURCE,
+            voice_options,
+        )
+
+        config = load_voice_config()
+        key_env = str(config.get("tts.key_env", "VOX_DASHSCOPE_KEY")) or "VOX_DASHSCOPE_KEY"
+        return {
+            "provider": str(config.get("tts.provider", "sherpa")),
+            "model": str(config.get("tts.model", "")),
+            "voice": str(config.get("tts.voice", "")),
+            "models": list(CLOUD_TTS_MODELS),
+            # 按当前 model 给对应的一组 —— 混用音色会 411,给「全部音色」的下拉是在邀请报错。
+            "voices": voice_options(str(config.get("tts.model", ""))),
+            "instruction": str(config.get("tts.instruction", "")),
+            "supports_instruction": str(config.get("tts.model", "")) in INSTRUCTION_MODELS,
+            "key_env": key_env,
+            "key_present": bool(os.environ.get(key_env, "").strip()),
+            # 这三个字段是诚实性的一部分,不是装饰。
+            "live": False,
+            "source": VOICE_LIST_SOURCE,
+            "checked": VOICE_LIST_CHECKED,
+            "restart_required": True,
+        }
+
+    def voice_try(self, text: str = "", model: str = "", voice: str = "") -> dict[str, Any]:
+        """用指定的模型 + 音色真合成一句，报耗时与采样数。**不落盘、不进日志正文。**
+
+        这是「拉取音色」那张表唯一的验证手段：表是钉住的，可能过期；一次真实合成不会。
+        所以配错的组合（例如 v1 的音色名配 v2 的模型）在这里就会以 HTTP 4xx 出现，
+        而不是等到唤醒之后才发现不出声。
+        """
+        from core.audio.tts_cloud import DashScopeTtsError, DashScopeTtsProvider
+
+        config = load_voice_config()
+        key_env = str(config.get("tts.key_env", "VOX_DASHSCOPE_KEY")) or "VOX_DASHSCOPE_KEY"
+        say = str(text or "").strip() or "你好，我是沃，这是一次音色试听。"
+        provider = DashScopeTtsProvider(
+            model=str(model or config.get("tts.model", "") or "cosyvoice-v2"),
+            voice=str(voice or config.get("tts.voice", "") or "longyuan"),
+            key_env=key_env,
+        )
+        status = provider.load()
+        if not status.available:
+            return {"ok": False, "reason": status.details["reason"], "key_env": key_env}
+        try:
+            audio = provider.synthesize(say)
+        except (DashScopeTtsError, Exception) as exc:  # noqa: BLE001 - 原因要显示出来
+            return {
+                "ok": False,
+                "reason": f"{type(exc).__name__}: {exc}",
+                "model": provider.model,
+                "voice": provider.voice,
+            }
+        return {
+            "ok": True,
+            "model": provider.model,
+            "voice": provider.voice,
+            "elapsed_ms": audio.elapsed_ms,
+            "sample_rate": audio.sample_rate,
+            "samples": int(len(audio.samples)),
+            "seconds": round(len(audio.samples) / max(1, audio.sample_rate), 2),
+            # 试听的音频**不返回给页面**：一次 wav 是几百 KB 的 base64,而这个端点要回答的
+            # 是「这个组合通不通」。要听就用「说一句」那条路,它走真实播放链。
+            "chars": len(say),
+        }
+
     def wake_update(self, words: Sequence[Any]) -> dict[str, Any]:
         """整份换掉自定义词表。空列表 = 删掉它，回落到模型出厂那份。"""
         from core.audio.config import custom_keywords_path, model_paths
@@ -939,14 +1241,28 @@ class ConsoleApi:
     # ------------------------------------------------------------------ speaker
 
     def speaker_view(self) -> dict[str, Any]:
-        """Enrollment status: names and counts. ``describe()`` is the only view."""
+        """Enrollment status: names and counts. ``describe()`` is the only view.
+
+        另外带上**要念的那几句**（`core/audio/enroll_prompts.py`）—— 脚本和页面共用同一份，
+        所以两条路的提示不会各自漂移。页面据此决定画几个格子、每格写哪句话。
+        """
         verifier = self._verifier()
+        capture = self.stack.capture if self.stack is not None else None
+        prompts = {
+            "prompts": enroll_prompts_json(),
+            "max_clips": DEFAULT_ROUNDS,
+            "mic_running": bool(self.mic_running),
+            # 注册模式：一个人都没注册时麦克风能开，但唤醒判定被永久按住。页面据此
+            # 决定要不要显示「开麦克风」那颗按钮，以及要不要说「现在还不会响应唤醒词」。
+            "enroll_only": bool(getattr(capture, "enroll_only", False)),
+            "clips": len(self._enroll_clips),
+        }
         if verifier is None:
-            return {"available": False, "reason": "no verifier is attached", "speakers": []}
+            return {"available": False, "reason": "no verifier is attached", "speakers": [], **prompts}
         try:
-            return verifier.describe()
+            return {**verifier.describe(), **prompts}
         except Exception as exc:  # noqa: BLE001
-            return {"available": False, "reason": type(exc).__name__, "speakers": []}
+            return {"available": False, "reason": type(exc).__name__, "speakers": [], **prompts}
 
     def _verifier(self) -> Any:
         if self.stack is not None and getattr(self.stack, "verifier", None) is not None:
@@ -998,6 +1314,197 @@ class ConsoleApi:
             "dim": result.dim,
             "quality": report,
             "audio_saved": False,
+            "wake_armed": self._arm_wake_after_enrollment(),
+        }
+
+    def _arm_wake_after_enrollment(self) -> bool:
+        """注册成功之后把注册模式解开。解开了返回 ``True``。
+
+        判定在 `core/audio/capture.py` 的 `arm_after_enrollment()` 里（它复用声纹门自己的
+        那条前提）。这里只负责在两条注册路径上都调它 —— 2026-09-01 实机漏的就是这一步：
+        注册成功、页面显示成功、而 `wake_held` 仍然恒真，喊唤醒词没有任何反应。
+        """
+        capture = self.stack.capture if self.stack is not None else None
+        armer = getattr(capture, "arm_after_enrollment", None)
+        if not callable(armer):
+            return False
+        try:
+            return bool(armer())
+        except Exception:  # noqa: BLE001 - 解不开就维持按住（fail-closed 的那一侧）
+            return False
+
+    # -- 从采集缓冲注册（和校验同一条信道）--------------------------------------
+
+    def capture_clip(self, seconds: float = 3.0) -> dict[str, Any]:
+        """从**门读的那个环形缓冲**取一段，留在内存里等注册。
+
+        阻塞 ``seconds`` 再取快照，所以页面上的交互和原来一样：点一下、说一句、拿到读数。
+        取的是 `capture._ring`，也就是唤醒时送去校验的同一份音频 —— 「注册和校验同信道」
+        因此是构造上成立的，不是靠谁记得选对设备。
+
+        第一次注册**也走这条路**：一个人都没注册时 `capture.start()` 进注册模式（设备开着、
+        唤醒判定被永久按住），所以这一页能把第一份声纹录完，不必先开终端跑脚本。
+        """
+        if len(self._enroll_clips) >= DEFAULT_ROUNDS:
+            raise ApiError(f"已经录了 {DEFAULT_ROUNDS} 段，先注册或清空", status=409)
+        samples, measured = self._snapshot(seconds, min_peak=LIVE_MIN_PEAK)
+        self._enroll_clips.append(samples)
+        return {"index": len(self._enroll_clips) - 1, "clips": len(self._enroll_clips), **measured}
+
+    def _snapshot(self, seconds: float, *, min_peak: float) -> tuple[Any, dict[str, Any]]:
+        """从环形缓冲取一段并量它。取样期间唤醒判定被按住。
+
+        ``min_peak`` 是「原始峰值低到这个量级就拒绝」的那条线。注册和试一句用
+        `LIVE_MIN_PEAK`；**校准输入音量时必须给 0** —— 偏轻正是它要修的东西，用同一条线
+        拦住它等于「只有已经调好的机器才能校准」。
+        """
+        capture = self.stack.capture if self.stack is not None else None
+        if capture is None or not callable(getattr(capture, "recent_audio", None)):
+            raise ApiError("这台机器上没有采集缓冲，用 scripts/enroll_speaker.py 注册", status=409)
+        if not self.mic_running:
+            raise ApiError(
+                "麦克风没在跑。在这一页点「开麦克风」，或者用 `--voice` 启动控制台",
+                status=409,
+            )
+        # 聆听期间音频**全部喂给识别器、一个样本都不进环形缓冲**，那时取快照只会拿到一段
+        # 空的（然后质量门判「太轻」，分数 0）。拒绝比给一个假读数好。
+        if getattr(capture, "listening", False):
+            raise ApiError("正在聆听刚才那次唤醒，等这一轮说完再录", status=409)
+        span = max(0.5, min(float(seconds or 3.0), float(getattr(capture, "buffer_seconds", 3.0))))
+        # **取样期间把唤醒判定按住。** 页面提示让人说的就是唤醒词，真命中的话
+        # `_authorise` 的 finally 会把刚录的缓冲清掉、并切进聆听模式（之后的块不再入缓冲），
+        # 于是这一段固定是空的 —— 使用者 2026-08-31 报的「试一句经常相似度为 0」就是它。
+        holder = getattr(capture, "hold_wake_for", None)
+        if callable(holder):
+            holder(span + 0.5)
+        capture.forget_recent_audio()
+        time.sleep(span + 0.15)  # 一点余量，让最后那一块音频也进来
+        samples = capture.recent_audio(span)
+        measured = quality(samples)
+        # **有没有人说话，由 VAD 判，不由峰值判。**
+        #
+        # 2026-08-31 实机：使用者什么都没说、等了一会，试一句报「相似度 0.979 通过」。
+        # 数字是真算出来的，但两边都是**放大后的房间底噪**。峰值、RMS、削波比例都是能量
+        # 统计量，而「是不是人声」不是能量问题 —— 用能量去近似它必然在某台设备上翻车。
+        # 实测（core/audio/vad.py 的冒烟）：同一段底噪放大 10 倍后 VAD 判 False，而真实
+        # 人声缩到峰值 **0.01** 仍然判 True。那才是「无论何种设备、音量」要的判据。
+        #
+        # 峰值那条线仍然留着，但降级成**第二道**：VAD 缺模型时它是唯一的保险。
+        if not capture.has_speech(samples):
+            raise ApiError(
+                f"这 {span:.0f} 秒里没有检测到人说话（VAD 判定）"
+                f"，峰值 {measured['peak']:.4f} / rms {measured['rms']:.4f}。"
+                "对着麦克风念格子里那一句再点一次",
+                status=409,
+            )
+        if measured["peak"] < min_peak:
+            raise ApiError(
+                f"设备原始峰值只有 {measured['peak']:.4f}（rms {measured['rms']:.4f}），"
+                f"低于 {min_peak} —— 这个量级和「麦克风没在收音」区分不开，"
+                "任何相似度都没有意义。先点「校准输入音量」（它会直接改 Windows 那一侧的"
+                "输入音量并复测），再回来录",
+                status=409,
+            )
+        return samples, measured
+
+    def clear_clips(self) -> dict[str, Any]:
+        self._enroll_clips.clear()
+        return {"clips": 0}
+
+    def enroll_captured(self, name: str) -> dict[str, Any]:
+        """用缓冲里那几段注册。音频在这次调用之后就没了 —— 留下的只有向量。"""
+        name = (name or "").strip()
+        if not name:
+            raise ApiError("a speaker name is required")
+        if not self._enroll_clips:
+            raise ApiError("还没有录音段，先点「录一段」")
+        verifier = self._verifier()
+        if verifier is None:
+            raise ApiError("the voiceprint gate is not available on this host", status=409)
+        report = [{"index": index, **quality(chunk)} for index, chunk in enumerate(self._enroll_clips)]
+        try:
+            result = verifier.enroll(name, list(self._enroll_clips))
+        except Exception as exc:  # noqa: BLE001 - the message names the constraint
+            raise ApiError(f"enrollment refused: {exc}", status=409) from exc
+        finally:
+            self._enroll_clips.clear()
+        return {
+            "speaker": result.speaker,
+            "samples_used": result.samples_used,
+            "total_seconds": round(result.total_seconds, 3),
+            "dim": result.dim,
+            "quality": report,
+            "audio_saved": False,
+            # 注册模式**在这里**解开：麦克风已经在跑，不解开就得重启才能唤醒。
+            "wake_armed": self._arm_wake_after_enrollment(),
+        }
+
+    def verify_captured(self, seconds: float = 3.0) -> dict[str, Any]:
+        """「试一句」：录一段，取**门实际用的那个窗长**过一次校验，把相似度报出来。
+
+        **窗长必须和门一致，这是 2026-08-30 查出来的一条谎。** 唤醒时送去校验的是
+        「命中前 `verify_seconds`（默认 1.5）秒」，而这里此前拿整段 3 秒去算 —— 实测同一个
+        档案用 1.0 s 的窗得 0.774、用 3.0 s 的窗得 0.846，也就是这个诊断会比门实际给的分
+        **高 0.07 以上**；叠上「实机那个窗里有一截静音」（实测再掉 0.05–0.09），使用者看到
+        的差距就是 0.2。**一个报数比现实好的诊断比没有诊断更糟**，因为它会让人去查别处。
+
+        取的是**尾部**那一段：唤醒时那个窗口是「以唤醒词结尾」的，所以对着这个按钮说
+        「你好小沃」再停下，取尾部才是同一个形状。
+        """
+        verifier = self._verifier()
+        if verifier is None:
+            raise ApiError("the voiceprint gate is not available on this host", status=409)
+        # **没人注册就先说清楚，别先录 3 秒再报一个 0。**
+        #
+        # 2026-09-01 实机：使用者说「试一句里『你好小沃』的相似度为 0」。那个 0 是对的
+        # —— `verify()` 在没有档案时返回 `(False, None, 0.0, "no speaker enrolled")` ——
+        # 但页面把它显示成一个分数，读起来像「你的声音不像你」。**一个能被误读成测量结果的
+        # 常量比没有读数更糟**：它会让人去查麦克风、查距离、查阈值，而真正的原因是
+        # 档案表是空的。
+        if not list(getattr(verifier, "speakers", ()) or ()):
+            raise ApiError(
+                "还没有人注册 —— 试一句没有可比对的档案，相似度必然是 0（不是「不像你」）。"
+                "先录上面那几句、填个名字、点「注册」",
+                status=409,
+            )
+        before = list(self._enroll_clips)
+        try:
+            self.capture_clip(seconds)
+            samples = self._enroll_clips[-1]
+        finally:
+            # 试一句不该占用注册的那三格。
+            self._enroll_clips[:] = before
+        capture = self.stack.capture if self.stack is not None else None
+        window_s = float(getattr(capture, "verify_seconds", 1.5) or 1.5)
+        wanted = int(window_s * 16000)
+        window = samples[-wanted:] if len(samples) > wanted else samples
+        started = time.perf_counter()
+        try:
+            # **throttle=False**：这一次校验不进暴力防护。一次本机、已鉴权、由人点出来的
+            # 诊断不是暴力尝试 —— 而 2026-08-31 实机里它正是：连点几下试一句就把真实唤醒门
+            # 推进了 30 秒冷却，日志上是「声纹拒绝：cooling down for 25.4s」，使用者看到的
+            # 是「说了唤醒词但根本没检测到」。
+            result = verifier.verify(window, sample_rate=16000, throttle=False)
+        except Exception as exc:  # noqa: BLE001 - a fault is a rejection
+            return {
+                "accepted": False,
+                "speaker": None,
+                "score": 0.0,
+                "reason": f"verifier error: {type(exc).__name__}",
+                "window_s": round(len(window) / 16000, 2),
+                "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                **quality(window),
+            }
+        return {
+            "accepted": bool(result.accepted),
+            "speaker": result.speaker,
+            "score": round(float(result.score), 4),
+            "reason": result.reason,
+            "threshold": getattr(verifier, "threshold", None),
+            # 报出用了多长的窗：这个数字和门用的必须相同，而「相同」这件事要看得见。
+            "window_s": round(len(window) / 16000, 2),
+            "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            **quality(window),
         }
 
     def remove_speaker(self, name: str) -> dict[str, Any]:
@@ -1013,7 +1520,176 @@ class ConsoleApi:
             raise ApiError(f"could not remove: {type(exc).__name__}") from exc
         return {"removed": bool(existed), "speakers": self.speaker_view().get("speakers", [])}
 
-    # ------------------------------------------------------------------- memory
+    # -- 输入设备与 OS 那一侧的输入音量 ------------------------------------------
+
+    def _device_in_use(self) -> tuple[int | str | None, str]:
+        """当前在用的输入设备：`sounddevice` 的选择子，和它的**名字**。
+
+        名字才是能对上 Windows 那一侧的东西 —— 而索引会漂：`input.device = "2"` 在
+        2026-08-29 是「耳机 (沉麟的耳机)」，2026-09-01 实测已经变成「麦克风阵列
+        (Realtek(R) Audio)」，因为中间插拔过设备。一个只报索引的界面会让这件事永远不可见。
+        """
+        capture = self.stack.capture if self.stack is not None else None
+        selector = getattr(capture, "device", None)
+        if selector is None:
+            config = getattr(self.stack, "config", None)
+            if isinstance(config, Mapping):
+                selector = resolve_device(dict(config))
+        try:
+            return selector, winlevel.device_name(selector)
+        except Exception:  # noqa: BLE001 - 名字取不到不该让整个 /api/state 挂掉
+            return selector, ""
+
+    def input_devices(self) -> dict[str, Any]:
+        """输入设备清单，**带上 Windows 那一侧的输入音量和静音状态**。
+
+        为什么要合这两份：一台机器上同一个物理麦克风会以 MME / DirectSound / WASAPI /
+        WDM-KS 四个条目出现（所以 `input.device` 填索引），而「这只麦克风能不能用」取决于
+        端点那一侧的音量和静音 —— 2026-09-01 实测同一时刻「耳机」是 0.01、「麦克风阵列」
+        是 0.82。这两个数字此前在界面上完全不存在，于是「设备坏了」和「音量是 1%」长得
+        一模一样。
+        """
+        selector, in_use = self._device_in_use()
+        rows: list[dict[str, Any]] = []
+        try:
+            import sounddevice as sd  # type: ignore
+
+            apis = sd.query_hostapis()
+            for index, device in enumerate(sd.query_devices()):
+                if device["max_input_channels"] <= 0:
+                    continue
+                rows.append({
+                    "index": index,
+                    "name": str(device["name"]),
+                    "api": str(apis[device["hostapi"]]["name"]),
+                    "channels": int(device["max_input_channels"]),
+                    "in_use": str(index) == str(selector) or str(device["name"]) == in_use,
+                })
+        except Exception as exc:  # noqa: BLE001
+            return {"available": False, "reason": f"{type(exc).__name__}: {exc}", "devices": []}
+
+        levels: dict[str, dict[str, Any]] = {}
+        reason = ""
+        try:
+            levels = {end.name: end.describe() for end in winlevel.endpoints()}
+        except Exception as exc:  # noqa: BLE001 - 没有音量控制不影响列设备
+            reason = str(exc)
+        for row in rows:
+            row["os"] = levels.get(row["name"])
+        return {
+            "available": True,
+            "reason": reason,
+            "in_use": in_use,
+            "selector": selector if selector is None else str(selector),
+            "devices": rows,
+        }
+
+    def set_input_level(self, level: float, device: str = "") -> dict[str, Any]:
+        """直接改 Windows 那一侧的输入音量（0.0–1.0），顺带取消静音。
+
+        这是「不该由人去试」的那件事的一半 —— 另一半是 `calibrate_input()`，它自己决定
+        该设多少。留一个手动入口，因为知道自己要什么的人不该被闭环挡住。
+        """
+        name = (device or "").strip() or self._device_in_use()[1]
+        if not name:
+            raise ApiError("认不出在用哪只输入设备（拿不到设备名）", status=409)
+        try:
+            end = winlevel.set_level(name, float(level))
+        except winlevel.LevelUnavailable as exc:
+            raise ApiError(str(exc), status=409) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise ApiError(f"{type(exc).__name__}: {exc}", status=409) from exc
+        return {"device": end.name, **end.describe()}
+
+    def calibrate_input(self, seconds: float = CALIBRATE_SECONDS) -> dict[str, Any]:
+        """**闭环**校准输入音量：量说话时的峰值 → 改 OS 那一侧的音量 → 复测。
+
+        使用者三次提出同一件事：「真正的最佳效果应该是无论何种设备、音量，都能准确的识别
+        唤醒词」。此前我们只会**建议**他去调 Windows 的滑条，而实测那个可用窗口很窄、位置
+        又取决于用哪只麦克风、戴不戴耳机、离多远 —— 一个成熟的产品不该把这件事留给人。
+
+        为什么是闭环而不是「设成某个默认值」：合适的音量取决于麦克风的灵敏度。同一时刻
+        实测「耳机」在 0.01、「麦克风阵列」在 0.82，而两者都是这台机器上的正常状态 ——
+        没有哪个常数对两只麦克风同时成立。唯一可靠的判据是**量出来的说话峰值**。
+
+        **算法是二分，不是按比例缩放。** ``SetMasterVolumeLevelScalar`` 的标度不是幅度的
+        线性函数：它走的是 dB 曲线，而曲线的范围各家驱动不一样（实测这台机器上 0.01 和
+        0.82 分别对应约 0.03× 和 0.54× 的幅度）。按比例算下一步要先假设一个曲线，猜错就
+        来回过冲。二分只依赖一件必然成立的事 —— 音量调高，峰值不会变小 —— 所以它对任何
+        曲线都收敛，4 轮把标度收敛到 1/16。
+
+        为什么不在开麦时自动跑：它要求人**一直在说话**。没有语音时唯一诚实的动作是什么都
+        不做 —— 拿房间底噪去校准会把音量推到顶，那正好是削波那一端。
+        """
+        name = self._device_in_use()[1]
+        if not name:
+            raise ApiError("认不出在用哪只输入设备（拿不到设备名）", status=409)
+        # 麦克风没开就**立刻**拒绝，而不是走满 8 轮然后报「没听到说话」：那个提示会让人以为
+        # 自己说得不够大声，而真正的原因是设备根本没开。
+        if not self.mic_running:
+            raise ApiError("麦克风没在跑。先点「开麦克风」—— 校准要量你说话时的峰值", status=409)
+        try:
+            before = winlevel.read_level(name)
+        except winlevel.LevelUnavailable as exc:
+            raise ApiError(f"{exc}（这台机器上没法自动调，只能用系统的声音设置）", status=409)
+        low, high = CALIBRATE_BAND
+        span = max(1.0, min(float(seconds or CALIBRATE_SECONDS), 3.0))
+        level = before.level
+        lo, hi = 0.0, 1.0
+        trail: list[dict[str, Any]] = []
+        heard = 0
+        settled = False
+        for _attempt in range(2 * CALIBRATE_ROUNDS):
+            if heard >= CALIBRATE_ROUNDS:
+                break
+            try:
+                _samples, measured = self._snapshot(span, min_peak=0.0)
+            except ApiError as exc:
+                # 没听到说话：记一笔继续等，**不动音量**。改了就等于拿底噪校准。
+                trail.append({"level": round(level, 4), "silent": True, "why": str(exc)[:60]})
+                continue
+            heard += 1
+            peak = float(measured["peak"])
+            trail.append({
+                "level": round(level, 4),
+                "peak": round(peak, 4),
+                "rms": round(float(measured["rms"]), 4),
+                "clip_ratio": round(float(measured["clip_ratio"]), 4),
+            })
+            if low <= peak <= high:
+                settled = True
+                break
+            if peak < low:
+                lo, wanted = level, (level + hi) / 2.0
+            else:
+                hi, wanted = level, (lo + level) / 2.0
+            if abs(wanted - level) < 0.01:
+                # 区间已经收拢到比可调精度还小 —— 再走一步只是重复上一次，如实停下。
+                break
+            try:
+                level = winlevel.set_level(name, wanted).level
+            except winlevel.LevelUnavailable as exc:
+                raise ApiError(str(exc), status=409) from exc
+        after = winlevel.read_level(name)
+        return {
+            "device": name,
+            "before": before.describe(),
+            "after": after.describe(),
+            "target": CALIBRATE_TARGET,
+            "band": [low, high],
+            "trail": trail,
+            "heard": heard,
+            "settled": settled,
+            "hint": (
+                ""
+                if settled
+                else "没听到说话 —— 校准要你连续念一段话（念注册页那几句就行），再点一次"
+                if heard == 0
+                else "调到了可调范围的边上还没进目标带：这只麦克风的灵敏度不够（或者离得太远），"
+                "换一只输入设备或靠近些再试"
+            ),
+        }
+
 
     def memory(self, query: str = "") -> dict[str, Any]:
         """Mid-term facts only -- never conversation turns.
@@ -1065,7 +1741,13 @@ class ConsoleApi:
         except Exception as exc:  # noqa: BLE001 - a refused gate lands here too
             raise ApiError(f"{type(exc).__name__}: {exc}", status=409) from exc
         self.mic_running = True
-        return {"running": True}
+        return {
+            "running": True,
+            # 一个人都没注册时开的是**注册模式**：设备开着、缓冲照常填，但唤醒判定被永久
+            # 按住（`capture.enroll_only`）。页面据此把「录一段」放出来，同时说清楚现在
+            # 还不会响应唤醒词。见 capture._check_gate_preconditions 的注释。
+            "enroll_only": bool(getattr(self.stack.capture, "enroll_only", False)),
+        }
 
     def mic_stop(self) -> dict[str, Any]:
         if self.stack is None or self.stack.capture is None:
@@ -1202,7 +1884,11 @@ class ConsoleApi:
         answer: list[str] = []
         error = ""
         try:
-            for chunk in adapter.run(task):
+            # 契约里的方法是 `stream`,不是 `run` —— 这里此前写的是 `adapter.run(task)`,
+            # 于是每次点「试跑」都换回 `AttributeError: 'CliAgentAdapter' object has no
+            # attribute 'run'`,而外面那层 except 把它记成「受阻」并显示「claude 没答」。
+            # 一个把自己的拼写错误报成「agent 受阻」的探针比没有探针更糟:它指向了错的地方。
+            for chunk in adapter.stream(task):
                 chunks.append({"kind": chunk.kind, "chars": len(chunk.text or "")})
                 if chunk.text:
                     answer.append(chunk.text)

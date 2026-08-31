@@ -41,6 +41,8 @@ from core.audio import (
     resolve_device,
     resolve_keywords_file,
 )
+from core.audio.gain import AutoGain
+from core.audio.vad import SileroSpeechGate
 
 
 @dataclass
@@ -51,7 +53,9 @@ class VoiceStack:
     capture: SounddeviceWakeCapture | None = None
     kws: SherpaKeywordProvider | None = None
     asr: SherpaStreamingAsrProvider | None = None
-    tts: SherpaTtsProvider | None = None
+    #: 合成器。**类型是 Any 而不是 SherpaTtsProvider** —— 2026-08-29 起它也可能是
+    #: `DashScopeTtsProvider`。两者摆同一个形状，标死一个具体类会让「可替换」变成谎话。
+    tts: Any = None
     verifier: SpeakerVerificationProvider | None = None
     warnings: tuple[str, ...] = ()
     #: Set when the gate is deliberately off (the escape hatch). Reported as a
@@ -92,13 +96,26 @@ class VoiceStack:
 
         tts_on = bool(self.config.get("tts.enabled", True))
         tts_ready = self.tts is not None and self.tts.available
+        # 「在哪」对两种 provider 不是同一样东西：本机是模型目录，云端是端点主机 + 音色。
+        # 报路径的那一行如果对云端也印目录，读的人会以为配置没生效。
+        if self.tts is None:
+            where = "(disabled)"
+        elif hasattr(self.tts, "model_dir"):
+            where = str(self.tts.model_dir)
+        else:
+            where = f"{self.tts.model} / {self.tts.voice} @ {self.tts._safe_endpoint()}"
+        cloud = self.tts is not None and not hasattr(self.tts, "model_dir")
         row(
             "tts",
             tts_ready or not tts_on,
-            str(self.tts.model_dir) if self.tts else "(disabled)",
+            where,
             ""
             if tts_ready or not tts_on
-            else "缺合成模型：解压 models/tts.tar.bz2 或设 VOX_TTS_MODEL_DIR（当前不出声）",
+            else (
+                f"云端合成缺密钥：把 key 写进 .env 的 {self.config.get('tts.key_env', 'VOX_DASHSCOPE_KEY')}（当前不出声）"
+                if cloud
+                else "缺合成模型：解压 models/tts.tar.bz2 或设 VOX_TTS_MODEL_DIR（当前不出声）"
+            ),
         )
 
         if self.gate_off:
@@ -139,6 +156,54 @@ class VoiceStack:
                         # stop the remaining providers from being released.
                         pass
                     break
+
+
+def _open_tts(resolved: dict[str, Any], warnings: list[str]) -> Any:
+    """按 ``tts.provider`` 建合成器。缺什么就降级为不出声并如实报告。
+
+    两个 provider 摆的是同一个形状（`synthesize` / `speak` / `speak_segments` / `stop`），
+    所以这个函数是**唯一**知道有两种 TTS 的地方 —— 插件、编排器、控制台都不需要知道。
+    这正是红线 2 说的「组件可替换」。
+
+    云端那条路的失败**不降级到本机**：一个要求 longyuan 的人拿到 VITS 的默认女声会以为
+    配置生效了。报出来、静音，让「没生效」是可见的。
+    """
+    provider = str(resolved.get("tts.provider", "sherpa")).strip().lower()
+    if provider in ("dashscope", "cosyvoice", "aliyun", "bailian"):
+        from core.audio.tts_cloud import DashScopeTtsProvider
+
+        model = str(resolved.get("tts.model", "")).strip() or "cosyvoice-v2"
+        voice = str(resolved.get("tts.voice", "")).strip() or "longyuan"
+        key_env = str(resolved.get("tts.key_env", "")).strip() or "VOX_DASHSCOPE_KEY"
+        cloud = DashScopeTtsProvider(
+            model=model,
+            voice=voice,
+            key_env=key_env,
+            speed=float(resolved["tts.speed"]),
+            # **必须传。** 2026-08-30 查出这一行此前漏了，后果不是「少一个可选项」：
+            # `config/voice.toml` 里那句「用温柔、亲和、放松的语气说」、控制台上那一栏、
+            # 以及为它写的整段注释全部对生产无效 —— 听到的一直是裸音色。而 `EDITABLE`
+            # 里有 `tts.instruction`，所以页面上改了会显示成功。**一个能改、能存、
+            # 不生效的配置项比没有这个配置项糟得多。**
+            instruction=str(resolved.get("tts.instruction", "")).strip(),
+        )
+        status = cloud.load()
+        if not status.available:
+            warnings.append(f"云端 TTS 不可用：{status.details['reason']}（回答不出声）")
+            return None
+        return cloud
+    if provider not in ("sherpa", "local", ""):
+        warnings.append(f"未知的 tts.provider {provider!r}，按本机 sherpa 处理")
+    tts = SherpaTtsProvider(
+        resolved["tts_dir"],
+        num_threads=int(resolved["tts.num_threads"]),
+        speaker_id=int(resolved["tts.speaker_id"]),
+        speed=float(resolved["tts.speed"]),
+    )
+    if not tts.available:
+        warnings.append(f"tts model not found at {resolved['tts_dir']}; answers stay silent")
+        return None
+    return tts
 
 
 def open_voice_stack(
@@ -193,15 +258,7 @@ def open_voice_stack(
 
     tts = None
     if with_tts if with_tts is not None else bool(resolved["tts.enabled"]):
-        tts = SherpaTtsProvider(
-            resolved["tts_dir"],
-            num_threads=int(resolved["tts.num_threads"]),
-            speaker_id=int(resolved["tts.speaker_id"]),
-            speed=float(resolved["tts.speed"]),
-        )
-        if not tts.available:
-            warnings.append(f"tts model not found at {resolved['tts_dir']}; answers stay silent")
-            tts = None
+        tts = _open_tts(resolved, warnings)
 
     verifier = None
     if require_verification:
@@ -228,9 +285,20 @@ def open_voice_stack(
         device=device if device is not None else resolve_device(resolved),
         verifier=verifier,
         require_verification=require_verification,
+        # VAD。**它不闸 KWS**，作用是让增益只在语音上适应、并回答「这一段有语音吗」。
+        # 见 core/audio/vad.py：一个跟峰值的 AGC 分不清「轻的语音」和「放大后的底噪」，
+        # 而那正是 2026-08-31 把声纹门变成 fail-open 的那件事。零新依赖、模型已在盘上。
+        speech_gate=SileroSpeechGate(sample_rate=int(resolved["input.sample_rate"])),
         buffer_seconds=float(speaker_config.get("buffer_seconds", 3.0)),
         verify_seconds=float(speaker_config.get("verify_seconds", 1.5)),
+        # 唤醒之后给多少秒开口。见 core/audio/capture.py 的 listen_grace_s ——
+        # 不给宽限期的话，静默 2.4 秒（端点检测的 rule1）就把聆听结束掉。
+        listen_grace_s=float(speaker_config.get("listen_grace_s", 8.0)),
         asr_provider=asr,
+        # 自适应输入增益。默认开:让「Windows 输入音量该调多少」不再是用户的事 ——
+        # 实测那个可用窗口很窄（默认 100 时削波、调到 7 才能命中），而窗口位置取决于
+        # 用哪只麦克风、戴不戴耳机、离多远。可用 [input] auto_gain = false 关掉。
+        auto_gain=AutoGain() if bool(resolved.get("input.auto_gain", True)) else None,
     )
 
     return VoiceStack(

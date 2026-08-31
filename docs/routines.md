@@ -35,7 +35,7 @@ python scripts/e2e_simulated.py
 
 该专项覆盖 sink 故障不改变派发、熔断和记忆结果；如果本机设置了代理变量，跑 loopback 网络测试前先清空 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`。
 
-当前全量基线 **1190 passed, 3 skipped**（2026-08-29 新增本机工具 35 + 意图分流 33 + 运行日志 19 + 唤醒词表 20 + 唤醒确认音 17 + `.env` 读写 13 + 控制台唤醒词 API 6 + 出站 User-Agent 2 + 中文语速 1 + 唤醒包装层 4 + agent 工作目录 3 + CLI prompt 走 stdin 6 + 出厂 agents.toml 可加载 1 + 模型列表拉取 19；2026-08-28 新增控制台 103 / 模型方案 60 / MCP 51 / 搜索后端 35 / 配置编辑 33 / 语音配置 20 / 语音装配 16 / 声纹身份 15 / 记忆并发 7）。3 个 skip：2 个可选 VoxCord 适配器（**目录在本机但依赖未装，见 `docs/backlog.md` B1**），1 个符号链接越界用例（本账户无权创建符号链接）。
+当前全量基线 **1211 passed, 3 skipped**（2026-08-29 新增唤醒漏斗 5 + 确认音后处理 6 + 冷却销账 2 + 死麦克风检测 4 + 注册质量门 3 + agent system message 1 + 本机工具 35 + 意图分流 33 + 运行日志 19 + 唤醒词表 20 + 唤醒确认音 17 + `.env` 读写 13 + 控制台唤醒词 API 6 + 出站 User-Agent 2 + 中文语速 1 + 唤醒包装层 4 + agent 工作目录 3 + CLI prompt 走 stdin 6 + 出厂 agents.toml 可加载 1 + 模型列表拉取 19；2026-08-28 新增控制台 103 / 模型方案 60 / MCP 51 / 搜索后端 35 / 配置编辑 33 / 语音配置 20 / 语音装配 16 / 声纹身份 15 / 记忆并发 7）。3 个 skip：2 个可选 VoxCord 适配器（**目录在本机但依赖未装，见 `docs/backlog.md` B1**），1 个符号链接越界用例（本账户无权创建符号链接）。
 
 **断言出厂配置内容的测试改成了对本机改动宽容**：`config/models.toml` 那条改成「出厂那两套在」而不是「只有这两套」（控制台上新建方案是正常动作），搜索后端那条改成读 `_DEFAULTS` 而不是读本机 `config/tools.toml`（`allow_internet = true` 是一个正常的本机决定）。要守的是「出厂默认不配后端」，那由 `core/tools/policy.py` 的 `_DEFAULTS` 决定。
 
@@ -447,25 +447,31 @@ Test-NetConnection 127.0.0.1 -Port 12334
 
 `file ends unexpectedly` 或 `7z t` 失败表示下载不完整，不能解压或把它当成模型使用。恢复前保留部分文件，使用 `curl -C -`；如果服务器不接受续传，删除该文件后重新下载。
 
-声纹模型是单个 `.onnx`，不需要解压（约 37 MB）：
+声纹模型是单个 `.onnx`，不需要解压（约 27 MB）：
 
 ```powershell
-curl.exe -C - -L -o models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx `
-  https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx
+curl.exe -C - -L -o models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx
 ```
 
-release tag 里 `recongition` 的拼写是**官方笔误**，照抄即可，改成正确拼写会 404。下载后用 provider 自检而不是只看文件大小：
+release tag 里 `recongition` 的拼写是**官方笔误**，照抄即可，改成正确拼写会 404。下载后用 provider 自检而不是只看文件大小（不传路径就是默认模型，也就是上面这个）：
 
 ```powershell
-.\.venv\Scripts\python.exe -c "from core.audio import SpeakerVerificationProvider; print(SpeakerVerificationProvider('models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx').load())"
+.\.venv\Scripts\python.exe -c "from core.audio import SpeakerVerificationProvider; print(SpeakerVerificationProvider().load())"
 ```
 
 预期 `available: True` 且 `dim` 为正整数。文件截断时 `load()` 会返回不可用及原因，**不会抛异常** —— 所以必须看返回值，不能靠「没报错」判定成功。
 
-本机 2026-08-02 实测值,用于比对完整性:39,593,761 字节,SHA-256 `1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b`,`dim 512`,冷加载 0.234 s。
+本机实测值,用于比对完整性：
+
+| 模型 | 字节 | SHA-256 | dim |
+|---|---:|---|---:|
+| CAM++（2026-08-29 起默认） | 28,281,138 | `f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11` | 192 |
+| ERes2Net（已取代） | 39,593,761 | `1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b` | 512 |
+
+**换型会让既有注册全部作废**（512 维向量对 192 维模型没有意义）。作废的档案由 `_restore()` 记进 `stale_profiles`、`describe()` 报出来 —— 必须重新注册，而不是以为「文件丢了」。
 
 ```powershell
-(Get-FileHash models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx -Algorithm SHA256).Hash
+(Get-FileHash models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx -Algorithm SHA256).Hash
 ```
 
 流式 ASR 模型（**2026-08-29 换成 `multi-zh-hans-2023-12-12`**，约 310 MB 归档）：
@@ -492,20 +498,58 @@ tar -xjf models/asr.tar.bz2 -C models
 .\\.venv\Scripts\python.exe -c "from core.audio import SherpaStreamingAsrProvider; print(SherpaStreamingAsrProvider('models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23').load())"
 ```
 
+## 唤醒唤不醒（先做这一步，别先调参数）
+
+适用时机：对着麦克风喊唤醒词没有反应。**先分层，再动手** —— 「喊了没反应」有五个完全不同的
+根因，而它们在使用者眼里长得一模一样。
+
+第一步看控制台「运行态」的唤醒漏斗（四个计数 + 注册模式 + 输入电平）：
+
+| 读数 | 说明 |
+|---|---|
+| 提示「注册模式」 | 一个人都没注册，唤醒判定被按住。去「声纹」页注册（注册成功即刻解开） |
+| 输入峰值一直 ~0 | 设备在出零：换 `[input] device`，或看设备名是不是漂了（索引会漂） |
+| 唤醒词命中 = 0，电平正常 | KWS 那一层的事 —— 跑下面那个脚本 |
+| 命中 > 0、声纹拒绝 > 0 | 声纹的事：看相似度，用「试一句」对比，必要时重录 |
+| 命中 > 0、接受 > 0、没进聆听 > 0 | 识别器没开起来，看 `last_listen_refusal` |
+
+**KWS 那一层不要靠对着麦克风试。** 用真录音喂**生产那条回调路径**（VAD → 增益 → KWS），
+一次跑完就能知道是词表、阈值、增益，还是麦克风：
+
+```powershell
+$env:PYTHONUTF8=1; .\.venv\Scripts\python.exe .vox-ref\wake_path_check.py
+```
+
+它要 `.vox-ref/rec/*.wav`（16 kHz、本人念唤醒词的录音；这个目录不进版本控制，因为里面是
+本人语音）。期望：`你好小沃 你好小沃 你好小沃.wav` **3/3 命中**，且各档电平都是 3/3。
+2026-09-01 就是这个脚本查出「自适应增益自己造削波把命中打成 1/3」的
+（见 `docs/research/prototype-results.md`）。**改 `core/audio/gain.py`、`vad.py` 或唤醒词
+阈值之后必须重跑它** —— 单元测试盯的是不变式，命中率只有真音频能答。
+
+## 声纹录入
+
 ## 声纹录入
 
 适用时机：首次录入本人声纹、追加样本提高通过率，或换麦克风后重录。**必须本人在场**。
+
+**首选控制台**（`run_console.py --voice` → 「声纹」页）：页面按 `core/audio/enroll_prompts.py`
+给出六句各不相同的长句、后两句要求退开两步，录的是**声纹门自己读的那个环形缓冲**，所以
+「注册和校验同信道」是构造上成立的。一个人都没注册时那一页也能用（注册模式：设备开着、
+唤醒判定被按住），注册成功即刻解开，不用重启。同一页还有「校准输入音量」——
+它直接改 Windows 那一侧的输入音量并复测，别再手动去找那根滑条。
+
+命令行是等效的备用路（同一份提示句、同一个设备、同样落 embedding）：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/enroll_speaker.py --name <你的名字>
 ```
 
-按提示读 3～5 句，脚本显示每段时长并写入 embedding。`enroll` 是**追加**语义：已有向量保留、新向量附加，所以一次录得不好可以补录，不必全部重来。
+按提示读 6 句，脚本显示每段时长并写入 embedding。`enroll` 是**追加**语义：已有向量保留、新向量附加，所以一次录得不好可以补录，不必全部重来。
 
 注册数据落 `enrollment/voiceprints.json`，它是**生物特征**，已在 `.gitignore` 内，**永不提交**。查看注册状态只用 `describe()`，不要直接读文件：
 
 ```powershell
-.\.venv\Scripts\python.exe -c "from core.audio import SpeakerVerificationProvider; import json; print(json.dumps(SpeakerVerificationProvider('models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx').describe(), ensure_ascii=False, indent=2))"
+.\.venv\Scripts\python.exe -c "from core.audio import SpeakerVerificationProvider; import json; p = SpeakerVerificationProvider(); p.load(); print(json.dumps(p.describe(), ensure_ascii=False, indent=2))"
 ```
 
 删除某人的注册：`provider.remove("<名字>")`，返回 `True` 表示删掉了、`False` 表示本来就没有。
@@ -794,4 +838,4 @@ rg "TODO|FIXME|release blocker|not verified" core vox_plugin desktop docs tests 
 - 前端修改：`npm run build`；窗口属性修改再加 `cargo check` 和 Windows 实机验收。
 - 模型或依赖变更：记录版本、来源、归档校验结果到 `THIRD_PARTY_NOTICES.md` 和 `docs/research/prototype-results.md`。
 
-每个阶段收尾一律跑全量 `.\.venv\Scripts\python.exe -m pytest tests -q --basetemp .pytest-run`（当前基线 **1009 passed, 3 skipped**），不用单文件绿灯代替全量。
+每个阶段收尾一律跑全量 `.\.venv\Scripts\python.exe -m pytest tests -q --basetemp .pytest-run`（当前基线 **1211 passed, 3 skipped**），不用单文件绿灯代替全量。

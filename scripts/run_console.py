@@ -74,6 +74,19 @@ def make_restart(api, server, runtime, stack, stop, pump):
     return restart
 
 
+def _cloud_only(config: dict, key: str) -> str:
+    """云端 TTS 才有意义的那几个键。本机那条路一律返回空字符串。
+
+    为什么要这一层：这些值进的是确认音的缓存文件名。本机 VITS 没有 voice / instruction
+    这两个概念，把配置里残留的值带进文件名会让已经生成好的本机缓存全部改名重生成 ——
+    换 provider 不该让本机那几个文件作废。
+    """
+    provider = str(config.get("tts.provider", "sherpa")).strip().lower()
+    if provider in ("sherpa", "local", ""):
+        return ""
+    return str(config.get(key, "") or "").strip()
+
+
 def resolve_port(explicit: int | None) -> int:
     """``--port`` beats ``PORT`` beats the default.
 
@@ -94,11 +107,24 @@ def pump_forever(runtime: VoiceRuntime, stop: threading.Event) -> None:
     Keeps running whether or not the microphone is currently open, because the
     console can start and stop it at any time. An idle loop is one blocking
     ``get`` with a timeout, which costs nothing.
+
+    **失败必须被记下来。** 这个循环此前是 `except Exception: time.sleep(0.2)` —— 一个字都
+    不留。于是「唤醒命中了但没有后文」这件事在界面上和「根本没唤醒」长得一样，而实际可能是
+    每一轮都在抛异常、循环在静静地空转。一个吞掉全部异常又不留痕的循环等于把最需要的那条
+    线索删掉。仍然不重抛（一轮坏掉不该结束循环），但要写进运行日志。
     """
+    failures = 0
     while not stop.is_set():
         try:
             runtime.pump(timeout=0.5)
-        except Exception:  # noqa: BLE001 - one bad turn must not end the loop
+        except Exception as exc:  # noqa: BLE001 - one bad turn must not end the loop
+            failures += 1
+            runtime.log(
+                "pump",
+                f"这一轮抛了：{type(exc).__name__}: {exc}",
+                level="error",
+                failures=failures,
+            )
             time.sleep(0.2)
 
 
@@ -150,6 +176,11 @@ def main() -> int:
                 parse_acks(config["wake.acks"]),
                 tts=stack.tts,
                 cache_dir=repo_root() / ACK_CACHE_DIR,
+                # 音色与语气都进缓存文件名。不传的话换了音色/改了 instruction 文件名不变，
+                # 播出来还是上一把声音、上一种腔 —— 表现是「配置改了但声音没变」。
+                # 本机那条路两个都是空的，与最早的缓存同名。
+                voice=_cloud_only(config, "tts.voice"),
+                instruction=_cloud_only(config, "tts.instruction"),
             )
             if acks.texts:
                 info = runtime.attach_acks(acks)

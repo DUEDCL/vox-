@@ -58,7 +58,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | 语音识别(ASR) | sherpa-onnx-streaming-zipformer-zh-14M(流式 transducer,带端点检测) | faster-whisper / SenseVoiceSmall |
 | 语音合成(TTS) | vits-melo-tts-zh_en(MeloTTS) | Kokoro-82M |
 | EvoX 桥接 | `LocalEvoXTransport`(带认证的 localhost HTTP) | 任何实现 `ConversationTransport` 协议的传输层 |
-| 声纹准入 | **3D-Speaker ERes2Net**(经 sherpa-onnx 执行,零新依赖) | 同系列 200k 通用模型 |
+| 声纹准入 | **3D-Speaker CAM++**(经 sherpa-onnx 执行,零新依赖,dim 192) | 同系列 ERes2Net(2026-08-29 起改为备选) |
 | agent 接入 | **headless CLI 子进程 + ACP** 双通路 | OpenAI 兼容 HTTP(含 OpenClaw Gateway) |
 | 记忆存储 | **SQLite + FTS5**(单文件)+ Markdown 人类可读层 | — (明确不做向量检索) |
 | 派发模式 | **`single`(默认)/ `race`** | `fanout` 仅显式请求多方验证时 |

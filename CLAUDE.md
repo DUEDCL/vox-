@@ -38,10 +38,29 @@ git add -A && git commit && git push
 一次会话 = 一个提交 = 一次推送。**不要留到下次**：下一次会话看不见你这次改了什么，
 只看见一个脏工作区，然后它会在上面继续叠。
 
+## 给使用者的命令一律写 PowerShell
+
+这台机器上的人在 **PowerShell** 里跑命令（提示符 `PS D:\program\vioce-wake>`），不是 bash。
+所以贴给他的命令必须能直接粘进 PowerShell 跑：
+
+| 不要写 | 要写 |
+|---|---|
+| `cd /d/program/vioce-wake` | `cd D:\program\vioce-wake` |
+| `PYTHONUTF8=1 python ...`（前置赋值） | `$env:PYTHONUTF8=1` 单独一行，然后跑 |
+| `cmd1 && cmd2` | `cmd1; cmd2`（PS 5.1 不认 `&&`） |
+| `.venv/Scripts/python.exe` | `.\.venv\Scripts\python.exe` |
+| `grep` / `tail` / `cat` | `Select-String` / `-Tail` / `Get-Content` |
+
+**我自己在工具里用 bash 是另一回事** —— 那是我的执行环境。两者不要混：贴给使用者的命令
+用他的 shell 写，我自己跑什么不需要他知道。
+
 ## 提交信息
 
 Conventional Commits：`feat|fix|docs|test|refactor|chore(scope): 描述`。
 正文写清三件事：改了什么、为什么、跑了哪些命令得到什么结果。
+
+**不加 `Co-Authored-By` trailer。** GitHub 会把那个邮箱算进仓库的 Contributors 列表，
+而这个仓库的 Contributors 只应该有人。正文最后一行写完就结束，不留署名。
 
 ## 只在这两种情况下开分支
 

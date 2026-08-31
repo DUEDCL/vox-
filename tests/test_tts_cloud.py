@@ -1,0 +1,456 @@
+"""云端 TTS（阿里云百炼 CosyVoice）：请求形状、密钥来源、失败姿态、装配选路。
+
+证据等级：**AUTO**。HTTP 传输是注入的假的，所以这一组不打网络、不花额度。
+真的把 longyuan 那把声音放出来是 REAL —— 需要密钥和扬声器在场，走
+`scripts/probe_dashscope_tts.py`。
+
+这一组存在的理由是使用者 2026-08-29 的报告：「使用阿里云的最佳模型作为 tts 模型，
+音色用 longyuan，我在控制台并不能直接配置」。当时不能配置有五个各自独立致命的原因，
+每一条现在都有对应的断言：
+
+1. 代码里没有云端 TTS provider           -> test_a_synthesis_posts_model_voice_and_reads_the_url
+2. `voice.toml` 的 schema 没有这几个键   -> tests/test_voice_config.py 那边
+3. `EDITABLE` 白名单里没有它们           -> test_the_console_can_edit_provider_model_and_voice
+4. `config/voice.toml` 文件里没有这几行  -> 同上（config_edit 只改已存在的键）
+5. 密钥白名单里没有 VOX_DASHSCOPE_KEY    -> test_the_key_name_is_settable_from_the_console
+"""
+
+from __future__ import annotations
+
+import io
+import time
+
+import numpy as np
+import pytest
+import soundfile as sf
+
+from core.audio.tts_cloud import DashScopeTtsError, DashScopeTtsProvider
+
+
+def _wav_bytes(seconds: float = 0.4, sample_rate: int = 24000) -> bytes:
+    buffer = io.BytesIO()
+    tone = (np.sin(np.linspace(0, 220 * 2 * np.pi * seconds, int(seconds * sample_rate))) * 0.3)
+    sf.write(buffer, tone.astype("float32"), sample_rate, format="WAV")
+    return buffer.getvalue()
+
+
+class FakeTransport:
+    """替掉两个 HTTP 往返。``posted`` 留着给断言看请求体。"""
+
+    def __init__(self, body: dict | None = None, audio: bytes | None = None) -> None:
+        self.posted: list[tuple[str, dict]] = []
+        self.fetched: list[str] = []
+        self.body = body if body is not None else {
+            "request_id": "r-1",
+            "output": {"finish_reason": "stop", "audio": {"data": "", "url": "https://oss/x.wav"}},
+            "usage": {"characters": 4},
+        }
+        self.audio = audio if audio is not None else _wav_bytes()
+
+    def post(self, url: str, payload: dict) -> dict:
+        self.posted.append((url, payload))
+        return self.body
+
+    def get(self, url: str) -> bytes:
+        self.fetched.append(url)
+        return self.audio
+
+
+def test_a_synthesis_posts_model_voice_and_reads_the_url(monkeypatch):
+    """请求体的形状是钉死的:只有 model 与 input 两个顶层键,音色在 input 里。
+
+    这个 API **没有** parameters 这一层(和 OpenAI 那套不同),写错层级会 400。
+    音频也不在回包里:非流式模式下 output.audio.data 是空的,只有 output.audio.url。
+    """
+    monkeypatch.setenv("VOX_DASHSCOPE_KEY", "sk-not-a-real-key")
+    transport = FakeTransport()
+    provider = DashScopeTtsProvider(
+        model="cosyvoice-v1", voice="longyuan", transport=transport
+    )
+    audio = provider.synthesize("你好小沃")
+
+    _url, payload = transport.posted[0]
+    assert set(payload) == {"model", "input"}, "顶层只许 model 与 input"
+    assert payload["model"] == "cosyvoice-v1"
+    assert payload["input"]["voice"] == "longyuan"
+    assert payload["input"]["text"] == "你好小沃"
+    assert payload["input"]["format"] == "wav"
+    assert transport.fetched == ["https://oss/x.wav"], "音频必须从 output.audio.url 下载"
+    assert audio.sample_rate == 24000
+    assert len(audio.samples) > 0
+    assert audio.samples.ndim == 1, "下游按一维处理,和本机 provider 一致"
+
+
+def test_a_reply_without_an_audio_url_is_an_error_not_silence(monkeypatch):
+    """回包里没有 url 要抛,不能返回一段空音频 —— 静音会被读成「合成成功但没声音」。"""
+    monkeypatch.setenv("VOX_DASHSCOPE_KEY", "sk-not-a-real-key")
+    transport = FakeTransport(body={"output": {"finish_reason": "length"}, "usage": {}})
+    provider = DashScopeTtsProvider(transport=transport)
+    with pytest.raises(DashScopeTtsError) as caught:
+        provider.synthesize("你好")
+    assert "length" in str(caught.value)
+
+
+def test_no_key_reports_the_variable_name_and_never_a_value(monkeypatch):
+    """缺密钥时报的是**变量名**。这是日志/事件里唯一允许出现的形式。"""
+    monkeypatch.delenv("VOX_DASHSCOPE_KEY", raising=False)
+    provider = DashScopeTtsProvider()
+    assert provider.available is False
+    status = provider.load()
+    assert status.available is False
+    assert "VOX_DASHSCOPE_KEY" in status.details["reason"]
+
+
+def test_load_reports_the_key_name_not_the_key(monkeypatch):
+    monkeypatch.setenv("VOX_DASHSCOPE_KEY", "sk-secret-value-here")
+    status = DashScopeTtsProvider(model="cosyvoice-v2", voice="longyuan").load()
+    assert status.available is True
+    flattened = repr(status.details) + status.source
+    assert "sk-secret-value-here" not in flattened, "密钥不得出现在任何报告里"
+    assert status.details["key_env"] == "VOX_DASHSCOPE_KEY"
+    assert status.details["voice"] == "longyuan"
+    # source 只到主机名,不带路径也不带凭据
+    assert status.source == "https://dashscope.aliyuncs.com"
+
+
+def test_available_does_not_hit_the_network(monkeypatch):
+    """``available`` 被只读路径(describe / 就绪清单)调用。它发请求 = 开一次状态页花掉额度。"""
+    monkeypatch.setenv("VOX_DASHSCOPE_KEY", "sk-not-a-real-key")
+    transport = FakeTransport()
+    provider = DashScopeTtsProvider(transport=transport)
+    assert provider.available is True
+    assert transport.posted == []
+
+
+def test_a_barge_in_during_synthesis_cancels_the_playback(monkeypatch):
+    """打断要在「云端还在合成」这个窗口里生效 —— 而那个窗口在云端 TTS 上很宽。
+
+    本机合成是几百毫秒,云端是两个 HTTP 往返。所以「说完唤醒词打断」很可能正好落在
+    请求在途的时候:那一刻 stop() 必须让已经合成好的这一段**不要播**,否则用户会听到
+    自己刚打断掉的那句话又开始说。
+
+    注意 `speak()` 开头会把 `_stopped` 清成 False —— 那是对的,一次新的 speak 是一句新话。
+    所以这里让打断发生在**合成过程中**,那才是真实的竞争。
+    """
+    monkeypatch.setenv("VOX_DASHSCOPE_KEY", "sk-not-a-real-key")
+
+    class Player:
+        def __init__(self) -> None:
+            self.played = 0
+
+        def play(self, samples, sample_rate, **kwargs):
+            del samples, sample_rate, kwargs
+            self.played += 1
+
+        def stop(self) -> None:
+            pass
+
+    class BargingTransport(FakeTransport):
+        """请求在途时有人喊了唤醒词。"""
+
+        def __init__(self, box) -> None:
+            super().__init__()
+            self.box = box
+
+        def post(self, url: str, payload: dict) -> dict:
+            self.box[0].stop()
+            return super().post(url, payload)
+
+    box: list = [None]
+    player = Player()
+    provider = DashScopeTtsProvider(transport=BargingTransport(box), playback=player)
+    box[0] = provider
+    result = provider.speak("你好")
+    assert result["played"] is False
+    assert result["reason"] == "stopped"
+    assert player.played == 0, "打断之后不许再播"
+
+
+def test_speak_segments_stops_between_segments(monkeypatch):
+    monkeypatch.setenv("VOX_DASHSCOPE_KEY", "sk-not-a-real-key")
+
+    class Player:
+        def __init__(self, provider_box) -> None:
+            self.played = 0
+            self.box = provider_box
+
+        def play(self, samples, sample_rate, **kwargs):
+            del samples, sample_rate, kwargs
+            self.played += 1
+            self.box[0].stop()  # 第一段播完就打断
+
+        def stop(self) -> None:
+            pass
+
+    box: list = [None]
+    player = Player(box)
+    provider = DashScopeTtsProvider(transport=FakeTransport(), playback=player)
+    box[0] = provider
+    result = provider.speak_segments(["第一句", "第二句", "第三句"])
+    assert player.played == 1
+    assert result["stopped"] is True
+    assert result["segments"] == 1
+
+
+# --------------------------------------------------------- 段间空白（2026-08-30）
+
+
+def test_the_next_segment_is_synthesised_while_the_current_one_plays(monkeypatch):
+    """使用者 2026-08-30 报的「句子之间的间隔太长，感觉不是很连贯」。
+
+    根因是形状而不是网络：一次合成是**两个 HTTP 往返**（实测 0.7–1.5 s），而原来的循环是
+    「合成一段 → 播一段 → 合成下一段」，那段时间完整地落在两句话之间。播放是阻塞的，
+    所以那段时间本来就闲着。
+
+    断言写成「**播第一段的时候第二段的请求已经发出去了**」而不是比较耗时：一个计时断言
+    在忙机器上会假红，而这一条正是要证明的那件事。
+    """
+    monkeypatch.setenv("VOX_DASHSCOPE_KEY", "sk-not-a-real-key")
+
+    class Player:
+        def __init__(self, transport) -> None:
+            self.transport = transport
+            self.posted_while_playing: list[int] = []
+
+        def play(self, samples, sample_rate, **kwargs):
+            del samples, sample_rate, kwargs
+            # 等预取那个线程把请求发出去。没有预取的话这里会干等满 2 秒然后断言失败。
+            deadline = time.monotonic() + 2.0
+            while len(self.transport.posted) < 2 and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.posted_while_playing.append(len(self.transport.posted))
+
+        def stop(self) -> None:
+            pass
+
+    transport = FakeTransport()
+    player = Player(transport)
+    provider = DashScopeTtsProvider(transport=transport, playback=player)
+
+    result = provider.speak_segments(["第一句。", "第二句。"])
+
+    assert result["segments"] == 2
+    assert player.posted_while_playing[0] == 2, "播第一段时第二段必须已经在合成"
+
+
+def test_a_synthesis_failure_in_a_prefetched_segment_is_raised_not_swallowed(monkeypatch):
+    """预取是在另一个线程上跑的。那个线程里的异常必须在**取结果的地方**重抛 ——
+    吞掉它会让「后半段没说」变成一件没有任何记录的事。"""
+    monkeypatch.setenv("VOX_DASHSCOPE_KEY", "sk-not-a-real-key")
+
+    class SecondFails(FakeTransport):
+        def post(self, url: str, payload: dict) -> dict:
+            if len(self.posted) >= 1:
+                self.posted.append((url, payload))
+                raise DashScopeTtsError("第二段炸了")
+            return super().post(url, payload)
+
+    class Player:
+        def __init__(self) -> None:
+            self.played = 0
+
+        def play(self, samples, sample_rate, **kwargs):
+            del samples, sample_rate, kwargs
+            self.played += 1
+
+        def stop(self) -> None:
+            pass
+
+    player = Player()
+    provider = DashScopeTtsProvider(transport=SecondFails(), playback=player)
+    with pytest.raises(DashScopeTtsError):
+        provider.speak_segments(["第一句。", "第二句。"])
+    assert player.played == 1, "第一段照说，坏的是第二段"
+
+
+def test_short_sentences_are_merged_but_the_first_one_never_is():
+    """合并的两个理由都不是省钱：短段盖不住合成时间，而且**韵律是按请求算的** ——
+    每句单独合成 = 每句各自起调收尾，拼起来听得出接缝。
+
+    第一段例外：它决定「多久出第一个字」，那是最能被感知的延迟。
+    """
+    from core.audio.tts_cloud import SEGMENT_MERGE_CHARS, merge_segments
+
+    assert merge_segments([]) == []
+    assert merge_segments(["  ", ""]) == []
+    assert merge_segments(["只有一句。"]) == ["只有一句。"]
+    assert merge_segments(["一。", "二。", "三。"]) == ["一。", "二。三。"]
+
+    long_tail = "字" * SEGMENT_MERGE_CHARS
+    assert merge_segments(["头。", long_tail, "尾。"]) == ["头。", long_tail, "尾。"]
+
+
+def test_the_merged_text_is_what_actually_goes_out(monkeypatch):
+    """合并是在 provider 里做的，所以要验的是**请求体**，不是返回的计数。"""
+    monkeypatch.setenv("VOX_DASHSCOPE_KEY", "sk-not-a-real-key")
+
+    class Player:
+        def play(self, samples, sample_rate, **kwargs):
+            del samples, sample_rate, kwargs
+
+        def stop(self) -> None:
+            pass
+
+    transport = FakeTransport()
+    provider = DashScopeTtsProvider(transport=transport, playback=Player())
+    provider.speak_segments(["第一句。", "第二。", "第三。"])
+
+    sent = [payload["input"]["text"] for _url, payload in transport.posted]
+    assert sent == ["第一句。", "第二。第三。"]
+
+
+# ------------------------------------------------- 控制台那一侧的四道闸(原因 3/4/5)
+
+
+def test_the_console_can_edit_provider_model_and_voice():
+    """使用者的原话是「我在控制台并不能直接配置」。这三个键必须在可编辑白名单里。"""
+    from core.console.routes import EDITABLE
+
+    keys = EDITABLE["voice.toml"]
+    for key in ("tts.provider", "tts.model", "tts.voice"):
+        assert key in keys, f"{key} 不在白名单里,页面上就改不了"
+
+
+def test_the_key_env_name_is_not_editable_from_a_web_page():
+    """反向断言,而且这一条比上面三条重要。
+
+    `tts.key_env` 是「去读哪个环境变量」。让网页改它等于让网页决定把**哪个凭据**发给
+    百炼 —— 指到 ANTHROPIC_AUTH_TOKEN 上就是一次凭据外发。密钥的**值**走 /api/secret
+    (有白名单校验),变量**名**留在文件里。
+    """
+    from core.console.routes import EDITABLE
+
+    assert "tts.key_env" not in EDITABLE["voice.toml"]
+
+
+def test_the_key_name_is_settable_from_the_console():
+    """值要能从页面存进去,否则使用者只能手改 .env。"""
+    from core.console.routes import allowed_secret_names
+
+    assert "VOX_DASHSCOPE_KEY" in allowed_secret_names()
+
+
+def test_the_shipped_voice_config_carries_the_three_keys():
+    """`core/config_edit.py` **只改已存在的键**(为了保住注释)。所以光把键加进 schema
+    不够 —— 文件里没有那一行,控制台配置页就扫不到它,页面上也就没有那一栏。"""
+    from core.audio.config import repo_root
+
+    text = (repo_root() / "config" / "voice.toml").read_text(encoding="utf-8")
+    for key in ("provider", "model", "voice", "key_env"):
+        assert f"\n{key} = " in text, f"config/voice.toml 里缺 {key} 那一行"
+
+
+def test_longyuan_is_in_the_voice_table_with_its_chinese_name():
+    """使用者点名的音色。表的出处与核实日期也一起钉住 —— 一张没有出处的表下一个人没法核。"""
+    from core.audio.voices import VOICE_LIST_CHECKED, VOICE_LIST_SOURCE, describe_voice
+
+    found = describe_voice("longyuan")
+    assert found is not None
+    assert found.name == "龙媛"
+    assert "help.aliyun.com" in VOICE_LIST_SOURCE
+    assert VOICE_LIST_CHECKED == "2026-08-29"
+
+
+def test_the_voice_list_says_out_loud_that_it_is_not_live():
+    """百炼**没有**列举系统预置音色的 API。界面上一个下拉框会让人以为它是实时的,
+    所以响应里必须带 live=False + 出处 —— 那是诚实性的一部分,不是装饰。
+
+    音色还必须**按当前 model 过滤**:文档明写「每个 model 只支持一组特定的 voice,
+    不能混用」,实测混用回 411。给一个「全部音色」的下拉是在邀请报错。
+    """
+    from unittest.mock import MagicMock
+
+    from core.audio.voices import voices_for
+    from core.console.routes import ConsoleApi
+
+    view = ConsoleApi(MagicMock()).voices_view()
+    assert view["live"] is False
+    assert "help.aliyun.com" in view["source"]
+    assert "cosyvoice-v1" in view["models"]
+    expected = {item.voice for item in voices_for(view["model"])}
+    assert {item["voice"] for item in view["voices"]} == expected
+    assert view["voices"], "当前 model 至少要有一个可选音色"
+
+
+def test_qwen_audio_tts_does_not_offer_the_cosyvoice_voices():
+    """反向断言,而且它是这一组里最省时间的一条。
+
+    使用者点名过 longyuan(cosyvoice-v1 的音色)。把它填到 qwen-audio-3.0-tts-plus 上
+    实测回 411 —— 20 个候选名里只有 `longanhuan_v3.6` 回 200。所以这两组必须分开,
+    否则界面会把一个必然失败的组合摆在人眼前。
+    """
+    from core.audio.voices import voices_for
+
+    qwen = {item.voice for item in voices_for("qwen-audio-3.0-tts-plus")}
+    cosy = {item.voice for item in voices_for("cosyvoice-v1")}
+    assert "longanhuan_v3.6" in qwen
+    assert "longyuan" in cosy
+    assert not (qwen & cosy), "两组音色不许有交集"
+
+
+def test_the_instruction_field_only_goes_out_when_it_has_a_value(monkeypatch):
+    """`instruction` 只有 qwen-audio-3.0-tts-* 支持,不支持的模型收到它会 400。
+    空字符串和「不发这个字段」在服务端不是一回事。"""
+    monkeypatch.setenv("VOX_DASHSCOPE_KEY", "sk-not-a-real-key")
+
+    bare = FakeTransport()
+    DashScopeTtsProvider(transport=bare).synthesize("你好")
+    assert "instruction" not in bare.posted[0][1]["input"]
+
+    told = FakeTransport()
+    DashScopeTtsProvider(transport=told, instruction="  用温柔的语气  ").synthesize("你好")
+    assert told.posted[0][1]["input"]["instruction"] == "用温柔的语气"
+
+
+def test_a_cloud_tts_without_a_key_does_not_fall_back_to_the_local_voice():
+    """缺 key 时**静音并报警告**,不退回本机 VITS。
+
+    一个要求 longyuan 的人拿到 VITS 的默认女声会以为配置生效了 —— 那比不出声更糟,
+    因为它把一个配置错误伪装成了一次成功。
+    """
+    from vox_plugin.voice_stack import _open_tts
+
+    warnings: list[str] = []
+    resolved = {
+        "tts.provider": "dashscope",
+        "tts.model": "cosyvoice-v2",
+        "tts.voice": "longyuan",
+        "tts.key_env": "VOX_DEFINITELY_NOT_SET_KEY",
+        "tts.speed": 1.0,
+        "tts.num_threads": 2,
+        "tts.speaker_id": 0,
+        "tts_dir": "models/vits-melo-tts-zh_en",
+    }
+    assert _open_tts(resolved, warnings) is None
+    assert warnings and "VOX_DEFINITELY_NOT_SET_KEY" in warnings[0]
+
+
+def test_the_configured_instruction_reaches_the_provider(monkeypatch):
+    """2026-08-30 查出的断线：``_open_tts`` 建 provider 时**没传 instruction**。
+
+    后果不是「少一个可选项」：`config/voice.toml` 里那句「用温柔、亲和、放松的语气说」、
+    控制台上那一栏、以及为它写的整段注释全部对生产无效 —— 听到的一直是裸音色。而
+    `EDITABLE` 里有 `tts.instruction`，所以页面上改完会显示保存成功。**一个能改、能存、
+    不生效的配置项比没有这个配置项糟得多**，因为它让人以为试过了。
+    """
+    monkeypatch.setenv("VOX_DASHSCOPE_KEY", "sk-not-a-real-key")
+    from vox_plugin.voice_stack import _open_tts
+
+    warnings: list[str] = []
+    tts = _open_tts(
+        {
+            "tts.provider": "dashscope",
+            "tts.model": "qwen-audio-3.0-tts-plus",
+            "tts.voice": "longanhuan_v3.6",
+            "tts.instruction": "  用温柔、亲和、放松的语气说  ",
+            "tts.key_env": "VOX_DASHSCOPE_KEY",
+            "tts.speed": 1.0,
+            "tts.num_threads": 2,
+            "tts.speaker_id": 0,
+            "tts_dir": "models/vits-melo-tts-zh_en",
+        },
+        warnings,
+    )
+    assert warnings == []
+    assert tts is not None
+    assert tts.instruction == "用温柔、亲和、放松的语气说"
