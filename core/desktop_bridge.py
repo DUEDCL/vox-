@@ -338,6 +338,19 @@ class DesktopBridge:
             self._settle_all(False)
         return self._write({"kind": "visible", "visible": bool(visible)})
 
+    def set_tray(self, *, state: str, paused: bool) -> bool:
+        """把当前状态与暂停开关同步给托盘菜单。
+
+        为什么不让 Rust 从事件流里自己读：那一侧**刻意不解析事件正文**（类型分派在前端，
+        见 `desktop/src-tauri/src/main.rs` 的 `script_for_line`），而托盘要显示的是状态名。
+        单独一种 ``kind`` 让 Rust 只认一个很小的、已知的形状，不必去理解平台契约。
+
+        也不走前端：托盘菜单在 Rust 侧建（不扩大 IPC 面），前端根本够不到它。
+        """
+        return self._write(
+            {"kind": "tray", "state": str(state), "paused": bool(paused)}
+        )
+
     # ------------------------------------------------------------------- inward
 
     def await_confirmation(

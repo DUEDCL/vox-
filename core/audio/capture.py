@@ -187,6 +187,8 @@ class SounddeviceWakeCapture:
         #: ``start(enroll_only=True)`` 置位：设备开着、缓冲照常填，但**唤醒永不判定**。
         #: 存在的理由见 ``start`` 的注释 —— 第一次注册的鸡生蛋问题。
         self.enroll_only = False
+        #: 托盘的「暂停唤醒」。无限期，只有 ``resume_wake()`` 能解开 —— 见那两个方法。
+        self.wake_paused = False
 
     # -- lifecycle helpers ----------------------------------------------------
 
@@ -502,7 +504,58 @@ class SounddeviceWakeCapture:
     @property
     def wake_held(self) -> bool:
         # ``enroll_only`` 是永久的按住：那一路开麦只为了录注册样本。
-        return self.enroll_only or time.monotonic() < self._wake_held_until
+        # ``wake_paused`` 是托盘按下的，只有托盘（或调用方）能解开。
+        return (
+            self.enroll_only
+            or self.wake_paused
+            or time.monotonic() < self._wake_held_until
+        )
+
+    def pause_wake(self) -> bool:
+        """无限期按住唤醒判定（托盘的「暂停唤醒」）。返回是否发生了变化。
+
+        和 ``hold_wake_for`` 分开是因为**时长的语义不同**：那一个是「取样期间别判词」，
+        有个自然的结束时刻；这一个是用户明确说「先别听我说话」，只有用户能解开。用一个
+        很大的秒数去冒充无限期会在某个下午突然过期，而那时没人会记得为什么。
+
+        麦克风**不关**：关掉设备再重开要重新走 PortAudio 的初始化，而那条路会失败
+        （设备被别的进程抢走、独占模式），于是「恢复」变成一个可能失败的动作。缓冲照常
+        填、电平照常观测，只是不判词 —— 和注册模式同一个做法。
+        """
+        if self.wake_paused:
+            return False
+        self.wake_paused = True
+        return True
+
+    def resume_wake(self) -> bool:
+        """解开「暂停唤醒」。
+
+        **只解开自己按下的那一道。** ``enroll_only`` 与 ``hold_wake_for`` 的按压不受影响 ——
+        否则托盘上点一下「恢复唤醒」就能绕过注册模式，而那一路开麦只为了录样本。
+        """
+        if not self.wake_paused:
+            return False
+        self.wake_paused = False
+        return True
+
+    def begin_listening(self, reason: str = "manual") -> bool:
+        """不经唤醒词直接进聆听（托盘的「主动唤醒」）。开起来了返回 ``True``。
+
+        **声纹门没有被绕过，而是没有输入可判。** 托盘点击发生在「还没有人说话」的那一刻，
+        所以不存在一段音频可以拿去比对 —— 这里明确把已验证说话人清成 ``None``，于是
+        ``shell.run`` 这类要求身份的工具照旧被拒。绕过的是唤醒词，不是那道门。
+
+        暂停期间不开：点了「暂停唤醒」还能从同一个菜单唤醒它，那个开关就不是开关。
+        已经在听时也不重开 —— 那会丢掉当前这条识别流里已经解出来的字。
+        """
+        if self._listening:
+            return False
+        if self.wake_paused or self.enroll_only:
+            self._note_listen_refused(f"唤醒被按住（{reason}）—— 先恢复唤醒")
+            return False
+        self._report_verified(None)
+        self._start_listening()
+        return self._listening
 
     def has_speech(self, samples: Any) -> bool:
         """这一段音频里有没有人在说话。没接 VAD 时**放行**（返回 True）。

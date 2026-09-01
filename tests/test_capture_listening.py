@@ -801,3 +801,94 @@ def test_has_speech_falls_through_to_true_without_a_vad():
     capture = SounddeviceWakeCapture(kws, lambda *a: None, blocksize=160, require_verification=False)
 
     assert capture.has_speech(np.zeros(16000, dtype="float32")) is True
+
+
+# --------------------------------------------------------------- 托盘的两个开关
+
+def test_pausing_the_wake_holds_the_verdict_without_closing_the_device():
+    """「暂停唤醒」按住判定，但设备照常开着、缓冲照常填。
+
+    麦克风不关是刻意的：关掉再重开要重走 PortAudio 的初始化，而那条路会失败（设备被
+    别的进程抢走、独占模式），于是「恢复唤醒」变成一个**可能失败**的动作。一个可能失败
+    的恢复开关等于一个单向开关。
+    """
+    capture, kws = build()
+
+    assert capture.pause_wake() is True
+    assert capture.wake_held is True
+    # 再按一次不是变化 —— 托盘那边靠返回值决定要不要重画菜单文字。
+    assert capture.pause_wake() is False
+
+    # 暂停期间照常喂 KWS（缓冲、电平、VAD 都还在工作），只是命中不生效。
+    woke = []
+    capture.on_wake = lambda keyword, score: woke.append(keyword)
+    capture._callback(block(), 160, None, None)
+    assert woke == []
+    assert kws.feeds == 0, "被按住时连推理都不该跑 —— 那是白烧 CPU"
+
+    assert capture.resume_wake() is True
+    assert capture.wake_held is False
+    assert capture.resume_wake() is False
+
+
+def test_resuming_the_wake_never_unlocks_enrollment_mode():
+    """**这一条是那两个开关唯一的安全接缝。**
+
+    ``enroll_only`` 那一路开麦只为了录注册样本（第一次注册的鸡生蛋问题）。如果
+    ``resume_wake()`` 把它一起解开，托盘上点一下「恢复唤醒」就等于绕过注册模式 ——
+    而那一刻还没有人注册过，声纹门没有可比对的档案。
+    """
+    capture, _kws = build()
+    capture.enroll_only = True
+    capture.pause_wake()
+
+    capture.resume_wake()
+
+    assert capture.wake_paused is False
+    assert capture.enroll_only is True
+    assert capture.wake_held is True
+
+
+def test_manual_listening_refuses_while_the_wake_is_paused_or_enrolling():
+    """点了「暂停唤醒」还能从同一个菜单唤醒它，那个开关就不是开关。"""
+    refusals = []
+    capture, _kws = build(asr=StubAsr(), recognized=[])
+    capture.on_listen_refused = refusals.append
+
+    capture.pause_wake()
+    assert capture.begin_listening("tray") is False
+    assert capture._listening is False
+    assert refusals and "恢复唤醒" in refusals[0]
+
+    capture.resume_wake()
+    capture.enroll_only = True
+    assert capture.begin_listening("tray") is False
+    assert capture._listening is False
+
+
+def test_manual_listening_asserts_no_identity():
+    """主动唤醒绕过的是**唤醒词**，不是声纹门。
+
+    点托盘的那一刻还没有人说话，所以不存在一段音频可以拿去比对。这里必须把已验证说话人
+    清成 ``None`` —— 一个能从菜单点出「已验证身份」的入口比没有声纹门更糟，因为
+    ``shell.run`` 正是靠这个名字决定要不要执行。
+    """
+    verified = []
+    # 要带上 recognized：没有 ``on_recognized`` 时 ``_start_listening`` 会**明确拒绝**
+    # （「转写出来也没人接」），那条拒绝路径本身有测试，不该在这里被顺手绕过。
+    capture, _kws = build(asr=StubAsr(), recognized=[])
+    capture.on_verified = verified.append
+
+    assert capture.begin_listening("tray") is True
+    assert capture._listening is True
+    assert verified == [None]
+
+
+def test_manual_listening_does_not_restart_an_open_recognizer():
+    """已经在听时重开会丢掉当前这条流里已经解出来的字。"""
+    capture, _kws = build(asr=StubAsr(), recognized=[])
+    assert capture.begin_listening("tray") is True
+    streams = capture.asr_provider.streams
+
+    assert capture.begin_listening("tray") is False
+    assert capture.asr_provider.streams == streams

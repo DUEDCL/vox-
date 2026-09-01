@@ -639,14 +639,30 @@ function stopMotion() {
   rafId = 0;
   drawCore();
 }
+/* 托盘上那个「动画：开 / 关」。默认开。
+   **和系统的降级偏好是两个独立的关**，取与：任一侧要求静止就静止。反过来（托盘的开
+   能压过 reduceMotion）会让一次菜单点击撤掉一项无障碍设置，而那个设置存在的理由不是
+   审美。托盘那一侧只改自己这个布尔，不知道另一个开关的存在。 */
+let trayAnimated = true;
+
 function applyMotionPreference() {
-  if (reduceMotion.matches) {
+  if (reduceMotion.matches || !trayAnimated) {
     stopMotion();
     setPulse(0);            // 别把脉冲停在某一帧上
   } else {
     startMotion();
   }
 }
+
+/* 托盘 -> 渲染层。**这一条不经 Python**（见 main.rs 的 "animation" 分支）：动画开关纯粹是
+   渲染层的事，绕一趟父进程只会让「点了多久生效」取决于那一侧忙不忙。 */
+window.addEventListener('vox-tray', (ev) => {
+  const d = (ev as CustomEvent).detail ?? {};
+  if (typeof d.animated === 'boolean') {
+    trayAnimated = d.animated;
+    applyMotionPreference();
+  }
+});
 
 /* ============ 与后端的桥 ============
    后端（或 SIM 测试）只需派发 vox-voice-state 事件，前端不关心它从哪来。 */

@@ -94,6 +94,9 @@ class VoiceRuntime:
     logbook: Any = None
     #: 回合结束到收回唤醒球之间等多久（秒）。0 或负数 = 不自动收。
     hide_after_s: float = 10.0
+    #: 控制台地址（带令牌），托盘的「设置」用它。``None`` = 托盘上点了只记一条日志。
+    #: 由启动方注入而不是在这里拼：令牌属于控制台那一侧，运行时不该去猜端口。
+    settings_url: str | None = None
     #: 收球的定时器。每次回合结束重置，所以连着说话时球不会中途消失。
     _hide_timer: Any = field(default=None, init=False, repr=False)
     #: 唤醒漏斗的计数与最近几次尝试。**给控制台看的**，不进事件（事件扇出到每个通道，
@@ -177,6 +180,10 @@ class VoiceRuntime:
                 # The bridge is a display/confirmation enhancement. A broken
                 # display must not abort the producer currently emitting.
                 self.plugin.sink_failures += 1
+            # 托盘上那一行「当前状态」跟着状态机走。只在 `state.changed` 上推，不是每条
+            # 事件都推 —— 一个每条事件都重写菜单文字的托盘会在一轮里闪十几次。
+            if envelope.get("type") == "state.changed":
+                self._sync_tray()
 
     def start(self) -> RuntimeReport:
         """Build everything and spawn the orb, rolling back a partial start.
@@ -299,7 +306,7 @@ class VoiceRuntime:
                 "the orb is not built (desktop/src-tauri/target/... missing); "
                 "running headless -- build it with `npm run tauri build` in desktop/"
             ]
-        bridge = DesktopBridge(visible=self.visible)
+        bridge = DesktopBridge(visible=self.visible, on_incoming=self._from_desktop)
         try:
             bridge.start()
             # Waiting for ``ready`` rather than sleeping: the first line the orb
@@ -445,6 +452,96 @@ class VoiceRuntime:
             on_reject=self._wake_rejected,
         )
         return report
+
+    # ------------------------------------------------------------------ 托盘
+
+    def _from_desktop(self, message: Mapping[str, Any]) -> None:
+        """桌面侧传上来的消息。确认答复由桥自己处理，这里只接托盘的控制指令。
+
+        **托盘不承担任何业务逻辑**（P4 的要求）：Rust 侧只发一个动作名，怎么做在这里。
+        一个把「主动唤醒」实现成 Rust 直接开麦的托盘会绕过状态机、声纹门和事件流三样。
+        """
+        if not isinstance(message, Mapping) or message.get("kind") != "control":
+            return
+        action = str(message.get("action") or "")
+        try:
+            if action == "wake":
+                self.wake_manually()
+            elif action == "pause":
+                self.pause_wake(True)
+            elif action == "resume":
+                self.pause_wake(False)
+            elif action == "settings":
+                self.open_settings()
+        except Exception as exc:  # noqa: BLE001 - 托盘点一下不该让运行时倒下
+            self.log("tray", f"{action} 失败：{type(exc).__name__}: {exc}", level="error")
+
+    def wake_manually(self) -> bool:
+        """主动唤醒：绕过唤醒词，直接进聆听。开起来了返回 ``True``。
+
+        **绕过的是唤醒词，不是声纹门。** 点托盘的那一刻还没有人说话，所以不存在一段音频
+        可以拿去比对 —— ``capture.begin_listening()`` 明确把已验证说话人清成 ``None``，
+        于是 ``shell.run`` 这类要求身份的工具照旧被拒。这条不是妥协：一个能从菜单点出
+        「已验证身份」的入口比没有声纹门更糟。
+
+        没接麦克风时仍然进 LISTENING 并弹球 —— 那是「打字对话」那条路的正常形态。
+        """
+        capture = getattr(self.plugin, "audio_capture", None)
+        if capture is not None and getattr(capture, "wake_paused", False):
+            self.log("tray", "主动唤醒被拒：唤醒处于暂停中", level="warn")
+            return False
+        self._woken("tray", None)
+        if capture is None:
+            return True
+        opened = bool(capture.begin_listening("tray"))
+        if not opened:
+            self.log("tray", "主动唤醒：识别器没开起来（见上一条 wake 日志）", level="warn")
+        return opened
+
+    def pause_wake(self, paused: bool) -> bool:
+        """暂停 / 恢复唤醒词判定。返回当前是否处于暂停。
+
+        麦克风不关 —— 见 ``core/audio/capture.py`` 的 ``pause_wake``：关掉设备再重开是个
+        可能失败的动作，而「恢复」不该有失败的可能。
+        """
+        capture = getattr(self.plugin, "audio_capture", None)
+        if capture is not None:
+            if paused:
+                capture.pause_wake()
+            else:
+                capture.resume_wake()
+        self.log("tray", "唤醒已暂停" if paused else "唤醒已恢复", paused=paused)
+        self._sync_tray()
+        return paused
+
+    @property
+    def wake_paused(self) -> bool:
+        return bool(getattr(getattr(self.plugin, "audio_capture", None), "wake_paused", False))
+
+    def open_settings(self) -> bool:
+        """打开控制台。``settings_url`` 没设就只记一条日志。
+
+        URL 由启动方注入而不是在这里拼：它带令牌，而令牌属于控制台那一侧。
+        """
+        url = (self.settings_url or "").strip()
+        if not url:
+            self.log("tray", "没有控制台地址可开（settings_url 没设）", level="warn")
+            return False
+        import webbrowser
+
+        self.log("tray", "打开控制台")
+        return bool(webbrowser.open(url))
+
+    def _sync_tray(self) -> None:
+        """把状态与暂停开关推给托盘菜单。桥没接就什么都不做。"""
+        if self.bridge is None:
+            return
+        try:
+            self.bridge.set_tray(
+                state=self.plugin.machine.state.value, paused=self.wake_paused
+            )
+        except Exception:  # noqa: BLE001 - 托盘是显示增强，不是回合的前提
+            pass
 
     def _record_wake(self, **fields: Any) -> None:
         """往唤醒漏斗记一条。只记计数与判定，不记音频、不记向量。"""

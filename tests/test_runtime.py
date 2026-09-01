@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
 import vox_plugin.runtime as runtime_module
 from core.agents.contract import AgentChunk
 from core.audio.acks import ACK_MUTE_CAP_S, ACK_MUTE_TAIL_S
+from core.audio.capture import SounddeviceWakeCapture
 from core.dispatch.dispatcher import DispatchResult
 from core.state import VoiceState
 from vox_plugin.runtime import WAKE_LOG_MAX, VoiceRuntime
@@ -637,3 +639,186 @@ def test_completion_failure_recovers_from_speaking_state():
     assert result.ok is False
     assert result.reason == "turn completion failed: RuntimeError"
     assert runtime.plugin.machine.state == VoiceState.LISTENING
+
+
+# ---------------------------------------------------------------------- 托盘
+
+class TrayBridge:
+    """只记下托盘更新与事件的桥。``alive`` 让 ``describe()`` 那条路也能走。"""
+
+    alive = True
+
+    def __init__(self, fail: bool = False) -> None:
+        self.trays: list[tuple[str, bool]] = []
+        self.events: list[dict] = []
+        self.fail = fail
+
+    def send(self, event):
+        self.events.append(dict(event))
+        return True
+
+    def set_tray(self, *, state, paused):
+        if self.fail:
+            raise RuntimeError("tray is gone")
+        self.trays.append((state, paused))
+        return True
+
+    def set_visible(self, visible):
+        return True
+
+    def describe(self):
+        return {"alive": self.alive}
+
+
+class TrayCapture:
+    """借用真实实现的那两个开关，不复制一份。
+
+    ``pause_wake`` / ``resume_wake`` 直接指向生产代码：一个自己写了一遍开关语义的桩
+    只能证明桩是对的。``begin_listening`` 是可注入的，因为这里要断言的是运行时**调没调
+    它**，而它自己的语义在 tests/test_capture_listening.py 里钉。
+    """
+
+    pause_wake = SounddeviceWakeCapture.pause_wake
+    resume_wake = SounddeviceWakeCapture.resume_wake
+
+    def __init__(self, opens: bool = True) -> None:
+        self.wake_paused = False
+        self.opens = opens
+        self.began: list[str] = []
+        self.muted: list[float] = []
+
+    def begin_listening(self, reason="manual"):
+        self.began.append(reason)
+        return self.opens
+
+    def start(self, **_kwargs):
+        self.started = True
+
+    def stop(self):
+        self.started = False
+
+    def mute_for(self, seconds):
+        self.muted.append(seconds)
+
+
+def _tray_runtime(capture=None, bridge=None):
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+    runtime._started = True
+    runtime.bridge = bridge if bridge is not None else TrayBridge()
+    if capture is not None:
+        runtime.plugin.attach_capture(capture)
+    # 生产里 ``start()`` 最后一步就是这两行。少了它们 ``wake_detected`` 会抛
+    # 「voice plugin is not running」—— 那不是托盘的缺陷，是这个夹具没搭到生产的形状。
+    runtime.plugin.on_event = runtime.on_event
+    runtime.plugin.start()
+    runtime.bridge.trays.clear()
+    runtime.bridge.events.clear()
+    runtime.seen.clear()
+    return runtime
+
+
+def test_a_tray_click_pauses_and_resumes_the_wake():
+    capture = TrayCapture()
+    runtime = _tray_runtime(capture)
+
+    runtime._from_desktop({"kind": "control", "action": "pause"})
+    assert capture.wake_paused is True
+    assert runtime.wake_paused is True
+
+    runtime._from_desktop({"kind": "control", "action": "resume"})
+    assert capture.wake_paused is False
+    assert runtime.wake_paused is False
+    # 每次都把当前状态推回托盘，菜单文字才不会和实际相反。
+    assert [paused for _state, paused in runtime.bridge.trays] == [True, False]
+
+
+def test_messages_that_are_not_tray_control_are_ignored():
+    """确认答复走桥自己那条路（``await_confirmation``）。这里再处理一遍会把一次点击
+    算成两次。"""
+    capture = TrayCapture()
+    runtime = _tray_runtime(capture)
+
+    runtime._from_desktop({"kind": "confirm", "approved": True})
+    runtime._from_desktop({"kind": "control", "action": "nonsense"})
+    runtime._from_desktop("not a mapping")
+
+    assert capture.wake_paused is False
+    assert capture.began == []
+
+
+def test_manual_wake_from_the_tray_reaches_listening_and_opens_the_recognizer():
+    capture = TrayCapture()
+    runtime = _tray_runtime(capture)
+
+    assert runtime.wake_manually() is True
+
+    assert runtime.plugin.machine.state == VoiceState.LISTENING
+    assert capture.began == ["tray"]
+    # 唤醒漏斗照常记一条：主动唤醒也是一次唤醒，不该在统计里凭空消失。
+    assert runtime.wake_stats["accepted"] == 1
+    assert runtime.wake_recent[0]["keyword"] == "tray"
+
+
+def test_manual_wake_is_refused_while_the_wake_is_paused():
+    """点了「暂停唤醒」还能从同一个菜单唤醒它，那个开关就不是开关。"""
+    capture = TrayCapture()
+    runtime = _tray_runtime(capture)
+    runtime.pause_wake(True)
+
+    assert runtime.wake_manually() is False
+
+    assert capture.began == []
+    assert runtime.plugin.machine.state == VoiceState.IDLE
+
+
+def test_manual_wake_without_a_microphone_still_reaches_listening():
+    """打字对话那条路没有 capture，但主动唤醒仍然该把界面带进「在听」。"""
+    runtime = _tray_runtime()
+
+    assert runtime.wake_manually() is True
+    assert runtime.plugin.machine.state == VoiceState.LISTENING
+
+
+def test_settings_without_a_url_says_so_instead_of_guessing():
+    """URL 带 token，而 token 是控制台那一层生成的。运行时去猜端口只会打开一个 401。"""
+    runtime = _tray_runtime()
+    logged: list[tuple[str, str]] = []
+    runtime.logbook = SimpleNamespace(
+        write=lambda source, message, **fields: logged.append((source, message))
+    )
+
+    assert runtime.open_settings() is False
+    assert any(source == "tray" for source, _message in logged)
+
+
+def test_settings_opens_the_injected_url(monkeypatch):
+    runtime = _tray_runtime()
+    runtime.settings_url = "http://127.0.0.1:8765/?t=abc"
+    opened: list[str] = []
+    import webbrowser
+
+    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url) or True)
+
+    assert runtime.open_settings() is True
+    assert opened == ["http://127.0.0.1:8765/?t=abc"]
+
+
+def test_only_state_changes_repaint_the_tray():
+    """每条事件都重写菜单文字的托盘会在一轮里闪十几次。"""
+    runtime = _tray_runtime()
+
+    runtime.on_event({"type": "task.progress", "payload": {}})
+    runtime.on_event({"type": "tool.finished", "payload": {}})
+    assert runtime.bridge.trays == []
+
+    runtime.on_event({"type": "state.changed", "payload": {"to": "listening"}})
+    assert len(runtime.bridge.trays) == 1
+
+
+def test_a_broken_tray_does_not_break_the_turn():
+    """托盘是显示增强。一个坏掉的菜单不该让正在进行的一轮失败。"""
+    runtime = _tray_runtime(bridge=TrayBridge(fail=True))
+
+    runtime.on_event({"type": "state.changed", "payload": {"to": "thinking"}})
+
+    assert runtime.seen[-1]["type"] == "state.changed"

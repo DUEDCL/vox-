@@ -209,6 +209,10 @@ def main() -> int:
         return 1
 
     stop = threading.Event()
+    # 托盘的「设置…」要打开的地址。**在这里注入而不是让运行时去拼**：它带 token，而 token
+    # 是这一层生成的 —— 运行时既不知道端口也不该去猜令牌。没有它的话托盘上点「设置」只会
+    # 记一条日志（见 VoiceRuntime.open_settings）。
+    runtime.settings_url = url
     pump = threading.Thread(target=pump_forever, args=(runtime, stop), name="vox-pump", daemon=True)
     pump.start()
     # 装上重启入口。页面上那颗按钮是唯一让「改完的配置」生效的路径 —— 唤醒词、模型方案、
