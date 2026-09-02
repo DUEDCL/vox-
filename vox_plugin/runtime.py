@@ -94,6 +94,13 @@ class VoiceRuntime:
     logbook: Any = None
     #: 回合结束到收回唤醒球之间等多久（秒）。0 或负数 = 不自动收。
     hide_after_s: float = 10.0
+    #: **连续对话**：回答说完之后不收话筒，直接等下一句（不用再喊唤醒词）。
+    #:
+    #: 窗口长度不在这里 —— 它是采集侧的 ``listen_grace_s``（见 ``follow_up_seconds``）。
+    #: 关掉它就退回「每一句都要先喊唤醒词」，那是此前的行为。
+    follow_up: bool = True
+    #: 现在是不是挂着一个连续对话窗口。挂着的时候**不起收球倒计时** —— 窗口结束时才起。
+    _following_up: bool = field(default=False, init=False, repr=False)
     #: 控制台地址（带令牌），托盘的「设置」用它。``None`` = 托盘上点了只记一条日志。
     #: 由启动方注入而不是在这里拼：令牌属于控制台那一侧，运行时不该去猜端口。
     settings_url: str | None = None
@@ -390,7 +397,7 @@ class VoiceRuntime:
             self._active_task_id = None
 
         try:
-            self.plugin.complete_turn(self._spoken(result))
+            self._speak_and_follow_up(self._spoken(result))
         except Exception as exc:  # noqa: BLE001 - preserve a usable runtime
             self._emit_failure(task, exc)
             self._recover_turn()
@@ -406,7 +413,12 @@ class VoiceRuntime:
             )
         # 回合走完了：起倒计时收球。失败路径不走这里 —— 那几条上面已经 return，
         # 而一个报错之后立刻消失的球会让人以为是它崩了。
-        self._schedule_hide()
+        #
+        # **连续对话开着的时候不在这里起倒计时。** 那个窗口结束时（``on_listen_expired``）
+        # 会自己起 —— 在这里也起一个的话，两个倒计时里短的那个会在人正要接着说的时候
+        # 把球收走。
+        if not self._following_up:
+            self._schedule_hide()
         self.log(
             "turn",
             f"第 {self.turns} 轮完成：route={result.route} ok={result.ok} {result.elapsed_ms}ms",
@@ -481,6 +493,59 @@ class VoiceRuntime:
             on_reject=self._wake_rejected,
         )
         return report
+
+    def _speak_and_follow_up(self, reply: str) -> None:
+        """说出这一轮的回答，然后**留着话筒**等下一句 —— 连续对话。
+
+        三件事按这个顺序，每一条都有它必须在这个位置的理由：
+
+        1. **播放前压静音窗。** ``complete_turn`` 里的 ``speak_segments`` 是阻塞的，播放
+           期间麦克风照常在录 —— 而连续对话把识别器留着开，于是不压窗的后果不是「多录一点
+           环境声」，是**助手把自己的回答转写成下一句请求**。上限只是保险丝，真正决定窗口
+           长度的是播放返回之后那一下（和确认音同一个做法，见 ``core/audio/acks.py``）。
+        2. **播放返回之后压一个短尾巴。** 扬声器的余响和房间反射会拖几十毫秒。
+        3. **再开聆听。** 顺序反过来（先开聆听再播放）就等于把回答喂给识别器。
+
+        打断仍然是即时的：``wake_detected`` 在 SPEAKING 时先 ``cancel()``，而静音窗只丢
+        输入不影响那条路 —— 唤醒词走的是 KWS，而 KWS 在聆听模式下根本不被喂到，所以
+        打断靠的是使用者说话时识别器听到内容、或者托盘。**这是连续对话的已知代价**：
+        回答正在播的时候喊唤醒词打断不了它（静音窗把那句话丢了）。要打断就等它说完，
+        或者用托盘。
+        """
+        capture = getattr(self.plugin, "audio_capture", None)
+        if self.acks is not None or self.plugin.tts is not None:
+            self._mute_input(ACK_MUTE_CAP_S)
+        try:
+            self.plugin.complete_turn(reply)
+        finally:
+            self._mute_input(ACK_MUTE_TAIL_S)
+        self._following_up = False
+        if not self.follow_up or capture is None:
+            return
+        resume = getattr(capture, "resume_listening", None)
+        if not callable(resume):
+            return
+        try:
+            opened = bool(resume("follow-up"))
+        except Exception as exc:  # noqa: BLE001 - 连续对话失败不该让这一轮失败
+            self.log("turn", f"连续对话没开起来：{type(exc).__name__}: {exc}", level="warn")
+            return
+        self._following_up = opened
+        if opened:
+            self.log(
+                "turn",
+                f"接着听下一句（{self.follow_up_seconds():g} 秒内没人说话就收）",
+                follow_up_s=self.follow_up_seconds(),
+            )
+
+    def follow_up_seconds(self) -> float:
+        """连续对话的窗口有多长。**由采集侧的 ``listen_grace_s`` 决定，不另设一个。**
+
+        两个数字各自可调的话它们一定会分岔，而分岔之后「球什么时候收」和「话筒什么时候关」
+        就不是同一件事了 —— 那正是使用者会看到「球还在但它已经不听了」的成因。
+        """
+        capture = getattr(self.plugin, "audio_capture", None)
+        return float(getattr(capture, "listen_grace_s", 0.0) or 0.0)
 
     # ------------------------------------------------------------------ 托盘
 
@@ -606,7 +671,16 @@ class VoiceRuntime:
         """
         self.wake_stats["listen_expired"] = self.wake_stats.get("listen_expired", 0) + 1
         self._record_wake(verdict="listen_expired", reason=f"{seconds:g}s 内没有语音")
-        self.log("wake", f"聆听结束：{seconds:g} 秒内没听到说话，退回待机", seconds=seconds)
+        # 连续对话的窗口就是靠这一条收口的：说完回答之后开的那个窗口没人接话，到点结束。
+        # 措辞跟着分：一个刚回答完的助手说「聆听结束」读起来像出错了。
+        following = self._following_up
+        self._following_up = False
+        self.log(
+            "wake",
+            f"{'这一轮聊完了' if following else '聆听结束'}：{seconds:g} 秒内没听到说话，退回待机",
+            seconds=seconds,
+            follow_up=following,
+        )
         for event in self.plugin.listening_expired(seconds):
             self.on_event(event)
         self._schedule_hide()

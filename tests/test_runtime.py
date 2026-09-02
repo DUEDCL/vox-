@@ -894,3 +894,143 @@ def test_a_check_that_raises_is_treated_as_unavailable():
         assert "check failed" in blocked["broken"]
     finally:
         runtime.close()
+
+
+# ---------------------------------------------------- 连续对话（2026-09-02）
+
+
+class FollowUpCapture(TrayCapture):
+    """借用真实的 ``resume_listening``，好让「不清身份」这一条测的是生产代码。"""
+
+    resume_listening = SounddeviceWakeCapture.resume_listening
+
+    def __init__(self, opens: bool = True) -> None:
+        super().__init__(opens=opens)
+        self.listen_grace_s = 8.0
+        self.enroll_only = False
+        self._listening = False
+        self.asr_provider = object()
+        self.on_recognized = lambda text: None
+        self.on_listen_refused = None
+        self.listen_refusals = 0
+        self.last_listen_refusal = ""
+        self.started_listening = 0
+
+    def _start_listening(self):
+        self.started_listening += 1
+        self._listening = True
+
+    def _note_listen_refused(self, reason):
+        self.listen_refusals += 1
+        self.last_listen_refusal = reason
+
+
+def _talking_runtime(capture, *, follow_up=True):
+    runtime = _tray_runtime(capture)
+    runtime.follow_up = follow_up
+    runtime.dispatcher = FakeDispatcher(
+        [AgentChunk(kind="text", text="好的"), AgentChunk(kind="done")]
+    )
+    runtime.adapters = {}
+    return runtime
+
+
+def test_after_the_reply_the_microphone_stays_open():
+    """连续对话：回答说完之后不用再喊唤醒词。"""
+    capture = FollowUpCapture()
+    runtime = _talking_runtime(capture)
+
+    runtime.say("现在几点")
+
+    assert capture.started_listening == 1
+    assert capture._listening is True
+    assert runtime._following_up is True
+
+
+def test_the_follow_up_window_keeps_the_verified_speaker():
+    """**这一条是连续对话唯一的安全接缝。**
+
+    托盘的主动唤醒必须把身份清成 ``None``（那一刻没有音频可比对）。这一条相反：几秒之前
+    才有一次真的声纹通过，而这个窗口是那次通过的延续 —— 清掉它会让「你好小沃，帮我看看 X」
+    →「那再跑一下测试」里的第二句突然没有权限，一个在对话中途静默失权的助手比没有连续
+    对话更糟。
+    """
+    capture = FollowUpCapture()
+    runtime = _talking_runtime(capture)
+    runtime.plugin.verified_speaker = "杜"
+
+    runtime.say("现在几点")
+
+    assert runtime.plugin.verified_speaker == "杜"
+    assert runtime.effective_speaker == "杜"
+
+
+def test_the_reply_is_muted_so_it_is_not_transcribed_as_the_next_request():
+    """播放期间必须压静音窗 —— 不压的后果不是多录一点环境声，是**助手把自己的回答
+    转写成下一句请求**（识别器此刻是开着的）。"""
+    capture = FollowUpCapture()
+    runtime = _talking_runtime(capture)
+    runtime.plugin.attach_tts(SimpleNamespace(
+        speak_segments=lambda chunks: None, is_stopped=lambda: False, stop=lambda: None
+    ))
+
+    runtime.say("讲个笑话")
+
+    # 播放前压上限、播放（阻塞）返回之后压短尾巴 —— 和确认音同一个做法。
+    assert capture.muted[0] == ACK_MUTE_CAP_S
+    assert capture.muted[-1] == ACK_MUTE_TAIL_S
+
+
+def test_follow_up_can_be_turned_off():
+    """关掉就退回「每一句都要先喊唤醒词」，那是此前的行为。"""
+    capture = FollowUpCapture()
+    runtime = _talking_runtime(capture, follow_up=False)
+
+    runtime.say("现在几点")
+
+    assert capture.started_listening == 0
+    assert runtime._following_up is False
+
+
+def test_a_paused_wake_refuses_the_follow_up_window():
+    """点了「暂停唤醒」之后连续对话也不该把话筒留着 —— 那个开关的语义是「现在不要听我说话」。"""
+    capture = FollowUpCapture()
+    runtime = _talking_runtime(capture)
+    capture.pause_wake()
+
+    runtime.say("现在几点")
+
+    assert capture.started_listening == 0
+    assert capture.listen_refusals == 1
+    assert runtime._following_up is False
+
+
+def test_the_orb_countdown_waits_for_the_follow_up_window():
+    """挂着连续对话窗口时不起收球倒计时：两个倒计时里短的那个会在人正要接着说的时候
+    把球收走。窗口结束（``on_listen_expired``）时才起。"""
+    capture = FollowUpCapture()
+    runtime = _talking_runtime(capture)
+
+    runtime.say("现在几点")
+    assert runtime._hide_timer is None, "挂着窗口时不该有倒计时"
+
+    runtime._listen_expired(8.0)
+
+    assert runtime._following_up is False
+    assert runtime._hide_timer is not None, "窗口结束了才起倒计时"
+    runtime._cancel_hide()
+
+
+def test_follow_up_failure_never_fails_the_turn():
+    """连续对话是增强。它开不起来时这一轮的回答仍然算成功。"""
+
+    class Broken(FollowUpCapture):
+        def resume_listening(self, reason="follow-up"):
+            raise RuntimeError("device went away")
+
+    runtime = _talking_runtime(Broken())
+
+    result = runtime.say("现在几点")
+
+    assert result.ok is True
+    assert runtime._following_up is False

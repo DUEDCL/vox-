@@ -557,6 +557,31 @@ class SounddeviceWakeCapture:
         self._start_listening()
         return self._listening
 
+    def resume_listening(self, reason: str = "follow-up") -> bool:
+        """回答说完之后再开一次聆听 —— **连续对话**。开起来了返回 ``True``。
+
+        和 ``begin_listening`` 只差一件事，而那件事是全部的重点：**这里不清已验证说话人。**
+
+        - 托盘的主动唤醒发生在「还没有人说话」的那一刻，没有音频可比对，所以那条路必须
+          把身份清成 ``None``。
+        - 这一条发生在**同一轮对话刚说完**的那一刻：几秒之前才有一次真的声纹通过，
+          而这个窗口是那次通过的延续。清掉它会让「你好小沃，帮我看看 X」→「那再跑一下测试」
+          里的第二句突然没有身份 —— 一个在对话中途静默失去权限的助手比没有连续对话更糟。
+        - 代价说清楚：这个窗口内**别人说话也会被当成已验证的那个人**。所以它必须短
+          （由 ``listen_grace_s`` 收口，默认 8 秒，没人说话就自己结束），而且它只在一次
+          成功的唤醒之后才存在 —— 它不能自己延长自己（每次回答之后重新开一个新窗口是
+          调用方的决定，见 ``vox_plugin/runtime.py`` 的 ``_follow_up``）。
+
+        暂停唤醒 / 注册模式下不开：那两个状态的语义是「现在不要听我说话」。
+        """
+        if self._listening:
+            return False
+        if self.wake_paused or self.enroll_only:
+            self._note_listen_refused(f"唤醒被按住（{reason}）—— 先恢复唤醒")
+            return False
+        self._start_listening()
+        return self._listening
+
     def has_speech(self, samples: Any) -> bool:
         """这一段音频里有没有人在说话。没接 VAD 时**放行**（返回 True）。
 

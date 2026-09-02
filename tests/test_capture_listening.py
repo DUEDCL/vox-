@@ -892,3 +892,42 @@ def test_manual_listening_does_not_restart_an_open_recognizer():
 
     assert capture.begin_listening("tray") is False
     assert capture.asr_provider.streams == streams
+
+
+def test_resume_listening_keeps_the_verified_speaker(monkeypatch):
+    """连续对话那一路**不清**已验证说话人，而托盘那一路必须清。
+
+    两者只差这一件事，而那件事是全部的重点：``resume_listening`` 发生在同一轮对话刚说完
+    的那一刻（几秒前才有一次真的声纹通过），``begin_listening`` 发生在「还没有人说话」的
+    那一刻（没有音频可比对）。
+    """
+    verified: list = []
+    capture, _kws = build(asr=StubAsr(), recognized=[])
+    capture.on_verified = verified.append
+
+    assert capture.resume_listening("follow-up") is True
+    assert capture._listening is True
+    assert verified == [], "连续对话不该动身份"
+
+
+def test_resume_listening_is_refused_while_paused_or_enrolling():
+    refusals: list[str] = []
+    capture, _kws = build(asr=StubAsr(), recognized=[])
+    capture.on_listen_refused = refusals.append
+
+    capture.pause_wake()
+    assert capture.resume_listening() is False
+    capture.resume_wake()
+    capture.enroll_only = True
+    assert capture.resume_listening() is False
+    assert capture._listening is False
+    assert len(refusals) == 2
+
+
+def test_resume_listening_does_not_restart_an_open_recognizer():
+    capture, _kws = build(asr=StubAsr(), recognized=[])
+    assert capture.resume_listening() is True
+    streams = capture.asr_provider.streams
+
+    assert capture.resume_listening() is False
+    assert capture.asr_provider.streams == streams

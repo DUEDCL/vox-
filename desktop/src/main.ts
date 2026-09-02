@@ -8,6 +8,7 @@ import {
   loadSheets, newMotion, setState as seqSetState, stepMotion, drawOrb,
   type SeqState, type Sheets,
 } from './sequence';
+import { BotRenderer, type BotState } from './bot-render';
 
 /* 唤醒球不是浏览器页面：右键菜单、文本拖拽鬼影一律关掉。 */
 window.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -24,6 +25,7 @@ window.addEventListener('selectstart', (e) => e.preventDefault());
 /* 后台开关一览（都由 Rust 侧从环境变量拼进 URL，见 src-tauri/src/main.rs）：
      VOX_ORB_SIZE=140   球 + 外发光的布局盒尺寸（96–420）
      VOX_SHOW_TEXT=1    平时也显示回复文字。**默认关** —— 只有报错/拒绝会出文字。
+     VOX_ORB_RENDERER=bot|seq   画球用哪一层。见下面的 `RENDERER`。
    走 URL query 而不是新加 IPC 命令：IPC 面就是那四个 `vox_*`，为开关扩大它不值得。 */
 (() => {
   const raw = new URLSearchParams(location.search).get('orb');
@@ -32,6 +34,24 @@ window.addEventListener('selectstart', (e) => e.preventDefault());
     document.documentElement.style.setProperty('--orb', `${Math.round(px)}px`);
   }
 })();
+
+/* 画球用哪一层。**默认仍是 `seq`（AE 雪碧图）** —— 第十二代（bloub，有脸的实体球）与它
+   并存而不是替换它，所以现有行为一个字节没变，切过去要显式指定。
+
+   `bot` 那一层的资产是零（纯矢量 + 2837 行纯计算），所以它不会「加载失败」；反过来
+   `seq` 依赖 `public/orb/*.png` 约 4 MB。两层各自完整，切换只改这一个词：
+
+     · 试新的 —— 控制台「唤醒球」栏选 bloub，或手动 `?renderer=bot`
+     · 回旧的 —— 选 AE 雪碧图，或去掉那个参数
+     · 真机验收满意之后 —— 把下面这个默认值改成 `'bot'`，这是唯一要动的地方
+     · 彻底反悔 —— `git revert` 我这几个提交，`sequence.ts` / `core.ts` / `public/orb/`
+       一个字节都没被删过
+
+   切换需要重启球（值在启动时读一次）。做成即时切换要么让控制台够到桌面子进程的 stdin，
+   要么给 bridge 加一种 `kind` —— 前者是新耦合，后者要等这一层先被验收，都不在这一步。 */
+const RENDERER: 'bot' | 'seq' =
+  new URLSearchParams(location.search).get('renderer') === 'bot' ? 'bot' : 'seq';
+const bot = new BotRenderer();
 
 const app = document.querySelector<HTMLElement>('#app')!;
 const orb = document.querySelector<HTMLButtonElement>('#orb')!;
@@ -167,7 +187,11 @@ function mapSeq(): SeqState {
 }
 
 function syncSeq(): void {
-  seqSetState(motion, mapSeq());
+  const next = mapSeq();
+  seqSetState(motion, next);
+  // 两层都收到同一个态，所以切渲染器不用改映射。bloub 那一层的态间 morph 由引擎自己做
+  // （`blendPose` + 各态的 `morph` 时长），不需要这一层的交叉淡化。
+  bot.setState(next as BotState, t);
 }
 
 /** 画球。有序列就播序列，没有就退回手写渲染器。
@@ -176,6 +200,8 @@ function syncSeq(): void {
 function paintOrb(): void {
   const ctx = canvas.getContext('2d');
   if (ctx === null) return;
+  // 第十二代：零资产，所以没有「还没就绪」这个状态，也不需要退路。
+  if (RENDERER === 'bot') { bot.draw(ctx, t, seed, amplitude); return; }
   if (sheets === null) {
     // 退路：资产没就绪，只有手写层。**它也要守「没有待机形态」这条** —— `core.draw()` 的
     // idle 是一颗正常的球，不清的话它会在启动的那几百毫秒里闪一下使用者点名删掉的长相。
@@ -843,6 +869,11 @@ Object.assign(window, {
     reply: replyText,
     confirm: confirmCard.hidden ? null : {cmd: confirmCmd.textContent, reason: confirmReason.textContent},
   }),
+  /* 第十二代的几何读数。**这是雪碧图那条路丢掉的东西**：位图没有几何，所以上一代的
+     判据只能是像素级的。bloub 的引擎是时间的纯函数，固定 `now` 下这些数可复现，
+     于是「六态互不相同」重新变成可断言的，不必靠人眼看截图。 */
+  render_bot_to_text: (now = 1) => JSON.stringify(bot.probe(Number(now))),
+  botRenderer: () => RENDERER,
 });
 
 if (!new URLSearchParams(location.search).has('test')) {
@@ -866,15 +897,23 @@ reportLayout(true);
   // 不拉满的话球停在 appear≈0 上 —— 截图里什么都没有，看起来像渲染层坏了。
   if (s !== 'idle') { seed = 1; seedTarget = 1; }
   motion.w = 1;
+  // 序列层用 `motion.w = 1` 跳过淡化，bloub 那一层的对等动作是 `settle` —— 都是「静态
+  // 一帧要看的是这一态，不是它正从上一态走过来的中途」。
+  bot.settle(t);
   drawCore();
 })();
 
 /* 资产是异步的，而球必须立刻可见 —— 所以先用手写渲染器画着，序列到位再切过去。
    加载失败**不报错给用户**：退路已经在画了，弹一句「资产缺失」只会让人以为球坏了。
-   控制台留一条，取证时看得到。 */
-loadSheets('/orb')
-  .then((s) => { sheets = s; syncSeq(); motion.w = 1; drawCore(); })
-  .catch((e) => { console.warn('[orb] 序列资产未就绪，回退手写渲染器：', e); });
+   控制台留一条，取证时看得到。
+
+   `bot` 那一层不碰这些资产（零资产），所以那 4 MB 连解码都省了 —— 不加载而不是加载后
+   不用：解码 25 MB 位图在一个 140px 的挂件上是白花的内存。 */
+if (RENDERER === 'seq') {
+  loadSheets('/orb')
+    .then((s) => { sheets = s; syncSeq(); motion.w = 1; drawCore(); })
+    .catch((e) => { console.warn('[orb] 序列资产未就绪，回退手写渲染器：', e); });
+}
 
 /* DPI 变化(拖到另一块屏)在 WebView2 上伴随 resize 到达：位图要跟着 DPR 重开，
    否则波形在高 DPI 屏上是被放大的糊线。 */

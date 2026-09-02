@@ -158,6 +158,8 @@ def main() -> int:
         with_desktop=bool(config["orb.enabled"]) and not args.no_orb,
         visible=bool(config["orb.visible"]),
         hide_after_s=float(config["orb.hide_after_s"]),
+        # 连续对话：回答说完之后留着话筒等下一句。见 config/voice.toml 的 [wake] follow_up。
+        follow_up=bool(config["wake.follow_up"]),
     )
     report = runtime.start()
     print(f"orb:    {report.desktop}")
