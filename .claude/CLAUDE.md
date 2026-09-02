@@ -36,6 +36,8 @@
 | `core/audio/winlevel.py`（OS 输入音量） | `pytest tests/test_console.py -k calibrat -q` + 真机读一次 `endpoints()` | **5 passed** + 三个端点的音量读得到（REAL-WIN） |
 | `core/audio/gain.py` `vad.py` | `pytest tests/test_auto_gain.py -q` | **16 passed** |
 | 唤醒链路本身（喂真录音过生产回调） | `PYTHONUTF8=1 .venv\Scripts\python.exe .vox-ref\wake_path_check.py` | 「你好小沃」念三遍 **3/3 命中**（SIM；改增益/VAD/KWS 参数后必跑） |
+| 路由决策（哪句话给谁） | `PYTHONUTF8=1 .venv\Scripts\python.exe .vox-ref\route_probe.py` | 普通对话 → relay(http)、要动机器 → claude(cli)、工具句 → 快路径（AUTO；改 `intent.py`/`router.py`/`agents.toml` 后必跑） |
+| 整条链（除麦克风） | `PYTHONUTF8=1 .venv\Scripts\python.exe .vox-ref\e2e_headless.py` | 两轮都 ok=True、回答 40 字以内、第一声约 11 s（**REAL-AGENT，会真的发请求和出声**） |
 | `core/memory/` | `pytest tests/test_memory.py tests/test_memory_threads.py -q` | **65 + 7 passed** |
 | 工具/记忆与语音路径接线 | `pytest tests/test_memory.py tests/test_plugin_tools.py -q` | **87 passed** |
 | `core/agents/` `config/agents.toml` | `pytest tests/test_agent_contract.py tests/test_agent_cli.py tests/test_agent_evox.py tests/test_agent_acp.py tests/test_agent_http.py -q` | 全绿（contract 14 + cli 28 + evox 17 + acp 12 + http 14） |
@@ -46,6 +48,8 @@
 | `desktop/src/core.ts`（手写渲染器，现为 fallback） | 上面那条 + 逐帧对照（`replay.html`）+ 12 格并排（`side.html`）+ 八格对照页 | 只需保证退路不炸：雪碧图缺失时球仍然画得出来 |
 | `core/audio/asr.py`（端点静音时长） | `pytest tests/test_sherpa_provider.py -q` | **8 passed**（含「不许在没有新测量前调小 rule2」那条） |
 | `desktop/src-tauri/` | `cd desktop/src-tauri && cargo check && cargo test` | 零警告 + **20 passed** + **须实机验收** |
+
+**`.vox-ref/` 里的探针不在版本控制里**（那个目录有使用者本人的录音，见 `.gitignore`）。上表引用它们是刻意的 —— 它们是这台机器上可复现的证据，换机器要按 `docs/research/prototype-results.md` 里的描述重建。
 
 必须用隔离环境的 `.venv\Scripts\python.exe`，不用系统 Python（系统环境没装 sherpa-onnx / soundfile）。
 
