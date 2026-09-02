@@ -197,6 +197,13 @@ class ConsoleServer:
                 return api.config_view()
             if path == "/api/speaker":
                 return api.speaker_view()
+            if path == "/api/chat/history":
+                return api.chat_history(
+                    str(query.get("session", [""])[0]),
+                    int(query.get("limit", ["60"])[0] or 60),
+                )
+            if path == "/api/chat/sessions":
+                return api.chat_sessions(int(query.get("limit", ["20"])[0] or 20))
             if path == "/api/memory":
                 return api.memory((query.get("q") or [""])[0])
             if path == "/api/agents/config":
@@ -229,6 +236,8 @@ class ConsoleServer:
                     str(payload.get("text", "")),
                     speak=bool(payload.get("speak", True)),
                 )
+            if path == "/api/chat/dictate":
+                return api.dictate(float(payload.get("seconds", 4.0) or 4.0))
             if path == "/api/model":
                 return api.switch_model(
                     str(payload.get("model", "")),

@@ -499,6 +499,17 @@ def _validator(kind: str):
     return validate
 
 
+
+def _turn_role(record: Any) -> str:
+    """一条记忆记录是谁说的。角色写在 tags 里（`role:user` / `role:assistant`）。"""
+    for tag in getattr(record, "tags", ()) or ():
+        text = str(tag)
+        if text.startswith("role:"):
+            return text.split(":", 1)[1] or "user"
+        if text in ("user", "assistant"):
+            return text
+    return "user"
+
 class ConsoleApi:
     """Everything the page can ask for, over one runtime and one voice stack."""
 
@@ -1782,6 +1793,104 @@ class ConsoleApi:
             if getattr(record, "scope", "mid") == "mid"
         ]
         return {"attached": True, "facts": facts}
+
+    # --------------------------------------------------------------------- chat
+
+    def chat_history(self, session: str = "", limit: int = 60) -> dict[str, Any]:
+        """一个会话的对话记录，时间顺序。
+
+        ## 这一条推翻了上面 `memory()` 里的那句话，理由要写清楚
+
+        `memory()` 的注释说「Turns are the transcript of everything said, and there is
+        no question the console answers by displaying it」—— 那时候控制台上没有聊天界面，
+        所以那句话成立。使用者 2026-09-03 点名要「实时文字聊天，可查看会话」，而**一个不能
+        回看的聊天界面不是聊天界面**：它是个一次性的输入框。
+
+        暴露面没有变大：这些字本来就在 `memory/` 里（是纯文本、使用者自己的机器），而这个
+        控制台只监听回环、每个请求都要令牌。变的是「有没有一个问题需要它显示出来」，
+        而现在有了。
+        """
+        recaller = getattr(self.runtime, "memory_recaller", None)
+        if recaller is None:
+            return {"attached": False, "session": "", "turns": []}
+        wanted = str(session or "").strip() or str(getattr(self.runtime, "session_id", "") or "")
+        capped = max(1, min(int(limit), 200))
+        try:
+            records = recaller.recent_turns(session_id=wanted or None, limit=capped)
+            if not records and not str(session or "").strip():
+                # 刚起的进程里当前会话是空的，而一个空白的聊天页答不了「刚才聊到哪」。
+                # 没点名会话时退回**最近说过话的那一个** —— 点名了就老实显示它的空。
+                records = recaller.recent_turns(session_id=None, limit=capped)
+                if records:
+                    wanted = str(getattr(records[-1], "session_id", "") or wanted)
+        except Exception as exc:  # noqa: BLE001 - 记忆是增强，读不出来不该让页面白屏
+            return {"attached": True, "session": wanted, "error": type(exc).__name__, "turns": []}
+        return {
+            "attached": True,
+            "session": wanted,
+            "turns": [
+                {
+                    "id": record.id,
+                    "role": _turn_role(record),
+                    "text": record.text,
+                    "at": record.created_at,
+                }
+                for record in records
+            ],
+        }
+
+    def chat_sessions(self, limit: int = 20) -> dict[str, Any]:
+        """有哪些会话，各自多少轮、最近一次是什么时候。**当前那个排第一。**"""
+        recaller = getattr(self.runtime, "memory_recaller", None)
+        current = str(getattr(self.runtime, "session_id", "") or "")
+        if recaller is None:
+            return {"attached": False, "current": current, "sessions": []}
+        try:
+            records = recaller.store.list_records(scope="short", kind="turn", limit=2000)
+        except Exception as exc:  # noqa: BLE001
+            return {"attached": True, "current": current, "error": type(exc).__name__, "sessions": []}
+        grouped: dict[str, dict[str, Any]] = {}
+        for record in records:
+            key = str(getattr(record, "session_id", "") or "")
+            if not key:
+                continue
+            entry = grouped.setdefault(key, {"session": key, "turns": 0, "last": "", "first_text": ""})
+            entry["turns"] += 1
+            at = str(getattr(record, "created_at", "") or "")
+            if at > entry["last"]:
+                entry["last"] = at
+            # 最早那一句当标题 —— 「今天几号」比 `s-9f3a…` 好认得多。
+            entry["first_text"] = record.text[:40]
+        ordered = sorted(grouped.values(), key=lambda row: row["last"], reverse=True)
+        ordered.sort(key=lambda row: row["session"] != current)
+        return {"attached": True, "current": current, "sessions": ordered[: max(1, int(limit))]}
+
+    def dictate(self, seconds: float = 4.0) -> dict[str, Any]:
+        """录一段、**本机**转写、把文字交回页面。**不发送。**
+
+        不发送是刻意的：一个直接把转写结果派发出去的按钮，会让听错的那一次没有挽回余地
+        （14M 的识别器把「打开记事本」听成「打开记账本」是同一个音）。文字回到输入框，
+        发不发由人决定 —— 这也是它和麦克风那条路的唯一区别，那一条有唤醒词和声纹门兜着。
+
+        取的是**门读的那个环形缓冲**（`capture._ring`），所以和唤醒时校验的是同一条信道；
+        `min_peak=0` 因为这里不做准入判断，只是把听到的写下来。
+        """
+        samples, measured = self._snapshot(max(0.5, min(float(seconds), 30.0)), min_peak=0.0)
+        provider = self._require_provider("asr")
+        started = time.perf_counter()
+        try:
+            stream = provider.create_stream()
+            step = 1600  # 100 ms/块 —— 和麦克风回调同一个块长，端点行为才和真机一致
+            for offset in range(0, int(samples.size), step):
+                provider.feed(stream, samples[offset : offset + step], 16000)
+            text = str(provider.finalize(stream) or "")
+        except Exception as exc:  # noqa: BLE001 - 说清哪一层不行
+            raise ApiError(f"转写失败：{type(exc).__name__}: {exc}", status=409) from exc
+        return {
+            "text": text.strip(),
+            "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            **measured,
+        }
 
     # ---------------------------------------------------------------- microphone
 

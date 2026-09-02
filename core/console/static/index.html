@@ -673,6 +673,7 @@ details[open] > summary::before { content: "▾ "; }
     <div class="rail-group">总览</div>
     <a href="#overview" data-view="overview" data-od-id="nav-overview">运行态</a>
     <div class="rail-group">六个模块</div>
+    <a href="#chat" data-view="chat" data-od-id="nav-chat">聊天</a>
     <a href="#models" data-view="models" data-od-id="nav-models">模型配置</a>
     <a href="#keywords" data-view="keywords" data-od-id="nav-keywords">唤醒词</a>
     <a href="#speaker" data-view="speaker" data-od-id="nav-speaker">声纹</a>
@@ -766,6 +767,58 @@ details[open] > summary::before { content: "▾ "; }
 </section>
 
 <!-- ======================================================= 1 模型配置 -->
+<!-- ========================================================= 1 聊天 -->
+<section class="view" id="v-chat" data-od-id="view-chat" hidden>
+  <h2 data-od-id="chat-title">聊天</h2>
+  <p class="sub">
+    和麦克风走的是<b>同一条派发路径</b> —— 意图判定、工具快路径、agent 路由、记忆写入
+    全都一样，区别只有输入是打的还是说的。<b>朗读默认关</b>：合成是阻塞的，开着它一句
+    回答要等音频播完才出现在这里。
+  </p>
+
+  <div class="stack">
+    <div class="panel glass">
+      <div class="line" style="flex-wrap:wrap;gap:var(--space-3)">
+        <label class="check"><input type="checkbox" id="ch-speak"> 朗读回答</label>
+        <span class="note" style="margin:0">·</span>
+        <label for="ch-model" class="note" style="margin:0">模型</label>
+        <input id="ch-model" class="mono" placeholder="relay:claude-opus-5" style="max-width:20em"
+               aria-label="换模型" data-od-id="chat-model">
+        <button id="ch-switch" data-od-id="chat-switch">换</button>
+        <span class="note" style="margin:0" id="ch-model-now"></span>
+      </div>
+      <p class="note" style="margin-top:var(--space-3)">
+        换模型<b>不用重启</b>（这一项和别的配置不一样：它只是一个 URL 加一个名字）。
+        也可以在输入框里直接打 <code>/model relay:claude-opus-5</code>。
+      </p>
+    </div>
+
+    <div class="panel glass">
+      <div class="line" style="justify-content:space-between">
+        <h3 style="margin:0">会话</h3>
+        <button id="ch-reload" data-od-id="chat-reload">刷新</button>
+      </div>
+      <div class="rows" id="ch-sessions" style="margin-top:var(--space-3)"></div>
+    </div>
+
+    <div class="panel glass">
+      <div id="ch-log" role="log" aria-live="polite"
+           style="max-height:46vh;overflow:auto;display:flex;flex-direction:column;gap:var(--space-3)"></div>
+      <p class="note" id="ch-status" role="status" style="margin-top:var(--space-3)"></p>
+      <div class="line" style="margin-top:var(--space-3)">
+        <input id="ch-input" placeholder="说点什么，或者 /model 换模型" autocomplete="off"
+               aria-label="要发送的话" data-od-id="chat-input" style="flex:1">
+        <button id="ch-mic" data-od-id="chat-mic" title="按住说话：录一段，转写进输入框">🎙 说</button>
+        <button id="ch-send" class="primary" data-od-id="chat-send">发送</button>
+      </div>
+      <p class="note" style="margin-top:var(--space-2)">
+        🎙 走的是<b>Vox 自己那支麦克风</b>和本机 ASR（和唤醒时同一条信道），录完自动填进
+        输入框，发不发由你决定 —— 一个直接把转写发出去的按钮会让听错的那次没有挽回余地。
+      </p>
+    </div>
+  </div>
+</section>
+
 <section class="view" id="v-models" data-od-id="view-models" hidden>
   <h2 data-od-id="models-title">模型配置</h2>
   <p class="sub">一套 ASR + TTS + LLM 叫一个方案，多套并存，<code>active</code> 指向生效的那套。</p>
@@ -1439,7 +1492,7 @@ document.addEventListener("keydown", (e) => {
 });
 /* =================================================================== 导航 */
 
-const VIEWS = ["overview", "models", "keywords", "speaker", "agents", "profile", "skills", "orb", "limits", "debug"];
+const VIEWS = ["overview", "chat", "models", "keywords", "speaker", "agents", "profile", "skills", "orb", "limits", "debug"];
 const ITEM_VIEW = { wake: "keywords", asr: "models", tts: "models", speaker: "speaker" };
 
 let currentView = "overview";
@@ -3465,6 +3518,138 @@ $("orb-look-save").onclick = async () => {
   }
 };
 
+/* ====================================================================== 聊天
+
+   和麦克风走同一条派发路径（`/api/text` → `VoiceRuntime.say`），所以这一页没有第二套
+   对话逻辑 —— 它只是那条路的另一个输入口。三个决定写在这里：
+
+   1. **朗读默认关。** `speak_segments` 是阻塞的：开着它，一句 40 字的回答要等音频播完
+      才回到页面上，而聊天界面里那几秒读起来像卡住了。
+   2. **🎙 只填输入框，不发送。** 一个直接把转写派发出去的按钮会让听错的那次没有挽回
+      余地（`打开记事本` / `打开记账本` 在 14M 的识别器上是同一个音）。
+   3. **换模型不重启。** 它是唯一「换一下只是换个名字」的配置，见 `/api/model`。
+*/
+
+let chatSession = "";
+
+function chatBubble(role, text, note) {
+  const mine = role === "user";
+  const wrap = el("div", { class: "kv", style:
+    "display:block;border-left:3px solid " + (mine ? "var(--accent)" : "var(--ring-track)") +
+    ";padding:var(--space-3) var(--space-4)" });
+  wrap.appendChild(el("div", { class: "note", style: "margin:0 0 var(--space-2)" },
+    (mine ? "我" : "Vox") + (note ? "  ·  " + note : "")));
+  const body = el("div", null, text);
+  body.style.whiteSpace = "pre-wrap";
+  wrap.appendChild(body);
+  return wrap;
+}
+
+async function loadChat(session) {
+  const host = $("ch-log");
+  busy(host, "读取会话…");
+  let payload;
+  try { payload = await api("/api/chat/history" + (session ? "?session=" + encodeURIComponent(session) : "")); }
+  catch (err) { failed(host, err.message, () => loadChat(session)); return; }
+  chatSession = payload.session || "";
+  host.textContent = "";
+  if (!payload.attached) {
+    host.appendChild(el("p", { class: "note" }, "记忆没接上，所以这一页没有历史 —— 发出去的话仍然会被回答。"));
+    return;
+  }
+  if (!(payload.turns || []).length) {
+    host.appendChild(el("p", { class: "note" }, "这个会话还没有对话。"));
+    return;
+  }
+  for (const turn of payload.turns) host.appendChild(chatBubble(turn.role, turn.text, turn.at));
+  host.scrollTop = host.scrollHeight;
+}
+
+async function loadChatSessions() {
+  const host = $("ch-sessions");
+  busy(host, "读取…");
+  let payload;
+  try { payload = await api("/api/chat/sessions"); }
+  catch (err) { failed(host, err.message, loadChatSessions); return; }
+  host.textContent = "";
+  if (!(payload.sessions || []).length) {
+    host.appendChild(el("p", { class: "note" }, "还没有任何会话。"));
+    return;
+  }
+  for (const row of payload.sessions) {
+    const current = row.session === payload.current;
+    const line = el("div", { class: "kv" + (current ? "" : " locked") });
+    line.appendChild(el("code", null, (current ? "● " : "") + (row.first_text || row.session)));
+    const open = el("button", null, current ? "当前" : "看");
+    open.onclick = () => loadChat(row.session);
+    line.appendChild(el("div", { class: "val" }, row.turns + " 轮  ·  " + (row.last || "").slice(0, 19)));
+    line.appendChild(open);
+    host.appendChild(line);
+  }
+}
+
+async function switchModel(text) {
+  const note = $("ch-model-now");
+  const wanted = (text || "").trim();
+  if (!wanted) { note.textContent = "先填一个模型名。"; return; }
+  note.textContent = "换…";
+  try {
+    const out = await api("/api/model", { method: "POST", body: { model: wanted } });
+    note.textContent = `现在是 ${out.agent}:${out.model}` + (out.persisted ? "（已写回配置）" : "（仅本次运行）");
+  } catch (err) { note.textContent = "换不了：" + err.message; }
+}
+
+async function sendChat() {
+  const box = $("ch-input");
+  const text = box.value.trim();
+  if (!text) return;
+  /* 斜杠命令在发送之前拦下来 —— 借的是 Hermes 的 `/model provider:model`。 */
+  if (text.startsWith("/model")) {
+    await switchModel(text.slice("/model".length));
+    box.value = "";
+    return;
+  }
+  const log = $("ch-log");
+  log.appendChild(chatBubble("user", text, ""));
+  log.scrollTop = log.scrollHeight;
+  box.value = "";
+  $("ch-send").disabled = true;
+  setText($("ch-status"), "在想…");
+  try {
+    const out = await api("/api/text", { method: "POST", body: { text, speak: $("ch-speak").checked } });
+    const note = [out.route, out.ok ? "" : "失败", out.elapsed_ms ? out.elapsed_ms + "ms" : ""]
+      .filter(Boolean).join("  ·  ");
+    log.appendChild(chatBubble("assistant", out.text || out.reason || "（没有内容）", note));
+    setText($("ch-status"), out.needs_confirmation
+      ? "它要一次确认 —— 确认面只有唤醒球，这一页不提供按钮。" : "");
+  } catch (err) {
+    log.appendChild(chatBubble("assistant", "出错了：" + err.message, "error"));
+    setText($("ch-status"), "");
+  } finally {
+    $("ch-send").disabled = false;
+    log.scrollTop = log.scrollHeight;
+    loadChatSessions();
+  }
+}
+
+$("ch-send").onclick = sendChat;
+$("ch-input").onkeydown = (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendChat(); } };
+$("ch-switch").onclick = () => switchModel($("ch-model").value);
+$("ch-reload").onclick = () => { loadChatSessions(); loadChat(chatSession); };
+$("ch-mic").onclick = async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  setText($("ch-status"), "在听（4 秒）…");
+  try {
+    const out = await api("/api/chat/dictate", { method: "POST", body: { seconds: 4.0 } });
+    $("ch-input").value = out.text || "";
+    setText($("ch-status"), out.text ? `听到：${out.text}（${out.elapsed_ms}ms，发不发由你）` : "没听到内容。");
+    $("ch-input").focus();
+  } catch (err) {
+    setText($("ch-status"), "转写失败：" + err.message);
+  } finally { button.disabled = false; }
+};
+
 /* ================================================== 配置读取（两处共用） */
 
 async function loadConfigFiles() {
@@ -3627,6 +3812,10 @@ renderAgentConfig();
 renderProfile();
 renderMcp();
 loadConfigFiles();
+/* 聊天那一页也在启动时拉一次。**独立的两条调用**，和上面几条一样 —— 一条失败不该
+   把别的页拖黑（`/api/state` 500 的那两天就是这么保住其余几页的）。 */
+loadChatSessions();
+loadChat("");
 
 /* 2.3 秒而不是 2 或 5：够快到点了按钮能看见结果，够慢到不让一个空闲页面每秒都去敲一次运行时。
    事件流轮询（上一版的 1.1 秒那条）随面板一起删掉了。
