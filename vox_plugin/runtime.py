@@ -387,12 +387,16 @@ class VoiceRuntime:
 
     # -------------------------------------------------------------------- turns
 
-    def say(self, text: str) -> DispatchResult:
+    def say(self, text: str, *, speak: bool = True) -> DispatchResult:
         """Run one turn and recover to ``LISTENING`` on unexpected failures.
 
         The audio callback only queues text; nevertheless this method is also
         callable by a worker or UI thread, so dispatcher and confirmation errors
         are contained here rather than escaping into the capture loop.
+
+        ``speak=False`` 走完同样的一轮但不出声。两个调用方要它：控制台的打字聊天
+        （`speak_segments` 是阻塞的，不给这个开关一句 40 字的回答要等音频播完才出现在
+        聊天框里）和消息通道（回复要发到微信，不该同时从本机音箱放出来）。
         """
         if not self._started:
             self.start()
@@ -427,7 +431,7 @@ class VoiceRuntime:
             self._active_task_id = None
 
         try:
-            self._speak_and_follow_up(self._spoken(result))
+            self._speak_and_follow_up(self._spoken(result), speak=speak)
         except Exception as exc:  # noqa: BLE001 - preserve a usable runtime
             self._emit_failure(task, exc)
             self._recover_turn()
@@ -524,7 +528,7 @@ class VoiceRuntime:
         )
         return report
 
-    def _speak_and_follow_up(self, reply: str) -> None:
+    def _speak_and_follow_up(self, reply: str, *, speak: bool = True) -> None:
         """说出这一轮的回答，然后**留着话筒**等下一句 —— 连续对话。
 
         三件事按这个顺序，每一条都有它必须在这个位置的理由：
@@ -543,10 +547,10 @@ class VoiceRuntime:
         或者用托盘。
         """
         capture = getattr(self.plugin, "audio_capture", None)
-        if self.acks is not None or self.plugin.tts is not None:
+        if speak and (self.acks is not None or self.plugin.tts is not None):
             self._mute_input(ACK_MUTE_CAP_S)
         try:
-            self._complete_and_watch_tts(reply)
+            self._complete_and_watch_tts(reply, speak=speak)
         finally:
             self._mute_input(ACK_MUTE_TAIL_S)
         self._following_up = False
@@ -568,7 +572,7 @@ class VoiceRuntime:
                 follow_up_s=self.follow_up_seconds(),
             )
 
-    def _complete_and_watch_tts(self, reply: str) -> None:
+    def _complete_and_watch_tts(self, reply: str, *, speak: bool = True) -> None:
         """说出这一轮的回答，**并且把合成失败写进日志**。
 
         `VoicePlugin.complete_turn` 刻意吞掉合成异常（一次合成失败不该结束回合），
@@ -581,7 +585,7 @@ class VoiceRuntime:
         """
         before = int(getattr(self.plugin, "tts_failures", 0) or 0)
         try:
-            self.plugin.complete_turn(reply)
+            self.plugin.complete_turn(reply, speak=speak)
         finally:
             after = int(getattr(self.plugin, "tts_failures", 0) or 0)
             if after > before:

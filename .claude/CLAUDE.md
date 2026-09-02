@@ -42,6 +42,7 @@
 | 工具/记忆与语音路径接线 | `pytest tests/test_memory.py tests/test_plugin_tools.py -q` | **87 passed** |
 | `core/agents/` `config/agents.toml` | `pytest tests/test_agent_contract.py tests/test_agent_cli.py tests/test_agent_evox.py tests/test_agent_acp.py tests/test_agent_http.py -q` | 全绿（contract 14 + cli 28 + evox 17 + acp 12 + http 14） |
 | `core/dispatch/` | `pytest tests/test_router.py tests/test_dispatcher.py tests/test_aggregator.py tests/test_intent.py tests/test_breaker.py -q` | **234 passed**（router 35 + dispatcher 47 + aggregator 20 + intent 113 + breaker 19；含能力闸门与「后端没装」降级） |
+| `core/channels/` `config/channels.toml` | `pytest tests/test_channels.py tests/test_channel_crypto.py -q` | **41 passed**（channels 26 + crypto 15；crypto 那 15 条钉在 FIPS-197 官方向量上，因为那份 AES 是我们自己写的） |
 | `core/session_bridge.py` | `pytest tests/test_session_bridge.py tests/test_plugin_tools.py -q` | 全绿 |
 | `desktop/src/` | `cd desktop && npm run build` | tsc + vite 通过 |
 | `desktop/src/sequence.ts` `scripts/build_orb_assets.py` `desktop/public/orb/` | 上面那条 + **六态渲染取证**（Edge headless 打 `demo.html?state=<态>&big=1&t=1.4`，深浅两底各一轮） | 六态互不相同（听/思/说三档能量 + 朱红 + 琥珀 + 暗）· 球外能透出桌面纹理（雪碧图必须带 alpha）· 中心是白热光核不是黑洞 · 生产页 `index.html?state=idle` **画布全空** |
@@ -233,6 +234,15 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - **「打开 X」只有一个工具：`app.open` 先查本机白名单，再查 `[apps.sites]` 网页表** —— 「给我打开抖音」要的是网页版而抖音没装客户端。**不让意图层去分「X 是应用还是网站」**：那等于让它知道这台机器装了什么。两张表都是显式白名单，安全姿态一样；同名时本机应用赢
 - **「我想听 X 的歌」走 `play.song` → `app.open` 带 `query`** —— 标记词（歌/音乐/一首/专辑）是这条规则唯一的边界，少了它「我想听你的意见」会去开播放器。`[apps.play]` 是每个应用的「带词打开」模板：`http(s)://` 交给浏览器（**已验证能放出声**），其他形状（`orpheus://search/{q}`）作为**一个 argv** 交给 exe。**网易云在这台机器上没注册 `orpheus://` 协议**（`HKCR`/`HKCU\Software\Classes` 只有 `cloudmusic.*` 文件关联），把 URI 当 argv 传进去进程能正常起来，但客户端有没有真跳到搜索结果是 REAL-WIN、未验 —— 所以默认给的是网页播放器那一条
 - **`urllib` 的默认 User-Agent 会被 `api.justwoker.icu` 挡在 Cloudflare 1010** —— 2026-09-03 排查凭据时踩过：三个 key 全报 `HTTP 403 error code: 1010`，看起来像全都无效，加上 `core/agents/http.py` 的 `API_USER_AGENT` 之后全是 200。**拿裸 urllib 探这个端点会得出完全错误的结论**，探它必须带项目自己的 UA
+- **微信通道已落地（`core/channels/`，默认关）** —— 走**腾讯 iLink Bot API**（`https://ilinkai.weixin.qq.com`，媒体 CDN `https://novac2c.cdn.weixin.qq.com/c2c`），协议事实抄自本机的 Hermes 源码（`gateway/platforms/weixin.py`，社区实现非腾讯文档）。六条容易记错的：
+  - **每条出站回复必须回带该 peer 最新的 `context_token`**，漏了就发不出去。它在 `IncomingMessage.reply_context` 里原样传回，上层**不读它**（那是那一个平台的私事）
+  - **入站语音有两份转写，别只用一份**：腾讯自带的 `voice_item.text`，和原始音频。顺序是「能下载到原件且格式解得开 → 本机 ASR」，否则退回腾讯的并**在文本里标注来源**（`PROVIDER_STT_NOTE`）。腾讯那份对非中文是错的（Hermes issue #27300 是一条俄语语音被转成英文）
+  - **微信语音多是 SILK，我们解不了**（没有纯 Python 解码器）。`core/channels/audio.py` 的 `DECODABLE` 只收 wav/flac/ogg，认不出的**如实返回 None** —— 把 SILK 字节硬喂给识别器会得到一段噪声的转写
+  - **出站原生语音气泡未验证**：Hermes 自己的 `send_voice` 注释写着 `not proven-working`，它退化成文件附件。我们默认也走文件附件（对方能播），`voice_native = true` 才试原生 —— 那是 REAL-WEIXIN 级
+  - **AES-128-ECB 是我们自己写的**（`core/channels/crypto.py`，纯 Python，因为这台机器没有 `cryptography`）。S-box 是算的不是抄的，钉在 FIPS-197 官方向量上。ECB 不是密码学选择是协议要求 —— 密钥每个文件一把、随机生成、随消息交给对端
+  - **上传用 POST 不用 PUT**（上游踩过：PUT 在微信 CDN 上回 404），媒体只从 `*.weixin.qq.com` 下载（一个能指向任意主机的字段就是一次 SSRF，有测试钉着）
+- **微信这条路上 `speaker` 永远是 `None`** —— 一个微信 id 证明不了对面是谁，所以 `shell.run` 天然进不来（它要 `require_verified_speaker`）。这不是限制，是这条链路唯一正确的答案
+- **`say(text, speak=False)` 走完同一轮但不出声** —— 控制台打字聊天与消息通道都要它。`speak_segments` 是阻塞的，不给这个开关一句 40 字的回答要等音频播完才出现在聊天框里。**事件序列一个不少**（`tts.chunk` 照发），少的只有声音。改 `complete_turn` 的桩要跟着加这个关键字，否则测到的是 TypeError 而不是它要验的异常
 - **声纹拒绝的原因必须带「差多少」和「窗里有多少语音」** —— 2026-09-02 真机验收：同人相似度 0.506/0.548/0.556/0.568（阈值 0.5），两次被拒 0.448，余量只有百分之几。使用者的观察给出机制：「只说唤醒词过不了，『你好小沃，现在几点了』能过」—— 校验窗 1.5 秒里唤醒词只占约 0.8 秒，说话人嵌入在语音不足 1.5 秒时明显退化（`MIN_VOICED_FOR_STABLE_EMBEDDING`）。`input_quality()` 现在还报 `seconds` 与 `active`（能量比，**不是 VAD**，只进原因不参与判决）
 - **`.vox-ref/rec/*.wav` 不能用来评估当前的声纹档案** —— 那几段是 2026-08-29 用另一只麦克风录的，拿它们比当前档案得 0.15–0.32，而同一个人现场唤醒是 0.51–0.57。这个模型对采集信道很敏感，跨信道的分数说明不了任何事（`.vox-ref/speaker_window_probe.py` 那张表的用途仅此而已）
 - **一个凭据变量只服务一个角色** —— 云端 TTS 的 key 在 `VOX_TTS_KEY`（35 字符的百炼 key），聊天那四个（`VOX_LLM_KEY` / `VOX_AGENT_HTTP_TOKEN` / `VOX_DASHSCOPE_KEY` / `ANTHROPIC_AUTH_TOKEN`）都是中转站的 key。2026-09-01 的「回答不出声」就是 `config/voice.toml` 的 `tts.key_env` 指着 `VOX_DASHSCOPE_KEY`（名字叫 DashScope，装的是中转站 key）→ 百炼回 401 `InvalidApiKey`。两个角色共用一个变量名时，把一边修好等于把另一边弄坏

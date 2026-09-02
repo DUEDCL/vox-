@@ -242,13 +242,18 @@ class VoicePlugin:
             self.last_reply = result.get("reply")
         return events
 
-    def complete_turn(self, reply: str) -> list[dict]:
+    def complete_turn(self, reply: str, *, speak: bool = True) -> list[dict]:
         """Finish the pending turn: reply -> speech -> back to listening.
 
         The reply is spoken as a queue of sentences (see ``split_speech``):
         one ``tts.chunk`` per sentence, audio starting once the first one
         renders. A barge-in mid-turn drops the not-yet-spoken remainder;
         memory stores the full reply either way.
+
+        ``speak=False`` 走完**同样的事件序列**但不出声。控制台的打字聊天用它：那一页上
+        「要不要念出来」是个勾选框，而 `speak_segments` 是阻塞的 —— 不给这个开关的话，
+        一句 40 字的回答要等 10 秒才在聊天框里出现（音频播完才返回）。事件序列不变是
+        刻意的：`tts.chunk` 仍然发，唤醒球照常显示这一轮说了什么，少的只有声音。
         """
         if self.machine.state != VoiceState.THINKING:
             raise RuntimeError("turn can only complete while thinking")
@@ -257,7 +262,7 @@ class VoicePlugin:
         for index, chunk in enumerate(chunks):
             events.append(self._event("tts.chunk", {"index": index, "text": chunk}))
         events.append(self._state_event(VoiceState.SPEAKING, "tts playback"))
-        if self.tts is not None:
+        if self.tts is not None and speak:
             # Audio is the enhancement; a TTS failure must not end the turn.
             #
             # **但它必须留痕。** 这里此前是 `except Exception: pass` —— 一个字都不留。

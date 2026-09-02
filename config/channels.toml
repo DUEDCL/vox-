@@ -1,0 +1,51 @@
+# 消息平台通道（微信）—— **默认全关**
+#
+# 可用环境变量覆盖本文件位置：VOX_CHANNELS_CONFIG
+# 未知的键会**报错而不是被忽略**：一个拼错的 enabled 会让「我开了微信但它没反应」
+# 变成一次无从下手的排查，而报错直接指出那一行。
+#
+# ## 这里永远不写密钥
+#
+# 和 config/agents.toml、config/voice.toml 同一条规矩：只写**环境变量名**（token_env），
+# 值一律从环境变量读。写 token = "..." 会因为「未知键」被拒。
+#
+# ## 打开它意味着什么
+#
+# 这条通道**是出网的**：长轮询 https://ilinkai.weixin.qq.com，从
+# https://novac2c.cdn.weixin.qq.com 收发媒体。红线 1 在 ADR 008 之后是「音频本地，
+# 算力上云」，而「把消息发到微信」是你的显式选择 —— 所以它默认关，打开是一次动作。
+#
+# **Vox 麦克风录到的音频永不出网。** 出站语音只可能是 TTS 合成的产物；
+# core/channels/ 这个包不 import 采集侧，那条路在结构上就不通。
+
+[weixin]
+# 默认关。打开前先把 token 存进环境变量（控制台「密钥」那一栏，或 .env）。
+enabled = false
+
+# 去读哪个环境变量拿 iLink bot token。**名字，不是值。**
+token_env = "VOX_WEIXIN_TOKEN"
+
+# 回复带不带语音。默认带 —— 而**文字永远都带**：一条只有语音的回复在电脑上看不了，
+# 也搜不到。
+reply_with_voice = true
+
+# 出站语音走原生语音气泡（微信里显示成一条语音）还是文件附件（对方点开能播）。
+#
+# **默认文件附件，因为原生那条没有被验证过。** 上游 Hermes 自己的 send_voice 注释写着
+# 「Native outbound Weixin voice bubbles are not proven-working in the upstream
+# reference implementation」，它也退化成文件附件。打开这一项等于去试那条路 ——
+# 它是 REAL-WEIXIN 级，只有你在微信里看得到结果。试完把结论记进
+# docs/research/prototype-results.md。
+voice_native = false
+
+# 入站语音优先用**本机 ASR**（能下载到原件、而且格式解得开时）。
+#
+# 关掉就一律用腾讯自带的 STT 文本。默认开的理由：腾讯那份对非中文是错的
+# （Hermes 的 issue #27300 是一条俄语语音被转成了英文），而本机那个是我们自己调过的。
+# 注意微信的语音多是 **SILK** 编码，而没有纯 Python 的 SILK 解码器 —— 那种情况下
+# 自动退回腾讯的文本并在消息里标注来源（见 core/channels/audio.py 的 DECODABLE）。
+local_asr = true
+
+# 长轮询挂多久（秒）。35 是上游用的值：更短会让空闲时的请求量上去，更长会撞上
+# 中间设备的空闲超时。
+poll_timeout_s = 35.0

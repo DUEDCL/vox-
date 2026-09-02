@@ -628,7 +628,9 @@ def test_completion_failure_recovers_from_speaking_state():
         [AgentChunk(kind="text", text="answer"), AgentChunk(kind="done")]
     )
 
-    def fail_completion(_reply):
+    def fail_completion(_reply, *, speak=True):
+        """签名要跟着生产走。少了 ``speak`` 这个关键字，这条测的就不是「完成失败之后能
+        恢复」而是「桩的签名不对」—— 抛出来的会是 TypeError 而不是它要验的那个异常。"""
         runtime.plugin._state_event(VoiceState.SPEAKING, "test playback")
         raise RuntimeError("completion failed")
 
@@ -639,6 +641,41 @@ def test_completion_failure_recovers_from_speaking_state():
     assert result.ok is False
     assert result.reason == "turn completion failed: RuntimeError"
     assert runtime.plugin.machine.state == VoiceState.LISTENING
+
+
+def test_a_silent_turn_runs_everything_except_the_speaker():
+    """``say(speak=False)``：同一轮，同样的事件，不出声。
+
+    两个调用方要它 —— 控制台的打字聊天（`speak_segments` 是阻塞的，不给这个开关一句
+    40 字的回答要等音频播完才出现在聊天框里）和消息通道（回复要发到微信，不该同时从
+    本机音箱放出来）。**事件序列必须一个不少**：`tts.chunk` 照发，唤醒球照常显示这一轮
+    说了什么，少的只有声音。
+    """
+    spoken: list[object] = []
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+    runtime._started = True
+    runtime.adapters = {}
+    # 生产里 ``start()`` 最后一步就是这一行。少了它 ``runtime.seen`` 永远是空的，
+    # 而这条测试要断言的正是「事件一个不少」。
+    runtime.plugin.on_event = runtime.on_event
+    runtime.dispatcher = FakeDispatcher(
+        [AgentChunk(kind="text", text="安静的回答"), AgentChunk(kind="done")]
+    )
+    runtime.plugin.attach_tts(
+        SimpleNamespace(
+            speak_segments=lambda chunks: spoken.append(chunks),
+            is_stopped=lambda: False,
+            stop=lambda: None,
+        )
+    )
+
+    result = runtime.say("讲个笑话", speak=False)
+
+    assert result.ok is True
+    assert spoken == [], "speak=False 时不许碰合成器"
+    types = [event["type"] for event in runtime.seen]
+    for expected in ("turn.started", "asr.final", "llm.delta", "tts.chunk", "turn.done"):
+        assert expected in types, expected
 
 
 # ---------------------------------------------------------------------- 托盘

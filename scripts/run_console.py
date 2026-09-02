@@ -35,9 +35,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from typing import Any
+
 from core.audio import load_voice_config
 from core.audio.acks import AckLibrary, parse_acks
 from core.audio.config import ACK_CACHE_DIR, orb_environment, repo_root
+from core.channels.config import load_channels_config, open_weixin
+from core.channels.runner import ChannelRunner
 from core.console import ConsoleApi, ConsoleError, ConsoleServer
 from core.env_file import load_env_file
 from vox_plugin.runtime import VoiceRuntime
@@ -101,6 +105,53 @@ def resolve_port(explicit: int | None) -> int:
     return DEFAULT_PORT
 
 
+def start_channels(
+    runtime: VoiceRuntime, stack: Any, *, disabled: bool = False
+) -> tuple[Any, Any]:
+    """按 ``config/channels.toml`` 起消息通道。返回 (runner, thread)，关着时是 (None, None)。
+
+    **默认关**，所以这个函数在出厂配置下什么都不做、也不出网。打开之后它在**自己的线程**上
+    长轮询：那条链路上的 `poll` 会挂 35 秒，放在主线程里等于控制台停摆。
+
+    ASR 与 TTS 直接借语音栈那两个 —— 微信来的语音和麦克风来的语音在识别那一层是同一件事，
+    给通道单独建一份模型等于把 110 MB 的 ASR 在内存里放两份。
+    """
+    if disabled:
+        return None, None
+    try:
+        config = load_channels_config()
+        channel = open_weixin(config)
+    except Exception as exc:  # noqa: BLE001 - 通道配置坏了不该拖死控制台
+        print(f"warning: 消息通道没起来：{type(exc).__name__}: {exc}")
+        return None, None
+    if channel is None:
+        return None, None
+    status = channel.check()
+    if not status.get("available"):
+        print(f"weixin: 配了但用不了 —— {status.get('reason')}")
+        return None, None
+    runner = ChannelRunner(
+        channel=channel,
+        runtime=runtime,
+        reply_with_voice=bool(config.get("weixin.reply_with_voice", True)),
+        asr=getattr(stack, "asr", None) if config.get("weixin.local_asr", True) else None,
+        tts=getattr(stack, "tts", None),
+    )
+    thread = threading.Thread(
+        target=runner.run_forever,
+        kwargs={"poll_timeout_s": float(config.get("weixin.poll_timeout_s", 35.0))},
+        name="vox-weixin",
+        daemon=True,
+    )
+    thread.start()
+    print(
+        f"weixin: 在听（语音回复 {'开' if runner.reply_with_voice else '关'}，"
+        f"本机转写 {'开' if runner.asr is not None else '关'}，"
+        f"出站语音走 {'原生气泡（未验证）' if channel.voice_native else '文件附件'}）"
+    )
+    return runner, thread
+
+
 def pump_forever(runtime: VoiceRuntime, stop: threading.Event) -> None:
     """Run queued utterances as turns, on this thread and not the audio callback.
 
@@ -134,6 +185,11 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1", help="loopback only; checked, not trusted")
     parser.add_argument("--voice", action="store_true", help="open the microphone at startup")
     parser.add_argument("--no-orb", action="store_true", help="do not spawn the wake orb")
+    parser.add_argument(
+        "--no-weixin",
+        action="store_true",
+        help="不起微信通道（即使 config/channels.toml 里开着）",
+    )
     parser.add_argument("--no-browser", action="store_true", help="do not open a browser")
     parser.add_argument("--silent", action="store_true", help="no TTS, answers stay text")
     parser.add_argument(
@@ -208,6 +264,8 @@ def main() -> int:
             print(f"warning: tts did not load: {status.details.get('reason')}")
 
     api = ConsoleApi(runtime, stack)
+    # 消息通道（微信）。**由配置决定，默认关** —— 打开它意味着出网，见 config/channels.toml。
+    channel_runner, channel_thread = start_channels(runtime, stack, disabled=args.no_weixin)
     try:
         server = ConsoleServer(
             api,
@@ -262,7 +320,11 @@ def main() -> int:
         print("stopping")
     finally:
         stop.set()
+        if channel_runner is not None:
+            channel_runner.stop()
         pump.join(timeout=2.0)
+        if channel_thread is not None:
+            channel_thread.join(timeout=2.0)
         server.stop()
         api.mic_stop()
         runtime.close()
