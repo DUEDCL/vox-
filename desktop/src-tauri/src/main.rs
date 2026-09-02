@@ -515,6 +515,12 @@ fn main() {
             if std::env::var("VOX_SHOW_TEXT").map(|v| v.trim() == "1").unwrap_or(false) {
                 q.push("text=1".to_string());
             }
+            // `VOX_ORB_RENDERER=bot` 换到第十二代（bloub，有脸的实体球）。默认不带这个参数,
+            // 前端就走现行的 AE 雪碧图 —— 两层并存,所以出厂行为一个字节没变。
+            // **只认 `bot` 这一个值**：拼错了要落在旧的那一层上,而不是落在一个空白的球上。
+            if std::env::var("VOX_ORB_RENDERER").map(|v| v.trim() == "bot").unwrap_or(false) {
+                q.push("renderer=bot".to_string());
+            }
             let url = if q.is_empty() {
                 "index.html".to_string()
             } else {

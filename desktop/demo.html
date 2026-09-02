@@ -75,6 +75,14 @@
   </div>
   <div class="side">
     <h2>唤醒球 · 实机演示</h2>
+    <!-- 渲染层切换。两层并存而不是替换：右边那个是第十二代（bloub，有脸的实体球），
+         左边是现行的 AE 预渲染序列。**同一页上切**，所以「新的是不是更好」不靠记忆比较。
+         生产侧默认仍是左边，切过去要 `?renderer=bot`（见 src/main.ts 的 RENDERER）。 -->
+    <div class="grp">渲染层</div>
+    <div class="row">
+      <button id="rSeq" class="on">AE 雪碧图</button>
+      <button id="rBot">bloub</button>
+    </div>
     <div class="grp">一条链（唤醒 → 听 → 思 → 说 → 收起）</div>
     <div class="row"><button id="run" class="run">跑完整流程</button><button id="stop">收起</button></div>
     <div class="grp">单态</div>

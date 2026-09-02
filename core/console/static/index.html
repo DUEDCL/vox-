@@ -1073,7 +1073,20 @@ details[open] > summary::before { content: "▾ "; }
       <h3>尺寸与文字（本页只做预览，后端还没有这两个键）</h3>
       <div class="grid2">
         <div>
-          <label for="orb-size">大小（96–420，默认 140）</label>
+          <label for="orb-renderer">渲染层</label>
+          <select id="orb-renderer" data-od-id="orb-renderer">
+            <option value="seq" selected>AE 雪碧图（现行，第十一代）</option>
+            <option value="bot">bloub（第十二代，有脸的实体球）</option>
+          </select>
+          <p class="note">
+            两层<b>并存</b>，不是替换 —— 选 bloub 之后 <code>desktop/src/sequence.ts</code>、
+            <code>core.ts</code>、<code>public/orb/</code> 一个字节都没动，改回来只要把这里选回去。
+            bloub 那一层<b>零资产</b>（纯矢量，2837 行纯计算），所以它不会「加载失败」；
+            现行那层依赖 <code>public/orb/*.png</code> 约 4 MB。
+            两层各自完整，切换<b>要重启球</b>（值在启动时读一次）。
+            对比两层长什么样：<code>desktop/demo.html</code> 右上角那两个按钮，同一页上切。
+          </p>
+          <label for="orb-size" style="margin-top:var(--space-5)">大小（96–420，默认 140）</label>
           <div class="line">
             <input id="orb-size" type="range" min="96" max="420" step="4" value="140" data-od-id="orb-size">
             <span class="mono" id="orb-size-out" style="min-width:9em;color:var(--fg-2)"></span>
@@ -1099,7 +1112,7 @@ details[open] > summary::before { content: "▾ "; }
       <div class="block">
         <h3>现在只能这样传</h3>
         <p class="note" style="margin-top:0">
-          <code>config/orb.toml</code> 还没建，这两项目前只是环境变量，由 Rust 侧拼进 URL query。
+          <code>config/orb.toml</code> 还没建，这三项目前只是环境变量，由 Rust 侧拼进 URL query。
           复制下面这行到启动环境里：
         </p>
         <input id="orb-env" readonly class="mono" aria-label="启动环境变量行" data-od-id="orb-env">
@@ -3387,10 +3400,16 @@ function renderOrbPreview() {
   $("orb-measure").textContent =
     `布局盒 ${size}px（虚线），球体约 ${ball}px —— 盒比球大是第九代刻意留的边，光晕与阴影住在里面。` +
     `这里用的是同一颗柔光斑当尺寸标尺，不是球的渲染器。`;
-  $("orb-env").value = `VOX_ORB_SIZE=${size}` + ($("orb-text").value === "1" ? " VOX_SHOW_TEXT=1" : "");
+  $("orb-env").value = `VOX_ORB_SIZE=${size}`
+    + ($("orb-text").value === "1" ? " VOX_SHOW_TEXT=1" : "")
+    // 只在选了 bloub 时出现这一项 —— 不带这个变量就是现行的那一层，所以「默认」不需要
+    // 在环境里写任何东西。写成 `VOX_ORB_RENDERER=seq` 也能跑（Rust 只认 `bot`），但那会
+    // 让人以为不写就没有默认值。
+    + ($("orb-renderer").value === "bot" ? " VOX_ORB_RENDERER=bot" : "");
 }
 $("orb-size").oninput = renderOrbPreview;
 $("orb-text").onchange = renderOrbPreview;
+$("orb-renderer").onchange = renderOrbPreview;
 $("orb-copy").onclick = async () => {
   try { await navigator.clipboard.writeText($("orb-env").value); $("orb-copy-note").textContent = "已复制。"; }
   catch { $("orb-env").select(); $("orb-copy-note").textContent = "复制被拦，已选中，按 Ctrl+C。"; }

@@ -124,15 +124,20 @@ export class BotRenderer {
     this.engine.setState(STATE_MAP[next], now);
   }
 
-  /** 立刻落到当前态的完整姿态，跳过入场 morph。
+  /** 跳过入场 morph，并把状态自己的动画时间**对齐到绝对时间**。
 
-      **静态取证必须调它。** `sample(now)` 在 `now == setState 的时刻`时 ratio 为 0，
-      `blendPose` 返回的是**上一个态**的姿态 —— 从 hidden 出来时那是 `sleep`，于是截图里
-      是一个直径十几像素的点，读起来像「渲染层坏了」。实测走过这一步：listening 的画布
-      只有 962 个非透明像素（该有约 36000）。序列层那句 `motion.w = 1` 修的是同一件事。 */
-  settle(now: number): void {
+      两件事都必须做，而只做前一件会静默画错。`reset(id, now)` 会把状态起点设在 `now`，
+      于是 `sample(now)` 拿到的 `local` 是 **0** —— 每个态都停在自己的第一帧上。实测代价：
+      `thinking` 的 `emerge` 在 local=0 时是 0.3，三个点只张开到 ±0.167 半径而不是 ±0.557，
+      渲出来是两团挤在一起的光斑而不是三个分开的点，而读数（态、点数、颜色）**全是对的**。
+      所以起点固定在 0，`local` 就等于取证给的那个 `t`，同一个 URL 每次渲同一帧。
+
+      **静态取证必须调它。** 不调的话 ratio 为 0，`blendPose` 返回的是**上一个态** ——
+      从 hidden 出来时那是 `sleep`，截图里只有一个直径十几像素的点（实测 962 个非透明像素，
+      该有约 36000）。序列层那句 `motion.w = 1` 修的是同一件事的前半。 */
+  settle(): void {
     if (this.state === 'hidden') return;
-    this.engine.reset(STATE_MAP[this.state], now);
+    this.engine.reset(STATE_MAP[this.state], 0);
   }
 
   /** 清空。`hidden` 走这里而不是画一个「待机的球」—— 判据是画布亮像素为 0。 */

@@ -899,7 +899,7 @@ reportLayout(true);
   motion.w = 1;
   // 序列层用 `motion.w = 1` 跳过淡化，bloub 那一层的对等动作是 `settle` —— 都是「静态
   // 一帧要看的是这一态，不是它正从上一态走过来的中途」。
-  bot.settle(t);
+  bot.settle();
   drawCore();
 })();
 
