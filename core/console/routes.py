@@ -1270,11 +1270,24 @@ class ConsoleApi:
 
     # -------------------------------------------------------------------- turns
 
-    def text(self, text: str) -> dict[str, Any]:
+    def switch_model(self, model: str, *, persist: bool = True) -> dict[str, Any]:
+        """**不重启就换 LLM。** 借的是 Hermes 的 `/model provider:model`。
+
+        为什么只有模型能热切：它是这个产品里唯一「换一下只是换个名字」的配置。唤醒词、
+        麦克风、球换一次要重建一个常驻对象（模型文件、音频流、子进程），而 LLM 后端只是
+        一个 URL 加一个名字 —— 让它跟着「重启生效」走，等于把一次两秒的动作变成十几秒的
+        停顿。理由与三件事的清单见 ``VoiceRuntime.switch_llm``。
+        """
+        try:
+            return self.runtime.switch_llm(model, persist=bool(persist))
+        except (ValueError, RuntimeError) as exc:
+            raise ApiError(str(exc), status=409) from exc
+
+    def text(self, text: str, *, speak: bool = True) -> dict[str, Any]:
         """Run one turn from typed text, exactly as ``run_desktop.py`` does."""
         if not isinstance(text, str) or not text.strip():
             raise ApiError("text is required")
-        result = self.runtime.say(text.strip())
+        result = self.runtime.say(text.strip(), speak=bool(speak))
         return {
             "route": result.route,
             "ok": bool(result.ok),

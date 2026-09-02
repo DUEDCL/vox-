@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
 from core.agents.contract import AgentChunk, AgentDescriptor, Task
-from core.agents.registry import apply_llm_profile, load_agents_config, open_agents
+from core.agents.registry import LLM_AGENT, apply_llm_profile, load_agents_config, open_agents
 from core.audio.acks import ACK_MUTE_CAP_S, ACK_MUTE_TAIL_S
 from core.desktop_bridge import DesktopBridge, DesktopBridgeError, find_desktop_binary
 from core.dispatch import DefaultAggregator, DefaultRouter, Dispatcher, DispatchResult
@@ -595,6 +595,90 @@ class VoiceRuntime:
                     level="error",
                     failures=after,
                 )
+
+    def switch_llm(
+        self, model: str, *, agent: str = LLM_AGENT, persist: bool = True
+    ) -> dict[str, Any]:
+        """**不重启就换模型。** 借的是 Hermes 那条 `/model provider:model`。
+
+        为什么这一条值得单独做：模型是这个产品里唯一「想试一下就换、换错了马上换回去」的
+        配置。它和唤醒词、麦克风、球不一样 —— 那几个换一次要重建一个常驻对象（模型文件、
+        音频流、子进程），而 LLM 后端只是一个 URL 加一个名字。让它跟着「重启生效」走，
+        等于把一次两秒的动作变成一次十几秒的停顿。
+
+        做的事只有三件：换掉适配器、把新的描述子注册回路由、（可选）写回
+        `config/models.toml`。**熔断与历史成绩不动** —— `router.register` 明写它不碰那些，
+        而换个模型名不该把这个后端过去的失败记录清空。
+
+        `persist=False` 用于「只想试这一句」：进程内生效，重启回到文件里那个。
+        """
+        if self.dispatcher is None or not self.adapters:
+            raise RuntimeError("agent 还没起来，没法换模型")
+        wanted = str(model or "").strip()
+        if not wanted:
+            raise ValueError("要一个模型名")
+        # 收「provider:model」这种写法（Hermes 的形状），冒号左边就是 agent 名。
+        if ":" in wanted:
+            head, _, tail = wanted.partition(":")
+            if head.strip():
+                agent = head.strip()
+            wanted = tail.strip()
+        if not wanted:
+            raise ValueError("冒号右边是空的")
+        current = self.adapters.get(agent)
+        if current is None:
+            raise ValueError(f"没有名为 {agent!r} 的后端（有的是：{', '.join(sorted(self.adapters))}）")
+        url = getattr(current, "url", "")
+        if not url:
+            raise ValueError(f"{agent} 不是 http 后端，换模型这条路只对 http 后端成立")
+        from core.agents.http import HttpAgentAdapter
+
+        descriptor = current.describe()
+        replacement = HttpAgentAdapter(
+            url=url,
+            name=descriptor.name,
+            capabilities=descriptor.capabilities,
+            cost=descriptor.cost,
+            latency_ms=descriptor.latency_ms,
+            timeout_s=descriptor.timeout_s,
+            model=wanted,
+            key_env=getattr(current, "key_env", ""),
+        )
+        previous = getattr(current, "model", "")
+        self.adapters[agent] = replacement
+        self.dispatcher.router.register(replacement.describe())
+        self._close_resource(current)
+        wrote = ""
+        if persist:
+            wrote = self._persist_llm_model(wanted)
+        self.log(
+            "model",
+            f"换模型：{agent} {previous or '(未设)'} → {wanted}"
+            + (f"，已写回 {wrote}" if wrote else "，仅本次运行"),
+            agent=agent,
+            model=wanted,
+            persisted=bool(wrote),
+        )
+        return {"agent": agent, "model": wanted, "previous": previous, "persisted": wrote}
+
+    def _persist_llm_model(self, model: str) -> str:
+        """写回 `config/models.toml` 的当前方案。失败不抛 —— 换模型已经生效了。"""
+        try:
+            from core.models_config import (
+                load_models_config,
+                models_config_path,
+                write_profile_kind,
+            )
+
+            config = load_models_config()
+            active = str(config.get("active") or "")
+            if not active:
+                return ""
+            write_profile_kind(active, "llm", {"model": model}, path=models_config_path())
+            return "config/models.toml"
+        except Exception as exc:  # noqa: BLE001 - 写不回去不该让换模型失败
+            self.log("model", f"换模型生效了，但写回配置失败：{type(exc).__name__}: {exc}", level="warn")
+            return ""
 
     def follow_up_seconds(self) -> float:
         """连续对话的窗口有多长。**由采集侧的 ``listen_grace_s`` 决定，不另设一个。**

@@ -223,7 +223,17 @@ class ConsoleServer:
         elif method == "POST":
             payload = body if isinstance(body, dict) else {}
             if path == "/api/text":
-                return api.text(str(payload.get("text", "")))
+                # `speak` 默认 True 保住语音那条路的行为；聊天界面传 False —— 合成是阻塞的，
+                # 不关掉它一句 40 字的回答要等音频播完才回到页面上。
+                return api.text(
+                    str(payload.get("text", "")),
+                    speak=bool(payload.get("speak", True)),
+                )
+            if path == "/api/model":
+                return api.switch_model(
+                    str(payload.get("model", "")),
+                    persist=bool(payload.get("persist", True)),
+                )
             if path == "/api/speaker/enroll":
                 return api.enroll(str(payload.get("name", "")), list(payload.get("clips") or ()))
             # 从**采集缓冲**录、注册、试一句 —— 和唤醒时校验的是同一条信道。
