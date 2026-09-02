@@ -32,6 +32,15 @@
       "runtimeArgs": ["scripts/run_console.py", "--no-browser", "--no-token", "--no-orb"],
       "port": 8899,
       "autoPort": true
+    },
+    {
+      "name": "csp",
+      "_comment": "服 desktop/dist 并**带上 tauri.conf.json 那条真的 CSP** —— 上面几条 dev server 一个字节的 CSP 都不发，所以只在打包后成立的失败（2026-09-03：序列层的 fetch 被 connect-src 拒，静默回退手写渲染器）在它们上面看不见。",
+      "runtimeExecutable": "D:/program/vioce-wake/.venv/Scripts/python.exe",
+      "runtimeArgs": ["scripts/acceptance/csp_check.py", "--no-browser", "--port", "5399"],
+      "port": 5399,
+      "autoPort": false,
+      "url": "http://localhost:5399"
     }
   ]
 }

@@ -898,6 +898,52 @@ rule2 = 1.2 时那些停顿不切句；降到 1.0 就切 —— 后半句落进�
 那一只（耳机麦），而它此刻断开着。**真人说话仍然是唯一的 REAL-MIC 判据。**
 
 
+## 打包后的球一直不是 AE 序列层：一条 CSP 指令（2026-09-03，SIM，真实浏览器控制台）
+
+使用者的问题是「为什么现在的语音球不是另一个分支最新的 AE 雪碧图？是不是接入错了版本」。
+**版本没接错**，而且没有任何一层报错 —— 这是它难查的全部原因。
+
+先把版本这件事关掉：`claude/ui-d91f92` 的 tip 是 `948db11`，`git merge-base --is-ancestor
+948db11 main` 成立，`git log main..claude/ui-d91f92` 是空的 —— **整支已经并进 main**，
+`desktop/public/orb/{flow,burst}.{png,json}` 是 main 的已跟踪文件，默认渲染层是 `seq`。
+
+真因在 `desktop/src-tauri/tauri.conf.json` 的一行：
+
+```
+default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost
+```
+
+CSP 的指令之间**互不继承**：写了 `connect-src` 就不再回落到 `default-src`。而
+`sequence.ts::loadSheet` 取元数据用的是 `fetch()`，落在 `connect-src` 上；取图用的是
+`new Image()`，落在 `img-src`（未写 → 回落 `default-src 'self'`，通）。于是两个 60 字节的
+`.json` 被拒、4 MB 的 PNG 反而是通的，而 `main.ts` 对失败的处理是
+
+```js
+.catch((e) => { console.warn('[orb] 序列资产未就绪，回退手写渲染器：', e); });
+```
+
+—— **静默回退 `core.ts`**。使用者看到的就是「球还是老样子」。
+
+取证（`.vox-ref/csp_probe.py`：把这一行 CSP 原样加到一个服务 `desktop/dist` 的本地服务器上，
+两个端口两档；已固化为 `scripts/acceptance/csp_check.py`，策略从 `tauri.conf.json` 读，
+不再抄一份）。浏览器控制台，逐字：
+
+| CSP | 控制台 | 服务器日志 |
+|---|---|---|
+| 现行 | `Connecting to '…/orb/flow.json' violates the following Content Security Policy directive: "connect-src ipc: http://ipc.localhost"` ×2 + `[orb] 序列资产未就绪，回退手写渲染器` | 只有 `index.html` / `assets/*` |
+| **加 `'self'`** | **零报错、零告警** | `orb/flow.json 200` · `orb/burst.json 200` · `orb/flow.png 200` · `orb/burst.png 200` |
+
+**为什么此前所有取证都没抓到它**：`docs/routines.md` 的六态渲染取证打的是 dev server
+（5173/5273），而 **dev server 不发 CSP**。那条例程连「生产页 `index.html?state=idle`
+画布全空」都验了 —— 只是验在了无 CSP 的一侧。一个只在打包后成立的失败，用 dev server
+是测不出来的，无论测多细。
+
+修法是 `connect-src` 加 `'self'`，**不放开任何外网**：`'self'` 就是打进 exe 的那份资产，
+本地优先的姿态不变。需要 `cargo build --release` 才进二进制（`vox.exe` 在跑时链接会被
+文件锁挡住，先退出托盘）。已重新构建并核对：新 exe（13,473,280 字节）里有
+`connect-src 'self' ipc:`，旧的那份没有。
+
+
 ## Blockers
 
 1. Build a separate-window visual spike before copying audio components.
