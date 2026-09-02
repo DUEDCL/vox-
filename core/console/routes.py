@@ -308,6 +308,13 @@ EDITABLE: dict[str, tuple[str, ...]] = {
     "voice.toml": (
         "wake.keywords_threshold",
         "wake.num_threads",
+        # 2026-09-03 补齐的四个。它们此前只能改文件，而没有一个是安全边界 ——
+        # `wake.acks` 是使用者最常改的那一项（应答音那四句话），`follow_up` 是连续对话的
+        # 总开关，`max_active_paths` 是「有点噪声就叫不应」的那个旋钮，`auto_gain` 是
+        # 「Windows 输入音量该调多少」这件事的自动化开关。见 `scripts/audit_config_surface.py`。
+        "wake.acks",
+        "wake.follow_up",
+        "wake.max_active_paths",
         "asr.enabled",
         "asr.num_threads",
         "tts.enabled",
@@ -329,6 +336,9 @@ EDITABLE: dict[str, tuple[str, ...]] = {
         "tts.num_threads",
         "input.device",
         "input.blocksize",
+        # 自适应输入增益。默认开，而「关掉它自己调 Windows 的输入音量」是个合理的选择 ——
+        # 一个只能改文件的开关等于没有这个选择。
+        "input.auto_gain",
         "orb.enabled",
         "orb.visible",
         # 2026-09-03：球的外观三项。**它们此前只能靠环境变量传** —— 那一栏只会生成一行
@@ -359,6 +369,21 @@ EDITABLE: dict[str, tuple[str, ...]] = {
         "web.allow_internet",
         "web.timeout_s",
         "fs.max_bytes",
+        # 2026-09-03：这四个不是安全边界，所以它们该能在页面上改。
+        #
+        # `apps.enabled` / `web.open_enabled` 是两个开关，开着的时候能做的事
+        # （启动白名单里的应用、让浏览器打开一个页面）不因为「从网页点的」而变多。
+        # `apps.default_music`「放点音乐」开哪个 —— 它只能从**已有的白名单**里挑一个名字，
+        # 挑不到会报错而不是去找一个同名的东西。`web.open_search_url` 是搜索页模板。
+        #
+        # **`apps.entries` 仍然只能改文件**，而且这一条不打算放开：那张表是「名字 →
+        # 可执行文件绝对路径」，让一个网页往里加一条等于给它代码执行。`apps.sites` /
+        # `apps.play` 是表不是标量，`set_scalars` 写不了它们 —— 那是下一步的工作，
+        # 不是一条立场（见 scripts/audit_config_surface.py）。
+        "apps.enabled",
+        "apps.default_music",
+        "web.open_enabled",
+        "web.open_search_url",
     ),
     "memory.toml": ("memory.recall_limit", "memory.short_keep"),
 }

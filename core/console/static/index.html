@@ -883,6 +883,22 @@ details[open] > summary::before { content: "▾ "; }
       <p class="note" id="wk-input"></p>
       <div class="rows" id="wk-rows" style="margin-top:var(--space-3)"></div>
     </div>
+
+    <div class="panel glass">
+      <h3>其余语音参数（<code>config/voice.toml</code>）</h3>
+      <p class="note" style="margin-top:0">
+        这一栏渲染的是 <code>voice.toml</code> 里<b>没有专用控件</b>的那些可改键 ——
+        应答音那几句话、连续对话开关、解码束宽、自适应增益都在这里。
+        它按 <code>/api/config</code> 返回的内容自己长出来，所以以后加了新键**不会漏在页面外**。
+        专用控件另有其页：合成在「模型配置」，输入设备在「运行态」，球在「唤醒球」。
+      </p>
+      <div class="rows" id="vx-keys"></div>
+      <div class="line" style="margin-top:var(--space-4)">
+        <button id="vx-save" class="primary" data-od-id="voice-extra-save">保存</button>
+        <span class="note" style="margin:0">改完要重启才生效。</span>
+      </div>
+      <p class="bad" id="vx-error" role="status" hidden></p>
+    </div>
   </div>
 </section>
 
@@ -3454,14 +3470,17 @@ $("orb-look-save").onclick = async () => {
 async function loadConfigFiles() {
   const orbHost = $("orb-keys");
   const limHost = $("lm-keys");
+  const vxHost = $("vx-keys");
   busy(orbHost, "读取 voice.toml…");
   busy(limHost, "读取 tools.toml…");
+  busy(vxHost, "读取 voice.toml…");
   let payload;
   try { payload = await api("/api/config"); }
   catch (err) {
     /* 一次请求供两个区段用，所以两边都得各自报一遍 —— 用户只看得见其中一页。 */
     failed(orbHost, err.message, loadConfigFiles);
     failed(limHost, err.message, loadConfigFiles);
+    failed(vxHost, err.message, loadConfigFiles);
     return;
   }
   const byFile = {};
@@ -3491,6 +3510,18 @@ async function loadConfigFiles() {
   }
   renderOrbPreview();
 
+  /* 其余语音参数：**减法而不是加法** —— 列的是「所有可改键」减掉「已有专用控件的」。
+     用加法（在这里写一张要显示的键名表）的话，以后加一个新键只会静默不出现在页面上，
+     而那正是使用者说的「很多配置不能直接更改」的形状。DEDICATED 是那几个专用面板已经
+     覆盖的前缀。 */
+  vxHost.textContent = "";
+  const DEDICATED = ["orb.", "tts.", "input.device"];
+  const extraKeys = ((voice && voice.keys) || []).filter(
+    (k) => !DEDICATED.some((prefix) => k.key.startsWith(prefix))
+  );
+  if (extraKeys.length) for (const key of extraKeys) vxHost.appendChild(kvRow(key, "vx"));
+  else vxHost.appendChild(el("p", { class: "note" }, "voice.toml 里没有其他可改键。"));
+
   /* 安全边界：tools.toml 里能读到的就那几个键，其余根本不在返回里。 */
   limHost.textContent = "";
   const tools = byFile["tools.toml"];
@@ -3501,6 +3532,9 @@ async function loadConfigFiles() {
 $("orb-save").onclick = (event) => saveScope("orb",
   (updates) => api("/api/config", { method: "PUT", body: { file: "voice.toml", updates } }),
   event.currentTarget, $("orb-error"));
+$("vx-save").onclick = (event) => saveScope("vx",
+  (updates) => api("/api/config", { method: "PUT", body: { file: "voice.toml", updates } }),
+  event.currentTarget, $("vx-error"));
 $("lm-save").onclick = (event) => saveScope("limits",
   (updates) => api("/api/config", { method: "PUT", body: { file: "tools.toml", updates } }),
   event.currentTarget, $("lm-error"));

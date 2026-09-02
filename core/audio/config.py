@@ -278,6 +278,22 @@ _VALUE_CHECKS: dict[str, Any] = {
     "orb.hide_after_s": lambda value: (
         None if float(value) <= 3600 else "最多 3600 秒 —— 再长就该用 orb.visible = true"
     ),
+    # 阈值不是「越大越安全」：0.95 会把本人也拒掉，而 0.05 等于没有门。真正的值靠
+    # REAL-MIC 实测定（发布阻塞项 #1），这里只挡住明显不可能的输入。
+    "wake.keywords_threshold": lambda value: (
+        None if 0.05 <= float(value) <= 0.95 else "要在 0.05–0.95 之间"
+    ),
+    # 解码束宽。实测 4 在 0 dB 只剩 2/5、16 是 5/5，而每块耗时几乎不变；再往上收益递减
+    # 而误唤醒的证据不够。64 是这一层愿意接受的上限，不是推荐值。
+    "wake.max_active_paths": lambda value: (
+        None if 1 <= int(value) <= 64 else "要在 1–64 之间（推荐 16，见 core/audio/kws.py）"
+    ),
+    # 云端映射成 rate，超出这个区间百炼直接拒；本机是 length_scale 的倒数，太极端会失真。
+    "tts.speed": lambda value: (None if 0.5 <= float(value) <= 2.0 else "要在 0.5–2.0 之间"),
+    # 块长决定唤醒的响应粒度。太小 CPU 上升、太大唤醒变钝；16000 = 1 秒已经明显迟钝。
+    "input.blocksize": lambda value: (
+        None if 160 <= int(value) <= 16000 else "要在 160–16000 之间（1600 = 100 ms/块）"
+    ),
 }
 
 

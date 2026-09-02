@@ -141,3 +141,90 @@ def test_the_size_floor_and_ceiling_match_the_rust_side():
     """这两个数在 `desktop/src-tauri/src/main.rs` 里也写着（`(96..=420)`）。
     两处必须一致 —— Python 放过一个值而 Rust 忽略它，症状是「存了但没变」。"""
     assert (ORB_SIZE_MIN, ORB_SIZE_MAX) == (96, 420)
+
+
+# ------------------------------------ 「全范围可配」这条要求本身要能被断言（2026-09-03）
+
+
+def test_every_config_key_is_either_editable_or_has_a_stated_reason():
+    """使用者点名的硬要求：**没有任何一项配置只能靠改文件才能改**。
+
+    「还差哪些」靠记忆回答一定会漏，所以它是一条命令
+    （`scripts/audit_config_surface.py`）加这一条断言。三类：可改、刻意不可改（带理由，
+    安全边界与凭据变量名在这一类）、以及**没有理由的缺口** —— 最后这类必须是空的。
+
+    加一个新配置键而忘了它的归属，这一条就会红。那正是它存在的意义：一项配置「只能靠改
+    文件」在使用者的路径里等于不存在，而这件事不该靠谁记得。
+    """
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / "scripts"))
+    try:
+        import audit_config_surface as audit
+    finally:
+        sys.path.remove(str(root / "scripts"))
+
+    from core.console.routes import EDITABLE
+
+    unexplained: list[str] = []
+    for file, keys in {
+        "voice.toml": audit.voice_keys(),
+        "tools.toml": audit.tools_keys(),
+    }.items():
+        editable = set(EDITABLE.get(file, ()))
+        for key in keys:
+            if key in editable or key in audit.WONT or key in audit.KNOWN_GAPS:
+                continue
+            unexplained.append(f"{file}:{key}")
+
+    assert unexplained == [], (
+        "这些键既不在控制台白名单里，也没有「为什么不放开」的理由 —— "
+        "要么加进 EDITABLE，要么在 audit_config_surface.WONT 里写清理由：" + ", ".join(unexplained)
+    )
+
+
+def test_every_editable_key_is_actually_visible_on_the_page():
+    """**「可改」的另一半是「看得见」。**
+
+    控制台只渲染 `/api/config` 返回的键，而那个端点读的是**文件**（`editable_keys`）——
+    所以一个只存在于代码默认值里的键在页面上根本不出现，而不出现等于改不了。
+    2026-09-03 就有两个这样的键（`web.open_enabled` / `web.open_search_url`：在白名单里、
+    出厂 `config/tools.toml` 里没写）。修法是把那一行写进出厂文件，文件本身也是文档。
+    """
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / "scripts"))
+    try:
+        import audit_config_surface as audit
+    finally:
+        sys.path.remove(str(root / "scripts"))
+
+    invisible = audit.missing_from_shipped()
+
+    assert invisible == [], (
+        "这些键在 EDITABLE 里但出厂配置文件没写它们，所以页面上看不见 —— "
+        "把那一行写进文件：" + ", ".join(invisible)
+    )
+
+
+def test_the_security_boundaries_are_still_not_editable():
+    """反向的护栏。「全范围可配」**不覆盖安全边界**：让一个网页改 `shell.allow` 或
+    `fs.roots` 等于让它决定这台机器上能跑什么、能读什么。这一条钉住那条界线。"""
+    from core.console.routes import EDITABLE
+
+    for key in (
+        "shell.enabled",
+        "shell.allow",
+        "fs.roots",
+        "fs.denied_names",
+        "fs.denied_dirs",
+        "apps.entries",
+        "web.enabled",
+    ):
+        assert key not in EDITABLE["tools.toml"], key
+    # 凭据「读哪个变量」同理 —— 值走 /api/secret 的白名单，变量名留在文件里。
+    assert "tts.key_env" not in EDITABLE["voice.toml"]
