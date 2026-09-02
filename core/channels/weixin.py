@@ -148,6 +148,24 @@ class HttpTransport:
         with urllib.request.urlopen(request, timeout=timeout_s) as response:
             return response.read()
 
+    def get_json(
+        self, url: str, headers: Mapping[str, str], timeout_s: float
+    ) -> dict[str, Any]:
+        """带头的 GET。扫码登录那两个端点用它（取二维码、查状态）。
+
+        和 ``get_bytes`` 分开是因为那个是拉媒体（不带 iLink 的头，也不该带），
+        这个是打 API。合成一个会让「下载一段音频」意外带上 App-Id。
+        """
+        request = urllib.request.Request(url, method="GET")
+        for name, value in {"User-Agent": API_USER_AGENT, **dict(headers)}.items():
+            request.add_header(name, value)
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            raw = response.read().decode("utf-8", "replace")
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ChannelError(f"iLink 回的不是 JSON：{raw[:200]}") from exc
+
 
 @dataclass
 class WeixinChannel:
@@ -174,15 +192,33 @@ class WeixinChannel:
     last_error: str = ""
 
     def _token(self) -> str:
+        """这个账号的 bot token。**环境变量优先，然后是扫码存下来的那份。**
+
+        顺序是刻意的：环境变量是「我自己已经有一个 token」和自动化那条路，扫码是普通
+        使用者那条路。反过来的话，一个想临时换账号的人会发现改了环境变量没有用。
+
+        两条都没有时报错要说清**该往哪走** —— 上一版只说「没有 $VOX_WEIXIN_TOKEN」，
+        而使用者的反应是对的：那个 token 本来就是扫码换来的，没有扫码这一步他无处可取。
+        """
         import os
 
         value = os.environ.get(self.token_env, "").strip()
-        if not value:
-            raise ChannelError(
-                f"没有 ${self.token_env} —— 微信通道要一个 iLink bot token，"
-                f"在控制台「密钥」那一栏存进去或者写进 .env"
-            )
-        return value
+        if value:
+            return value
+        from core.channels.weixin_login import load_credentials
+
+        saved = load_credentials()
+        if saved and saved.get("token"):
+            # base_url 也跟着凭据走：`scaned_but_redirect` 会把账号分到另一个域名上，
+            # 而那个域名是登录时才知道的。忽略它的症状是长轮询一直空转。
+            stored_base = saved.get("base_url", "").strip()
+            if stored_base and self.base_url == ILINK_BASE_URL:
+                self.base_url = stored_base
+            return saved["token"]
+        raise ChannelError(
+            "微信还没绑定 —— 到控制台「微信」那一栏点「扫码登录」，用手机微信扫一下。"
+            f"（自动化可以改走环境变量 ${self.token_env}）"
+        )
 
     def _headers(self, token: str) -> dict[str, str]:
         return {

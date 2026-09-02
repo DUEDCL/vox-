@@ -266,6 +266,9 @@ def main() -> int:
     api = ConsoleApi(runtime, stack)
     # 消息通道（微信）。**由配置决定，默认关** —— 打开它意味着出网，见 config/channels.toml。
     channel_runner, channel_thread = start_channels(runtime, stack, disabled=args.no_weixin)
+    # 控制台那一栏要能看实时收发、能手打一条发出去 —— 所以它得拿到这个 runner。
+    # 注入而不是让 ConsoleApi 自己去建：这一层不该决定「要不要出网」。
+    api.channel_runner = channel_runner
     try:
         server = ConsoleServer(
             api,

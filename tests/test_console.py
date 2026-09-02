@@ -2059,3 +2059,105 @@ def test_the_first_enrollment_can_be_done_from_the_console(runtime, monkeypatch)
 
     assert gate.enrolled == [("du", 2)]
     assert result["audio_saved"] is False
+
+
+# ------------------------------------------- 微信那一栏（扫码 + 实时收发，2026-09-03）
+
+
+@pytest.fixture
+def weixin_api(tmp_path, monkeypatch):
+    monkeypatch.setenv("VOX_WEIXIN_CREDENTIALS", str(tmp_path / "weixin.json"))
+    return ConsoleApi(runtime=None, stack=None)
+
+
+def test_the_weixin_panel_says_unbound_before_anyone_scans(weixin_api):
+    view = weixin_api.weixin_view()
+
+    assert view["credentials"]["bound"] is False
+    assert view["runner"] is None, "通道没起来就该如实说没起来"
+    assert view["chats"] == []
+
+
+def test_polling_before_starting_a_login_is_refused(weixin_api):
+    with pytest.raises(ApiError, match="还没开始"):
+        weixin_api.weixin_login_poll()
+
+
+def test_a_login_renders_the_qr_on_the_server(weixin_api, monkeypatch):
+    """二维码在**服务端**渲成 SVG。一个从 CDN 拉 JS 二维码库的登录页等于把登录流程交给
+    第三方，而这一页上过的是使用者的微信账号。
+
+    这里替换的是 ``QrLogin`` 整个类，不是它的 transport 字段：``field(default_factory=
+    HttpTransport)`` 在**类定义时**就把那个函数对象绑好了，改模块属性影响不到它 ——
+    第一版这么写的后果是这条测试**真的打了微信的接口**（而且拿回了一张真二维码）。
+    """
+    import core.channels.weixin_login as login
+
+    class FakeTransport:
+        def __init__(self) -> None:
+            self.script = [
+                {"qrcode": "hex1", "qrcode_img_content": "https://ilinkai.weixin.qq.com/l?t=1"},
+                {
+                    "status": "confirmed",
+                    "ilink_bot_id": "bot-123456789",
+                    "bot_token": "tk-" + "z" * 30,
+                    "baseurl": "https://ilinkai.weixin.qq.com",
+                },
+            ]
+
+        def get_json(self, url, headers, timeout_s):
+            del url, headers, timeout_s
+            return self.script.pop(0)
+
+    class OfflineQrLogin(login.QrLogin):
+        def __init__(self, **kwargs):
+            kwargs.setdefault("transport", FakeTransport())
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(login, "QrLogin", OfflineQrLogin)
+
+    first = weixin_api.weixin_login()
+    assert first["svg"].startswith("<?xml")
+    assert first["status"] == "wait"
+
+    done = weixin_api.weixin_login_poll()
+    assert done["status"] == "confirmed"
+    # **token 的值不能出现在返回给页面的任何地方。** 这一页会被截图。
+    assert "tk-" + "z" * 30 not in json.dumps(done, ensure_ascii=False)
+    assert weixin_api.weixin_view()["credentials"]["bound"] is True
+    # 绑上之后会话要丢掉，否则下一次点「扫码登录」拿到一个用过的票据。
+    assert weixin_api._weixin_login is None
+
+
+def test_unbinding_does_not_silently_turn_the_channel_off(weixin_api):
+    """解绑只删凭据。``enabled`` 是配置 —— 改它要走配置那条路并重启，
+    而一个悄悄改了配置文件的按钮会让「为什么重启后不收消息了」变成一次考古。"""
+    before = weixin_api.weixin_view()["enabled"]
+
+    result = weixin_api.weixin_unbind()
+
+    assert result["credentials"]["bound"] is False
+    assert weixin_api.weixin_view()["enabled"] == before
+
+
+def test_sending_without_a_running_channel_says_so_instead_of_failing_silently(weixin_api):
+    with pytest.raises(ApiError, match="没在跑"):
+        weixin_api.weixin_send("chat-1", "在吗")
+
+
+def test_the_message_cursor_only_returns_new_entries(weixin_api):
+    """页面每两秒问一次。重复给会让同一条消息在界面上出现好几遍。"""
+    from core.channels.runner import ChannelRunner
+
+    runner = ChannelRunner(channel=SimpleNamespace(name="weixin"), runtime=None)
+    runner._record("in", chat_id="c1", text="第一条")
+    weixin_api.channel_runner = runner
+
+    first = weixin_api.weixin_messages()
+    assert [row["text"] for row in first["entries"]] == ["第一条"]
+    assert first["running"] is True
+
+    assert weixin_api.weixin_messages(first["next"])["entries"] == []
+    runner._record("in", chat_id="c1", text="第二条")
+    again = weixin_api.weixin_messages(first["next"])
+    assert [row["text"] for row in again["entries"]] == ["第二条"]

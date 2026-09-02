@@ -449,3 +449,82 @@ def test_the_reply_context_is_carried_back():
     runner.handle(IncomingMessage(chat_id="c1", text="你好", reply_context={"context_token": "ctx-7"}))
 
     assert channel.sent[-1].reply_context == {"context_token": "ctx-7"}
+
+
+# ------------------------------------------- 控制台那一栏：实时收发（2026-09-03）
+
+
+def test_the_transcript_records_both_directions_with_a_usable_cursor():
+    """控制台的「微信」那一栏要能看实时收发，所以两个方向都要进会话记录。
+
+    游标用**序号**不用时间戳：同一秒里可能有两条，而一个会漏条目的游标比没有游标更糟 ——
+    它会让「刚才那条去哪了」变成一个偶发问题。
+    """
+    channel = FakeChannel()
+    runner = ChannelRunner(channel=channel, runtime=FakeRuntime("三点半"), reply_with_voice=False)
+
+    runner.handle(IncomingMessage(chat_id="c1", text="现在几点"))
+
+    read = runner.read_transcript()
+    directions = [row["direction"] for row in read["entries"]]
+    assert directions == ["in", "out"]
+    assert read["entries"][0]["text"] == "现在几点"
+    assert read["entries"][1]["text"] == "三点半"
+    assert read["entries"][1]["by"] == "agent"
+    assert read["next"] == 2
+
+    # 从游标之后再读一次就该是空的 —— 页面每一两秒问一次，重复给会让消息看起来发了两遍。
+    assert runner.read_transcript(since=read["next"])["entries"] == []
+
+
+def test_the_transcript_is_capped_and_the_cursor_stays_monotonic():
+    """环形缓冲、不落盘。挤掉旧条目时序号**必须继续往上走** —— 重用序号会让页面把新条目
+    当成旧的、直接不显示。"""
+    from core.channels.runner import TRANSCRIPT_MAX
+
+    runner = ChannelRunner(channel=FakeChannel(), runtime=FakeRuntime("x"))
+    for index in range(TRANSCRIPT_MAX + 25):
+        runner._record("in", chat_id="c1", text=f"第 {index} 条")
+
+    assert len(runner.transcript) == TRANSCRIPT_MAX
+    seqs = [row["seq"] for row in runner.transcript]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    assert seqs[-1] == TRANSCRIPT_MAX + 25
+    assert runner.read_transcript()["dropped"] == 25
+
+
+def test_sending_from_the_console_does_not_run_a_turn():
+    """那一栏是「我自己说」，不是「让它答」。走 agent 的话，控制台上手打一句会被当成
+    使用者的请求发给模型，然后模型的回答被发给微信 —— 那是另一个功能。"""
+    channel = FakeChannel()
+    runtime = FakeRuntime("不该被调用")
+    runner = ChannelRunner(channel=channel, runtime=runtime)
+
+    runner.send_text("chat-1", "我一会儿回你")
+
+    assert runtime.said == [], "控制台手打的消息跑了一轮派发"
+    assert channel.sent[-1].text == "我一会儿回你"
+    entry = runner.read_transcript()["entries"][-1]
+    assert entry["direction"] == "out" and entry["by"] == "console"
+
+
+def test_sending_an_empty_message_is_refused():
+    from core.channels.contract import ChannelError
+
+    runner = ChannelRunner(channel=FakeChannel(), runtime=FakeRuntime("x"))
+
+    with pytest.raises(ChannelError, match="空的"):
+        runner.send_text("chat-1", "   ")
+
+
+def test_the_chat_list_groups_by_peer_and_counts():
+    runner = ChannelRunner(channel=FakeChannel(), runtime=FakeRuntime("x"))
+    runner._record("in", chat_id="c1", text="嗨", sender="wx-aaaa")
+    runner._record("out", chat_id="c1", text="嗨你好")
+    runner._record("in", chat_id="c2", text="在吗", sender="wx-bbbb")
+
+    chats = {row["chat_id"]: row for row in runner.chats()}
+
+    assert chats["c1"]["messages"] == 2
+    assert chats["c2"]["last"] == "在吗"
+    assert chats["c2"]["sender"] == "wx-bbbb"

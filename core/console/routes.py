@@ -527,6 +527,14 @@ class ConsoleApi:
         #: 的知识，而 ``ConsoleApi`` 只知道「有人按了重启」。没注入时 ``restart()`` 报 501
         #: 而不是假装成功 —— 一个点了没反应的重启按钮比一个明确说「这里不支持」的更难查。
         self.restart_hook: Any = None
+        #: 微信通道的 runner，由启动脚本在通道打开时注入（``None`` = 没开）。
+        #:
+        #: 注入而不是在这里建：这一层不该决定「要不要出网」。那是 ``config/channels.toml``
+        #: 的 ``enabled`` 加启动脚本的事，而控制台只负责显示它的状态、看会话、手打一条。
+        self.channel_runner: Any = None
+        #: 正在进行的扫码登录会话。**一次只有一个** —— 两张二维码同时挂着的话，先扫的那张
+        #: 换来的凭据会被后扫的覆盖，而使用者看到的是「扫了但没绑上」。
+        self._weixin_login: Any = None
         #: 从**采集环形缓冲**取来的注册片段（内存里，永不落盘、永不出进程）。
         #:
         #: 为什么不是浏览器录的：注册和校验必须走**同一条信道**，否则相似度比的是两个
@@ -1071,6 +1079,100 @@ class ConsoleApi:
     def log_clear(self) -> dict[str, Any]:
         self.logbook.clear()
         return {"cleared": True}
+
+    # ---------------------------------------------------------------- 微信通道
+
+    def weixin_view(self) -> dict[str, Any]:
+        """微信那一栏的状态：绑没绑、通道跑没跑、有哪些会话。
+
+        **永不回显 token** —— ``describe_credentials()`` 只报 account id 的前 8 位和
+        base_url。这一页会被截图。
+        """
+        from core.channels.config import load_channels_config
+        from core.channels.weixin_login import describe_credentials
+
+        config = load_channels_config()
+        runner = self.channel_runner
+        return {
+            "credentials": describe_credentials(),
+            "enabled": bool(config.get("weixin.enabled", False)),
+            "voice_in": bool(config.get("weixin.voice_in", True)),
+            "voice_out": bool(config.get("weixin.voice_out", True)),
+            "runner": runner.describe() if runner is not None else None,
+            "chats": runner.chats() if runner is not None else [],
+            "login_active": self._weixin_login is not None,
+        }
+
+    def weixin_login(self) -> dict[str, Any]:
+        """开始一次扫码登录，返回渲好的二维码 SVG。
+
+        为什么不是「填 token」：那个 token 本来就是扫码换来的（见
+        ``core/channels/weixin_login.py`` 的模块头）。使用者问得对。
+        """
+        from core.channels.weixin_login import QrLogin
+
+        session = QrLogin()
+        try:
+            payload = session.begin()
+        except Exception as exc:  # noqa: BLE001 - 拿不到二维码要说是哪一步
+            raise ApiError(f"取二维码失败：{exc}", status=502) from exc
+        self._weixin_login = session
+        return payload
+
+    def weixin_login_poll(self) -> dict[str, Any]:
+        """问一次状态。**一次一问** —— 等待留给页面。
+
+        一个 8 分钟不返回的 HTTP 请求会被任何一层超时掐断，所以这里不阻塞轮询。
+        """
+        session = self._weixin_login
+        if session is None:
+            raise ApiError("还没开始扫码登录 —— 先点「扫码登录」", status=409)
+        try:
+            result = session.poll()
+        except Exception as exc:  # noqa: BLE001
+            self._weixin_login = None
+            raise ApiError(f"扫码登录失败：{exc}", status=502) from exc
+        if result.get("status") == "confirmed":
+            # 绑上了就把会话丢掉：留着它只会让下一次点「扫码登录」拿到一个已经用过的票据。
+            self._weixin_login = None
+        return result
+
+    def weixin_unbind(self) -> dict[str, Any]:
+        """解绑。**不动 `enabled`** —— 那是配置，改它要走配置那条路并重启。"""
+        from core.channels.weixin_login import describe_credentials, forget_credentials
+
+        removed = forget_credentials()
+        self._weixin_login = None
+        return {"removed": removed, "credentials": describe_credentials()}
+
+    def weixin_messages(self, since: int = 0, limit: int = 200) -> dict[str, Any]:
+        """会话记录的增量。页面每一两秒问一次，游标是序号。"""
+        runner = self.channel_runner
+        if runner is None:
+            return {"entries": [], "next": int(since or 0), "dropped": 0, "running": False}
+        try:
+            payload = dict(runner.read_transcript(int(since or 0), int(limit or 200)))
+        except (TypeError, ValueError) as exc:
+            raise ApiError(f"since/limit 得是整数：{exc}") from exc
+        payload["running"] = True
+        return payload
+
+    def weixin_send(self, chat_id: str, text: str) -> dict[str, Any]:
+        """从控制台手打一条发给某个 peer。
+
+        **不走 agent。** 那一栏是「我自己说」，不是「让它答」—— 走派发的话，我在控制台上
+        打的一句会被当成使用者的请求发给模型，然后模型的回答被发到微信去。
+        """
+        runner = self.channel_runner
+        if runner is None:
+            raise ApiError("微信通道没在跑（config/channels.toml 里 enabled = false？）", status=409)
+        if not str(chat_id or "").strip():
+            raise ApiError("chat_id is required")
+        try:
+            sent = runner.send_text(str(chat_id), str(text))
+        except Exception as exc:  # noqa: BLE001 - 发不出去要带上原因
+            raise ApiError(f"发送失败：{exc}", status=502) from exc
+        return {"sent": bool(sent), "chat_id": str(chat_id)}
 
     # -------------------------------------------------------------------- restart
 

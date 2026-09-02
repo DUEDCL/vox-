@@ -681,6 +681,7 @@ details[open] > summary::before { content: "▾ "; }
     <a href="#profile" data-view="profile" data-od-id="nav-profile">本人档案</a>
     <a href="#skills" data-view="skills" data-od-id="nav-skills">技能与 MCP</a>
     <a href="#orb" data-view="orb" data-od-id="nav-orb">唤醒球</a>
+    <a href="#weixin" data-view="weixin" data-od-id="nav-weixin">微信</a>
     <div class="rail-group">附属</div>
     <a href="#limits" data-view="limits" data-od-id="nav-limits">安全边界</a>
     <a href="#debug" data-view="debug" data-od-id="nav-debug">调试</a>
@@ -1202,6 +1203,55 @@ details[open] > summary::before { content: "▾ "; }
           <span class="note" style="margin:0" id="orb-copy-note" role="status"></span>
         </div>
       </div>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================= 9 微信 -->
+<section class="view" id="v-weixin" data-od-id="view-weixin" hidden>
+  <h2 data-od-id="weixin-title">微信</h2>
+  <p class="sub">走腾讯 iLink Bot API。<b>扫码绑定</b>，不用填 token —— 那个 token 本来就是扫码换来的。
+    语音消息进来先用<b>本机识别器</b>转写（解不开的格式才退回微信自带的转写并标注来源），
+    回复带语音也带文字。<b>默认关</b>：打开它意味着出网。</p>
+
+  <div class="stack">
+    <div class="panel glass">
+      <h3>绑定</h3>
+      <p class="note" id="wx-state" style="margin-top:0">读取…</p>
+      <div class="line">
+        <button id="wx-login" class="primary" data-od-id="weixin-login">扫码登录</button>
+        <button id="wx-unbind" class="danger" data-od-id="weixin-unbind">解绑</button>
+        <span class="note" id="wx-login-state" style="margin:0"></span>
+      </div>
+      <div id="wx-qr" hidden style="margin-top:var(--space-4);display:flex;gap:var(--space-4);align-items:flex-start;flex-wrap:wrap">
+        <div id="wx-qr-img" style="background:#fff;padding:10px;border-radius:12px;line-height:0"></div>
+        <p class="note" style="margin:0;max-width:26em">
+          用手机微信扫这张码，然后在微信里点确认。二维码会过期，过期了这里自动换一张（最多三次）。
+          扫完之后凭据存在 <code>.vox/channels/weixin.json</code>（已 gitignore），
+          <b>页面上永不显示 token</b>。
+        </p>
+      </div>
+      <p class="bad" id="wx-error" role="status" hidden></p>
+    </div>
+
+    <div class="panel glass">
+      <h3>实时收发</h3>
+      <p class="note" style="margin-top:0">
+        通道在跑的时候，进来的每一条和发出去的每一条都在这里。<b>环形缓冲、不落盘</b> ——
+        要长期留的那份由记忆层决定。左边选一个会话，下面那一行是<b>我自己说</b>（不走 agent，
+        所以它不会替你想一个回答）。
+      </p>
+      <div class="line">
+        <label class="check"><input type="checkbox" id="wx-follow" checked> 自动跟随（每 2 秒拉一次）</label>
+        <select id="wx-chat" aria-label="会话" style="min-width:14em"></select>
+        <button id="wx-refresh" data-od-id="weixin-refresh">刷新</button>
+      </div>
+      <div class="rows" id="wx-log" style="margin-top:var(--space-4);max-height:26em;overflow:auto"></div>
+      <div class="line" style="margin-top:var(--space-4)">
+        <input id="wx-text" placeholder="发给这个会话…" aria-label="要发的内容" autocomplete="off" style="flex:1;min-width:16em">
+        <button id="wx-send" class="primary" data-od-id="weixin-send">发送</button>
+      </div>
+      <p class="bad" id="wx-send-error" role="status" hidden></p>
     </div>
   </div>
 </section>
@@ -3789,6 +3839,166 @@ renderLegend();
 initRibbon();
 initSky();
 
+/* =========================================================== 微信那一栏
+   两件事：扫码绑定（QR 由**服务端**渲成 SVG —— 一个从 CDN 拉 JS 二维码库的登录页等于把
+   登录流程交给第三方，而这一页上过的是使用者的微信账号），以及实时收发。
+   轮询游标是**序号**不是时间戳：同一秒里可能有两条。 */
+let wxCursor = 0;
+let wxPolling = null;
+
+async function renderWeixin() {
+  let view;
+  try { view = await api("/api/weixin"); }
+  catch (err) { setText($("wx-state"), "读不到：" + err.message); return; }
+  const cred = view.credentials || {};
+  const runner = view.runner;
+  const bits = [];
+  bits.push(cred.bound ? `已绑定 ${cred.account_id}（${cred.saved_at}）` : "未绑定");
+  bits.push(view.enabled ? "通道已开" : "通道关着（config/channels.toml 的 enabled）");
+  if (runner) {
+    bits.push(`处理 ${runner.handled} 条 · 失败 ${runner.failures}`);
+    bits.push(`语音回复 ${runner.voice_out ? "开" : "关"} · 本机转写 ${runner.local_asr ? "开" : "关"}`);
+    if (runner.last_error) bits.push("最近一次错误：" + runner.last_error);
+  } else if (view.enabled) {
+    bits.push("通道没起来 —— 看启动日志");
+  }
+  setText($("wx-state"), bits.join("  ·  "));
+  $("wx-unbind").disabled = !cred.bound;
+
+  const select = $("wx-chat");
+  const keep = select.value;
+  select.innerHTML = "";
+  for (const chat of view.chats || []) {
+    const option = document.createElement("option");
+    option.value = chat.chat_id;
+    option.textContent = `${chat.chat_id.slice(0, 12)} · ${chat.messages} 条 · ${chat.last || ""}`;
+    select.appendChild(option);
+  }
+  if (keep) select.value = keep;
+}
+
+function wxRow(entry) {
+  const row = document.createElement("div");
+  row.className = "row";
+  const who = entry.direction === "in"
+    ? (entry.sender ? "他 " + String(entry.sender).slice(-4) : "他")
+    : (entry.by === "console" ? "我（手打）" : "Vox");
+  const marks = [];
+  if (entry.kind === "voice") marks.push("语音");
+  if (entry.source === "provider") marks.push("微信转写");
+  if (entry.voice_out) marks.push("带语音");
+  if (entry.sent === false) marks.push("发送失败");
+  row.innerHTML =
+    `<b>${entry.at} ${who}</b>` +
+    `<span>${(entry.text || "").replace(/[<&]/g, (c) => (c === "<" ? "&lt;" : "&amp;"))}</span>` +
+    (marks.length ? `<em class="note">${marks.join(" · ")}</em>` : "");
+  return row;
+}
+
+async function pullWeixin() {
+  let payload;
+  try { payload = await api("/api/weixin/messages?since=" + wxCursor); }
+  catch { return; }
+  const host = $("wx-log");
+  if (!payload.running) {
+    if (!host.childElementCount) setText(host, "通道没在跑 —— 绑定并在 config/channels.toml 里打开 enabled，然后重启。");
+    return;
+  }
+  if (wxCursor === 0) host.innerHTML = "";
+  for (const entry of payload.entries || []) host.appendChild(wxRow(entry));
+  if ((payload.entries || []).length) {
+    wxCursor = payload.next;
+    host.scrollTop = host.scrollHeight;
+    renderWeixin();
+  }
+}
+
+/* 自动跟随：2 秒一次，只在这一页可见且标签页在前台时拉。理由和 refreshState 那条一样 ——
+   没人看的时候它只是在给守护进程添活儿。 */
+setInterval(() => {
+  if (document.hidden) return;
+  if ($("v-weixin").hidden) return;
+  if (!$("wx-follow").checked) return;
+  pullWeixin();
+}, 2000);
+
+$("wx-refresh").onclick = () => { wxCursor = 0; pullWeixin(); renderWeixin(); };
+
+$("wx-login").onclick = async () => {
+  const box = $("wx-qr");
+  const err = $("wx-error");
+  err.hidden = true;
+  $("wx-login").disabled = true;
+  setText($("wx-login-state"), "取二维码…");
+  try {
+    const first = await api("/api/weixin/login", { method: "POST", body: {} });
+    $("wx-qr-img").innerHTML = first.svg;
+    box.hidden = false;
+    setText($("wx-login-state"), "请用手机微信扫码");
+    if (wxPolling) clearInterval(wxPolling);
+    /* 一次一问，等待留在页面上：一个 8 分钟不返回的 HTTP 请求会被任何一层超时掐断。 */
+    wxPolling = setInterval(async () => {
+      let step;
+      try { step = await api("/api/weixin/poll", { method: "POST", body: {} }); }
+      catch (pollErr) {
+        clearInterval(wxPolling); wxPolling = null;
+        $("wx-login").disabled = false;
+        err.hidden = false; setText(err, pollErr.message);
+        setText($("wx-login-state"), "登录中断");
+        return;
+      }
+      if (step.svg && step.status === "refreshed") $("wx-qr-img").innerHTML = step.svg;
+      const words = {
+        wait: "请用手机微信扫码", scaned: "已扫码，请在微信里确认…",
+        refreshed: "二维码过期了，换了一张 —— 请重新扫",
+        confirmed: "绑定成功",
+      };
+      setText($("wx-login-state"), words[step.status] || step.status);
+      if (step.status === "confirmed") {
+        clearInterval(wxPolling); wxPolling = null;
+        $("wx-login").disabled = false;
+        box.hidden = true;
+        renderWeixin();
+        setText($("wx-login-state"), "绑定成功 —— 通道要在 config/channels.toml 里打开 enabled 并重启才开始收消息");
+      }
+    }, 1500);
+  } catch (loginErr) {
+    $("wx-login").disabled = false;
+    err.hidden = false; setText(err, loginErr.message);
+    setText($("wx-login-state"), "");
+  }
+};
+
+$("wx-unbind").onclick = async () => {
+  if (!confirm("解绑之后要重新扫码才能收发微信消息。继续？")) return;
+  try { await api("/api/weixin/unbind", { method: "POST", body: {} }); }
+  catch (err) { $("wx-error").hidden = false; setText($("wx-error"), err.message); return; }
+  if (wxPolling) { clearInterval(wxPolling); wxPolling = null; }
+  $("wx-qr").hidden = true;
+  setText($("wx-login-state"), "已解绑");
+  renderWeixin();
+};
+
+$("wx-send").onclick = async () => {
+  const chat = $("wx-chat").value;
+  const text = $("wx-text").value;
+  const err = $("wx-send-error");
+  err.hidden = true;
+  if (!chat) { err.hidden = false; setText(err, "先选一个会话 —— 会话是从收到的消息里长出来的"); return; }
+  if (!text.trim()) return;
+  $("wx-send").disabled = true;
+  try {
+    await api("/api/weixin/send", { method: "POST", body: { chat_id: chat, text } });
+    $("wx-text").value = "";
+    pullWeixin();
+  } catch (sendErr) { err.hidden = false; setText(err, sendErr.message); }
+  finally { $("wx-send").disabled = false; }
+};
+
+$("wx-text").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); $("wx-send").click(); }
+});
+
 let saved = "overview";
 try { saved = localStorage.getItem("vox.console.view") || "overview"; } catch {}
 setView(location.hash.slice(1) || saved);
@@ -3816,6 +4026,8 @@ loadConfigFiles();
    把别的页拖黑（`/api/state` 500 的那两天就是这么保住其余几页的）。 */
 loadChatSessions();
 loadChat("");
+renderWeixin();
+pullWeixin();
 
 /* 2.3 秒而不是 2 或 5：够快到点了按钮能看见结果，够慢到不让一个空闲页面每秒都去敲一次运行时。
    事件流轮询（上一版的 1.1 秒那条）随面板一起删掉了。

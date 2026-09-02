@@ -227,6 +227,13 @@ class ConsoleServer:
                     int((query.get("cursor") or ["0"])[0] or 0),
                     int((query.get("limit") or ["200"])[0] or 200),
                 )
+            if path == "/api/weixin":
+                return api.weixin_view()
+            if path == "/api/weixin/messages":
+                return api.weixin_messages(
+                    int((query.get("since") or ["0"])[0] or 0),
+                    int((query.get("limit") or ["200"])[0] or 200),
+                )
         elif method == "POST":
             payload = body if isinstance(body, dict) else {}
             if path == "/api/text":
@@ -313,6 +320,18 @@ class ConsoleServer:
                     str(payload.get("key_env", "")),
                     str(payload.get("proto", "")),
                     str(payload.get("model", "")),
+                )
+            # 微信：扫码绑定与那一栏的实时收发。四个都是 POST —— 它们都有副作用
+            # （开一次登录会话、写凭据、删凭据、发一条消息）。
+            if path == "/api/weixin/login":
+                return api.weixin_login()
+            if path == "/api/weixin/poll":
+                return api.weixin_login_poll()
+            if path == "/api/weixin/unbind":
+                return api.weixin_unbind()
+            if path == "/api/weixin/send":
+                return api.weixin_send(
+                    str(payload.get("chat_id", "")), str(payload.get("text", ""))
                 )
             if path == "/api/secrets":
                 return api.secret_set(

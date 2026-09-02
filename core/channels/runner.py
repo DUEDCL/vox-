@@ -37,6 +37,10 @@ PROVIDER_STT_NOTE = "（微信自带转写）"
 #: 一轮的最长等待。派发本身有自己的超时，这一层的上限是为了让循环不被一个卡住的回合占死。
 TURN_TIMEOUT_S = 180.0
 
+#: 会话记录的条数上限。**环形缓冲、不落盘** —— 和运行日志同一条规矩：一个跑了一天的通道
+#: 不该在磁盘上留下每一句微信消息。要长期留的那份由记忆层决定，不该被一个调试视图绕过去。
+TRANSCRIPT_MAX = 400
+
 
 @dataclass
 class ChannelRunner:
@@ -55,7 +59,74 @@ class ChannelRunner:
     handled: int = 0
     failures: int = 0
     last_error: str = ""
+    #: 会话记录的环形缓冲 —— 控制台那一栏的「实时收发」读的就是它。
+    #:
+    #: **不落盘、有上限**，和运行日志同一条规矩：一个跑了一天的通道不该在磁盘上留下每一句
+    #: 微信消息。要长期留的那份由记忆层决定（使用者自己选），不该被一个调试视图绕过去。
+    transcript: list[dict] = field(default_factory=list)
+    #: 被环形缓冲挤掉的条数。序号要连续跨过它们，否则页面会把新条目当成旧的。
+    _dropped: int = 0
     _stop: threading.Event = field(default_factory=threading.Event, repr=False)
+
+    # ------------------------------------------------------------------ 会话记录
+
+    def _record(self, direction: str, **fields: Any) -> dict:
+        """往会话记录里写一条。返回写进去的那条，好让调用方拿到它的序号。
+
+        序号（``seq``）是页面拉增量的游标。用序号而不是时间戳：同一毫秒里可能有两条，
+        而一个会漏条目的游标比没有游标更糟 —— 它会让「刚才那条去哪了」变成一个偶发问题。
+        """
+        entry = {
+            "seq": len(self.transcript) + self._dropped + 1,
+            "at": time.strftime("%H:%M:%S"),
+            "direction": direction,
+            **fields,
+        }
+        self.transcript.append(entry)
+        if len(self.transcript) > TRANSCRIPT_MAX:
+            # 丢最旧的，并把丢掉的条数记住 —— 不记的话序号会重复，页面会把新条目当旧的。
+            overflow = len(self.transcript) - TRANSCRIPT_MAX
+            del self.transcript[:overflow]
+            self._dropped += overflow
+        return entry
+
+    def read_transcript(self, since: int = 0, limit: int = 200) -> dict[str, Any]:
+        """从游标之后读会话记录。页面每隔一两秒问一次。"""
+        rows = [row for row in self.transcript if int(row.get("seq", 0)) > int(since or 0)]
+        capped = rows[: max(1, int(limit or 200))]
+        return {
+            "entries": capped,
+            "next": int(capped[-1]["seq"]) if capped else int(since or 0),
+            "dropped": self._dropped,
+        }
+
+    def chats(self) -> list[dict[str, Any]]:
+        """出现过的会话，最近的在前。控制台左边那一列。"""
+        latest: dict[str, dict[str, Any]] = {}
+        for row in self.transcript:
+            chat = str(row.get("chat_id") or "")
+            if not chat:
+                continue
+            entry = latest.setdefault(chat, {"chat_id": chat, "messages": 0})
+            entry["messages"] += 1
+            entry["at"] = row.get("at", "")
+            entry["last"] = str(row.get("text") or "")[:60]
+            entry["sender"] = row.get("sender", "")
+        return sorted(latest.values(), key=lambda row: row.get("at", ""), reverse=True)
+
+    def send_text(self, chat_id: str, text: str) -> Mapping[str, Any] | None:
+        """控制台手打一条发出去。**不走 agent** —— 那一栏是「我自己说」，不是「让它答」。
+
+        ``reply_context`` 从这个 peer 最近一条入站消息里取：微信要求每条出站回复回带该 peer
+        最新的 ``context_token``，而那是通道自己维护的。这里传空 mapping，让通道去查它的表 ——
+        由页面来提供一个协议内部的令牌是让上层知道了它不该知道的事。
+        """
+        body = str(text or "").strip()
+        if not body:
+            raise ChannelError("要发的内容是空的")
+        sent = self._safe_send(OutgoingMessage(chat_id=str(chat_id), text=body))
+        self._record("out", chat_id=str(chat_id), text=body, by="console", sent=bool(sent))
+        return sent
 
     # ------------------------------------------------------------------ 转写
 
@@ -110,6 +181,14 @@ class ChannelRunner:
             kind=message.kind,
             sender_tail=message.sender[-4:],
         )
+        self._record(
+            "in",
+            chat_id=message.chat_id,
+            sender=message.sender,
+            text=text,
+            kind=message.kind,
+            source=source,
+        )
         # **speaker 永远不传。** 微信 id 证明不了对面是谁，而 `shell.run` 要已验证说话人。
         try:
             result = self.runtime.say(text, speak=False)
@@ -137,6 +216,15 @@ class ChannelRunner:
             )
         )
         self.handled += 1
+        self._record(
+            "out",
+            chat_id=message.chat_id,
+            text=reply,
+            by="agent",
+            route=getattr(result, "route", ""),
+            voice_out=bool(audio),
+            sent=bool(sent),
+        )
         return {
             "route": getattr(result, "route", ""),
             "ok": bool(getattr(result, "ok", False)),
@@ -223,7 +311,9 @@ class ChannelRunner:
             "voice_out": self.reply_with_voice and self.tts is not None,
             "local_asr": self.asr is not None,
             "last_error": self.last_error,
+            "running": not self._stop.is_set(),
+            "messages": len(self.transcript) + self._dropped,
         }
 
 
-__all__ = ["PROVIDER_STT_NOTE", "TURN_TIMEOUT_S", "ChannelRunner"]
+__all__ = ["PROVIDER_STT_NOTE", "TRANSCRIPT_MAX", "TURN_TIMEOUT_S", "ChannelRunner"]
