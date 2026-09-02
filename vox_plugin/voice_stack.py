@@ -283,15 +283,28 @@ def open_voice_stack(
         pass
 
     resolved_device = device if device is not None else resolve_device(resolved)
-    if isinstance(resolved_device, str):
-        # 配置里写了名字，但没有一只输入设备匹配得上（或者同一个 host API 下重名）。
-        # **这一条要在 start() 抛出之前说出来**：那条原始报错来自 PortAudio，读起来像
-        # 「设备 -1 查询失败」，而真实情况是「你配的那只麦克风现在不在」。
+    if device is None and isinstance(resolved_device, str):
+        # 配置里写了名字，但没有一只输入设备匹配得上（可用的那几个 host API 里没有它）。
+        #
+        # **改用系统默认，而不是把名字原样交给 PortAudio。** 交给它的话抛的是
+        # `Multiple input devices found for '耳机'` 后面跟两条 WDM-KS 条目 —— 而那两条
+        # 恰恰是 `_match_device` 刻意排除掉的（它们开不起来，见 config.py 的
+        # `_EXCLUDED_HOST_APIS`）。让一个已经判断过「这些不能用」的解析结果去触发一条
+        # 列举它们的报错，是最容易把人带错方向的一种失败。
+        #
+        # 退到默认设备之后麦克风可能是聋的（这台机器上默认就是那只峰值 0.00003 的阵列），
+        # 但那条路有专门的探测：开麦 4 秒后「全零输入」进运行日志（error 级）。
+        # 「有一只可能听不见的麦克风」比「一只都没有」可诊断得多。
+        #
+        # **只对来自配置的名字这么做。** ``device=`` 参数是调用方点名的（探针的
+        # ``--device`` 走这条），那种情况原样交出去 —— 替调用方改主意会让一个专门指定
+        # 设备的测试悄悄测到别的设备上。
         warnings.append(
-            f"input.device = {resolved_device!r} 没匹配到任何输入设备 —— "
-            "耳机可能没插，或者同名设备在同一个 host API 下有多个；"
-            "控制台就绪清单里有当前的设备清单"
+            f"input.device = {resolved_device!r} 没匹配到任何可用的输入设备 —— "
+            "耳机可能没插（蓝牙设备断开后就不在枚举里了）。这一轮改用**系统默认设备**，"
+            "它若是聋的会在开麦 4 秒后进运行日志；控制台就绪清单里有当前的设备清单"
         )
+        resolved_device = None
 
     capture = SounddeviceWakeCapture(
         kws,

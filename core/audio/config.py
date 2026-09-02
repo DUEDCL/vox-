@@ -248,12 +248,41 @@ def resolve_keywords_file(config: dict[str, Any]) -> Path | None:
 #: 而且这台机器上耳机那一条只有 WASAPI 报了 16 kHz（其余报 44.1 kHz，要重采样）。
 _HOST_API_PREFERENCE = ("wasapi", "mme", "directsound", "wdm-ks")
 
+#: 按名字选设备时**直接排除**的 host API。
+#:
+#: WDM-KS 是 PortAudio 暴露出来的内核流路径。它在清单里看着是个候选，
+#: ``check_input_settings`` 也说这个格式可以 —— 然后 ``start()`` 抛
+#: ``Unanticipated host error``。2026-09-01 在这台机器上两个方向各抓到一次：
+#: 输出 ``GLE = 0x00000490``、输入 ``GLE = 0x0000048F``（都是蓝牙 hands-free 那两条）。
+#:
+#: 所以它不能当「最后的退路」：选中一个开不起来的设备比一个都没选中更糟 ——
+#: 前者的报错是一串 IOCTL 错误码，后者是「你配的那只麦克风现在不在」。名字解析不到时
+#: ``open_voice_stack`` 会给后面那句话。真要用 WDM-KS 的人可以在配置里写索引，
+#: 那条路没有被关掉。
+_EXCLUDED_HOST_APIS = ("wdm-ks",)
 
-def _match_device(fragment: str) -> int | str:
-    """名字片段 -> 设备索引。消不掉歧义时原样返回，让调用方拿到 sounddevice 的报错。
 
-    ``sounddevice`` 装不上时也原样返回：这个模块是配置层，不该因为一个可选依赖缺失
-    而让读配置失败。
+def _match_device(fragment: str, sample_rate: int = 16000) -> int | str:
+    """名字片段 -> 设备索引。
+
+    ``sounddevice`` 装不上或枚举失败时原样返回：这个模块是配置层，不该因为一个可选依赖
+    缺失而让读配置失败。
+
+    三步收窄，每一步都有实测理由：
+
+    1. **只留能真的按这个采样率打开的**（``check_input_settings``）。这一步删掉的不是理论
+       上的候选：WDM-KS 那几条蓝牙 hands-free 条目常常只报 8 kHz，而 Realtek 阵列在
+       WASAPI 下只接受 2 通道 —— 它们在清单里看着像候选，一打开就抛。
+    2. **按 host API 优先级排**（见 ``_HOST_API_PREFERENCE``）。
+    3. **还并列就取最小索引，不再原样返回。**
+
+    第 3 步是 2026-09-01 改的。此前并列时返回名字片段，让 sounddevice 去抛
+    ``Multiple input devices found`` —— 理由是「真歧义不猜」。实测那个理由站不住：这台机器
+    上蓝牙耳机与一只蓝牙音箱的名字**都含「耳机」**，而蓝牙设备在两次枚举之间会出现/消失，
+    于是同一份配置有时解析成 WASAPI 的那一条、有时只剩两条 WDM-KS 并列 —— 后者直接让
+    麦克风开不起来。**设备选择不是安全边界**（安全边界是声纹门），在这里 fail-closed 保护
+    不了任何东西，只是把「可能选错一只麦克风」换成了「一只都没有」。选中的是哪一个由
+    ``describe_device()`` 报出来，就绪清单与启动日志都印它，所以选错是看得见的。
     """
     try:
         import sounddevice  # noqa: PLC0415 - 可选依赖，只在真要选设备时才导
@@ -264,6 +293,16 @@ def _match_device(fragment: str) -> int | str:
         apis = sounddevice.query_hostapis()
     except Exception:  # noqa: BLE001 - 设备枚举失败时退回原值
         return fragment
+
+    def openable(index: int) -> bool:
+        try:
+            sounddevice.check_input_settings(
+                device=index, channels=1, samplerate=int(sample_rate), dtype="float32"
+            )
+        except Exception:  # noqa: BLE001 - 打不开就不是候选
+            return False
+        return True
+
     needle = fragment.casefold()
     candidates: list[tuple[int, int]] = []
     for index, device in enumerate(devices):
@@ -272,6 +311,8 @@ def _match_device(fragment: str) -> int | str:
         if needle not in str(device.get("name", "")).casefold():
             continue
         api = str(apis[int(device["hostapi"])].get("name", "")).casefold().replace(" ", "")
+        if any(excluded in api for excluded in _EXCLUDED_HOST_APIS):
+            continue
         rank = next(
             (position for position, key in enumerate(_HOST_API_PREFERENCE) if key in api),
             len(_HOST_API_PREFERENCE),
@@ -279,13 +320,11 @@ def _match_device(fragment: str) -> int | str:
         candidates.append((rank, index))
     if not candidates:
         return fragment
-    best = min(rank for rank, _ in candidates)
-    tied = [index for rank, index in candidates if rank == best]
-    if len(tied) > 1:
-        # 同一个 host API 下重名：这是真歧义，不猜。原样返回让 sounddevice 报它的错，
-        # 那条错里带着候选清单。
-        return fragment
-    return tied[0]
+    usable = [entry for entry in candidates if openable(entry[1])]
+    # 一条都打不开时不要把候选清空 —— 那会退回名字片段并抛一个更难读的错。
+    pool = usable or candidates
+    best = min(rank for rank, _ in pool)
+    return min(index for rank, index in pool if rank == best)
 
 
 def resolve_device(config: dict[str, Any]) -> int | str | None:
@@ -300,7 +339,7 @@ def resolve_device(config: dict[str, Any]) -> int | str | None:
     try:
         return int(raw)
     except ValueError:
-        return _match_device(raw)
+        return _match_device(raw, int(config.get("input.sample_rate", 16000) or 16000))
 
 
 def describe_device(device: int | str | None) -> str:

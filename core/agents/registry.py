@@ -197,14 +197,30 @@ def _bridge(entry: Mapping[str, Any]) -> LocalEvoXTransport:
 
 
 def _resolve_cwd(raw: Any) -> str:
-    """``cwd`` 相对仓库根解析，不相对进程 cwd。
+    """``cwd`` 相对仓库根解析，不相对进程 cwd，并且**保证目录存在**。
 
     一个 agent 的工作目录决定它**能看见什么** —— 裸 CLI 会去读那个目录里的
     ``CLAUDE.md``、``git status``、随手 glob 到的文件。按进程 cwd 解析会让「从哪里启动
     Vox」改变 agent 的视野，而那不该是启动方式的函数。
+
+    ``~`` 与 ``%VAR%`` 会被展开。**这不是便利功能，是隔离的前提**：2026-09-01 实测，
+    工作目录设在仓库**内部**（`.agent-workspace`）时 `claude` 的回答里出现了本仓库的
+    `git status` —— 它点名了当时正在改的两个文件。git 会从 cwd 往上找仓库根，所以
+    「放在仓库里的子目录」根本不是一道边界。要真隔离，路径必须落在仓库之外，而仓库之外
+    的路径不能写死在一个进版本控制的配置文件里 —— 它得是 `~/.vox/...` 这种形状。
+
+    目录不存在就建出来。不建的后果不是「少一层隔离」：``Popen`` 会直接失败，而那一轮
+    到达调用方的形状是「cannot start 'claude'」—— 读起来像命令没装。
     """
-    path = Path(str(raw))
-    return str(path if path.is_absolute() else workspace_root() / path)
+    text = os.path.expandvars(str(raw))
+    path = Path(text).expanduser()
+    resolved = path if path.is_absolute() else workspace_root() / path
+    try:
+        resolved.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # 建不出来（权限、路径非法）就照原样交给 Popen：它的报错比这里编一个更准确。
+        pass
+    return str(resolved)
 
 
 def _check_entries(entries: Any) -> None:

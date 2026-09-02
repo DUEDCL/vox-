@@ -165,3 +165,22 @@ def test_a_stack_holds_no_speaker_identity(nowhere):
     assert not hasattr(stack, "speaker")
     assert not hasattr(stack, "verified_speaker")
     stack.close()
+
+
+def test_an_unresolvable_config_name_falls_back_to_the_default_device(nowhere):
+    """**名字解析不到时不要把名字原样交给 PortAudio。**
+
+    交给它抛的是 `Multiple input devices found for '耳机'` 后面跟两条 WDM-KS 条目 ——
+    而那两条恰恰是 `_match_device` 刚刚判断过「开不起来」才排除掉的。让一个已经做过判断的
+    解析结果去触发一条列举它们的报错，是最容易把人带错方向的一种失败。
+
+    退到系统默认之后麦克风可能是聋的，但那条路有专门的探测（开麦 4 秒后「全零输入」进
+    运行日志）。「有一只可能听不见的麦克风」比「一只都没有」可诊断得多。
+    """
+    nowhere["input.device"] = "根本不存在的设备名"
+
+    stack = open_voice_stack(nowhere, require_verification=False)
+
+    assert stack.capture.device is None
+    assert any("没匹配到任何可用的输入设备" in w for w in stack.warnings)
+    assert any("系统默认" in w for w in stack.warnings)

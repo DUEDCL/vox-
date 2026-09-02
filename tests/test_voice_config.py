@@ -219,6 +219,16 @@ class _FakeSd:
             return list(self._apis)
         return self._apis[int(index)]
 
+    #: 哪些索引真的能按 16 kHz 单声道打开。``None`` = 这个假 sounddevice 不实现
+    #: ``check_input_settings``（旧行为），用来钉住「探测不可用时不要把候选清空」。
+    openable: set[int] | None = None
+
+    def check_input_settings(self, device=None, channels=1, samplerate=16000, dtype=None):
+        if self.openable is None:
+            raise AttributeError("check_input_settings")
+        if int(device) not in self.openable:
+            raise ValueError(f"device {device} cannot open at {samplerate}")
+
 
 @pytest.fixture
 def fake_sd(monkeypatch):
@@ -293,3 +303,68 @@ def test_the_shipped_config_does_not_pin_an_index():
     from core.audio.config import load_voice_config
 
     assert not str(load_voice_config()["input.device"]).strip().isdigit()
+
+
+def test_a_candidate_that_cannot_open_at_this_rate_is_dropped(fake_sd):
+    """清单里像候选、一打开就抛的条目必须先被删掉。
+
+    实测两种：WDM-KS 那几条蓝牙 hands-free 只报 8 kHz；Realtek 阵列在 WASAPI 下只接受
+    2 通道。它们排在优先级前面时，不做这一步就会选中一个开不起来的设备。
+    """
+    from core.audio.config import resolve_device
+
+    fake_sd.openable = {1}  # 只有 MME 那条耳机能开，WASAPI 那条（索引 4）不能
+    assert resolve_device({"input.device": "耳机"}) == 1
+
+
+def test_a_tie_picks_the_lowest_index_instead_of_failing(fake_sd):
+    """**并列时不再原样返回名字。**
+
+    此前并列返回名字片段，让 sounddevice 抛 `Multiple input devices found` —— 理由是
+    「真歧义不猜」。实测那个理由站不住：这台机器上蓝牙耳机与一只蓝牙音箱的名字都含
+    「耳机」，而蓝牙设备在两次枚举之间会出现/消失，于是同一份配置有时解析成 WASAPI 那条、
+    有时只剩两条 WDM-KS 并列 —— 后者直接让麦克风开不起来。
+
+    设备选择不是安全边界（安全边界是声纹门），在这里 fail-closed 只是把「可能选错一只
+    麦克风」换成了「一只都没有」。选中的是哪一个由 `describe_device()` 报出来。
+    """
+    from core.audio.config import resolve_device
+
+    fake_sd._devices.append(
+        {"name": "耳机 (蓝牙音箱)", "max_input_channels": 1, "hostapi": 1}
+    )
+    fake_sd.openable = {4, 5}
+
+    assert resolve_device({"input.device": "耳机"}) == 4
+
+
+def test_probing_being_unavailable_does_not_empty_the_candidates(fake_sd):
+    """``check_input_settings`` 抛的时候（老版 sounddevice、或者驱动不答）不能把候选清空 ——
+    那会退回名字片段并抛一个更难读的错。"""
+    from core.audio.config import resolve_device
+
+    fake_sd.openable = None
+    assert resolve_device({"input.device": "耳机"}) == 4
+
+
+def test_wdm_ks_is_never_chosen_by_name(fake_sd):
+    """**WDM-KS 不能当退路。**
+
+    它在清单里看着是候选，``check_input_settings`` 也说格式没问题 —— 然后 ``start()`` 抛
+    ``Unanticipated host error``（2026-09-01 实测两个方向各一次：输出 GLE 0x490、
+    输入 GLE 0x48F，都是蓝牙 hands-free 那两条）。
+
+    选中一个开不起来的设备比一个都没选中更糟：前者的报错是一串 IOCTL 错误码，后者是
+    「你配的那只麦克风现在不在」。写索引那条路没有被关掉。
+    """
+    from core.audio.config import resolve_device
+
+    fake_sd._apis.append({"name": "Windows WDM-KS"})
+    fake_sd._devices = [
+        {"name": "耳机 (蓝牙 Hands-Free)", "max_input_channels": 1, "hostapi": 2},
+    ]
+    fake_sd.openable = {0}  # 探测说它可以 —— 而真开的时候不行
+
+    assert resolve_device({"input.device": "耳机"}) == "耳机"
+    # 索引仍然原样放行：这一条排除的是**按名字**选到它。
+    assert resolve_device({"input.device": "0"}) == 0

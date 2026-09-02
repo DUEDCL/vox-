@@ -535,11 +535,66 @@ def test_a_relative_agent_cwd_resolves_against_the_repo_not_the_process():
     from core.tools.policy import workspace_root
 
     adapter = build_adapter(
-        {"name": "a", "kind": "cli", "command": sys.executable, "cwd": ".agent-workspace"}
+        {"name": "a", "kind": "cli", "command": sys.executable, "cwd": ".agent-scratch"}
     )
 
     assert Path(adapter.cwd).is_absolute()
-    assert Path(adapter.cwd) == workspace_root() / ".agent-workspace"
+    assert Path(adapter.cwd) == workspace_root() / ".agent-scratch"
+    # 相对路径这条路仍然支持，但**出厂配置不用它**：见
+    # ``test_the_shipped_agent_cwd_is_outside_the_repository``。
+
+
+def test_a_tilde_in_the_agent_cwd_is_expanded_and_created(tmp_path, monkeypatch):
+    """``~`` 与 ``%VAR%`` 要展开，目录不存在要建出来。
+
+    **这不是便利功能，是隔离的前提。** 真隔离要求路径落在仓库之外，而仓库之外的路径不能
+    写死在一个进版本控制的配置文件里 —— 它得是 `~/.vox/...` 这种形状。
+
+    建目录同样不是可选的：``Popen`` 遇到不存在的 cwd 直接失败，而那一轮到达调用方的形状
+    是「cannot start 'claude'」—— 读起来像命令没装。
+    """
+    from pathlib import Path
+
+    from core.agents.registry import build_adapter
+
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    adapter = build_adapter(
+        {"name": "a", "kind": "cli", "command": sys.executable, "cwd": "~/.vox/agent-workspace"}
+    )
+
+    resolved = Path(adapter.cwd)
+    assert resolved == tmp_path / ".vox" / "agent-workspace"
+    assert resolved.is_dir(), "目录必须被建出来，否则 Popen 会报成「命令没装」"
+
+
+def test_the_shipped_agent_cwd_is_outside_the_repository():
+    """**出厂配置里每个 CLI 后端的工作目录都必须在仓库之外。**
+
+    2026-09-01 实测：`cwd` 设在仓库**内部**（`.agent-workspace`）时 `claude` 的回答里出现了
+    本仓库的 `git status` —— 它点名了当时正在改的 `cli.py` 与 `environment.py`。git 从 cwd
+    往上找仓库根，所以「放在仓库里的子目录」根本不是一道边界。
+
+    这一条钉的是出厂值而不是机制：机制（相对路径按仓库根解析）仍然支持，只是不该被用来
+    做隔离。
+    """
+    from pathlib import Path
+
+    from core.agents.registry import build_adapter, enabled_entries, load_agents_config
+    from core.tools.policy import workspace_root
+
+    repo = workspace_root().resolve()
+    checked = 0
+    for entry in enabled_entries(load_agents_config()):
+        if entry.get("kind") != "cli" or "cwd" not in entry:
+            continue
+        checked += 1
+        resolved = Path(build_adapter(entry).cwd).resolve()
+        assert repo not in resolved.parents and resolved != repo, (
+            f"{entry['name']} 的工作目录在仓库里：{resolved}"
+        )
+    assert checked, "出厂配置里应当至少有一个带 cwd 的 CLI 后端"
 
 
 def test_an_absolute_agent_cwd_is_left_alone(tmp_path):
@@ -557,7 +612,13 @@ def test_an_absolute_agent_cwd_is_left_alone(tmp_path):
 def test_the_shipped_claude_entry_does_not_run_in_the_repo_root():
     """The regression: with no ``cwd`` the child inherits Vox's, which is the repo
     root -- and a bare ``claude`` there answers about *this project* rather than about
-    what the user said. Observed as "你好" coming back as a Vox status report."""
+    what the user said. Observed as "你好" coming back as a Vox status report.
+
+    **上一版这里还要求 cwd 在仓库之内**（`workspace_root() in parents`），而 2026-09-01
+    实测证明那个方向是错的：在仓库内部的子目录里 git 照样往上找到仓库根，`claude` 的回答
+    里出现了本仓库正在改的文件名。现在只要求「不是仓库根」，而「必须在仓库之外」由
+    ``test_the_shipped_agent_cwd_is_outside_the_repository`` 钉。
+    """
     from pathlib import Path
 
     from core.agents.registry import build_adapter, load_agents_config
@@ -568,7 +629,6 @@ def test_the_shipped_claude_entry_does_not_run_in_the_repo_root():
 
     assert adapter.cwd is not None, "the shipped claude entry must pin a working directory"
     assert Path(adapter.cwd) != workspace_root()
-    assert workspace_root() in Path(adapter.cwd).parents
 
 
 # --------------------------------------------------- 语音提示（2026-09-01 的延迟修正）

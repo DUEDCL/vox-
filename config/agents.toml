@@ -50,9 +50,13 @@ env_passthrough = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_
 prompt_stdin = true
 # agent 的工作目录。**隔离是刻意的**:裸 CLI 会去读工作目录里的 CLAUDE.md、跑
 # `git status`、随手 glob 到本项目的源码 —— 那些文件和用户那句话通常毫无关系,而它们
-# 会挤掉真正的请求(实测:一句「你好」换回一整段 Vox 项目进度报告)。相对路径按仓库根
-# 解析,所以从哪启动 Vox 都是同一个目录。目录不在版本控制里(见 .gitignore)。
-cwd = ".agent-workspace"
+# 会挤掉真正的请求(实测:一句「你好」换回一整段 Vox 项目进度报告)。
+#
+# **2026-09-01 从 ".agent-workspace" 改成仓库之外。** 上一版把它放在仓库**内部**,而那
+# 根本不是一道边界:git 从 cwd 往上找仓库根,于是 `claude` 照样看得见本仓库 ——
+# 实测它的回答里点名了当时正在改的 `cli.py` 与 `environment.py`。
+# `~` 与 `%VAR%` 会被展开,目录不存在会被建出来(见 registry.py 的 `_resolve_cwd`)。
+cwd = "~/.vox/agent-workspace"
 capabilities = ["code", "reason", "chat", "local-exec"]
 cost = 4
 latency_ms = 2500
@@ -90,9 +94,9 @@ enabled = false
 command = "opencode"
 args = ["run"]
 # 与 claude 同款两条:Windows 上它也是 npm 的 .cmd shim(cmd.exe 命令行不能跨行),
-# 工作目录也必须隔离(否则它会去读本项目的源码和 git 状态)。
+# 工作目录也必须隔离,而且必须在仓库**之外**(见 claude 那一条的理由)。
 prompt_stdin = true
-cwd = ".agent-workspace"
+cwd = "~/.vox/agent-workspace"
 capabilities = ["code", "chat", "local-exec"]
 cost = 3
 latency_ms = 2500

@@ -14,13 +14,13 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1398 passed, 3 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1405 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
 | `core/audio/`(除 speaker) | `pytest tests/test_provider_adapter.py tests/test_sherpa_provider.py -q` | 全绿 |
-| `core/audio/config.py` `config/voice.toml` | `pytest tests/test_voice_config.py -q` | **20 passed** |
-| `vox_plugin/voice_stack.py` | `pytest tests/test_voice_assembly.py -q` | **16 passed** |
+| `core/audio/config.py` `config/voice.toml` | `pytest tests/test_voice_config.py -q` | **31 passed** |
+| `vox_plugin/voice_stack.py` | `pytest tests/test_voice_assembly.py -q` | **17 passed** |
 | `core/audio/speaker.py` `ring.py` `capture.py` | `pytest tests/test_speaker.py tests/test_speaker_privacy.py tests/test_speaker_hardening.py -q` | **63 passed**（**不需要声纹模型**） |
 | 声纹身份接线（capture→plugin→runtime） | `pytest tests/test_speaker_identity.py -q` | **15 passed** |
 | 唤醒后的聆听 / 确认音静音窗 / 托盘 | `pytest tests/test_capture_listening.py tests/test_acks.py tests/test_runtime.py -q` | **93 passed** |
@@ -219,7 +219,9 @@ pm` 不在 Windows PATH 上，而 `claude` 装在那里** —— 实测用户 PA
 - **路由跳过「这台机器上没装」的后端，但清单里仍然列着它** —— `DefaultRouter.mark_unavailable()` 与熔断是两件事：熔断记「它一直失败」（会自愈），这个记「主机上没有」（只有重新检查才变）。由 `VoiceRuntime.start()` 从 `adapter.check()` 灌进去。合并两者会让熔断的半开状态把没装的后端放回来
 - **能力闸门挡空了会降级，而不是让这一轮失败** —— `Dispatcher._run_agents` 发现「闸门对了但那个后端没装」时，退一步用能力不设限的计划，`reason` 里带上原因。此前是整轮失败，使用者听到「agent 报告失败」——一句既不回答也不说明的话
 - **两条 agent 路各有一句「这会被念出来」，缺了就答成半分钟** —— HTTP 走 `environment.speech_system_prompt()`（40 字 / 两句的可数上限），CLI 走 `environment.SPEECH_BRIEF` + `cli.py::_prompt_for()`。实测 120 字要念 28 秒，而这把音色 4.3 字/秒。**提示必须是一行**、**分隔符按通道选**（stdin 用空行、命令行参数用一个空格）：cmd.exe 的命令行不能跨行，多行提示会让 `%1` 只剩提示而用户那句话整段消失，回合照报成功
-- **`claude` 仍然看得见 Vox 仓库** —— `cwd = ".agent-workspace"` 在仓库**内部**，git 会往上找仓库根，于是它的回答里会出现本仓库的 `git status`（实测点名了正在改的两个文件）。隔离不完整，已知缺口
+- **agent 的工作目录必须在仓库之外** —— `cwd = "~/.vox/agent-workspace"`。放在仓库内部（旧值 `.agent-workspace`）**不是一道边界**：git 从 cwd 往上找仓库根，实测 `claude` 的回答里点名了当时正在改的 `cli.py` 与 `environment.py`。改到仓库外之后同一句话的回答干净了，而且首声从 43.1 s 降到 12.5 s（它不再扫仓库）。`~` 与 `%VAR%` 会展开、目录会被建出来（不建则 `Popen` 失败，报成「命令没装」）
+- **按名字选输入设备时排除 WDM-KS** —— 它 `check_input_settings` 说格式没问题，`start()` 抛 `Unanticipated host error`（实测输出 GLE 0x490、输入 GLE 0x48F）。并列时取最小索引而不是返回名字：**设备选择不是安全边界**（那是声纹门），在这里 fail-closed 只是把「可能选错一只麦克风」换成「一只都没有」。名字彻底解析不到时退到系统默认并给可读警告，聋的话由「全零输入」探测在 4 秒后进日志
+- **蓝牙耳机不能同时当扬声器和麦克风** —— A2DP（无麦克风）与 HFP（有麦克风）之间由 Windows 切换。实测播放一开始，采集流收到 112 块全零而流照常开着。所以「扬声器放录音、麦克风收」的回环测试要走不共享链路的组合，而即便那样 KWS 也不命中（见 `docs/research/prototype-results.md`）—— 一只笔记本扬声器播放的录音不是一个在说话的人，REAL-MIC 只能由真人跑 `scripts/acceptance/real_mic_e2e.py`
 - **测试不许把 `config/*.toml` 当夹具** —— `tests/test_models_config.py` 曾复制 `config/models.toml`，于是使用者在控制台上改一次 LLM 方案就让 11 条测试变红（其中 10 条是「注入坏值」的 `.replace` 变成空操作 → DID NOT RAISE）。夹具用文件内自带的 `FIXTURE`；出厂文件只测**不变式**（加载得动、`active` 指向真实 profile、字段都在 `FIELDS` 里）
 
 ## 注意事项
