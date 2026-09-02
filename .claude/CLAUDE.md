@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1395 passed, 3 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1398 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -212,6 +212,8 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 pm` 不在 Windows PATH 上，而 `claude` 装在那里** —— 实测用户 PATH 与系统 PATH 都不含 npm（npm 装全局包时不改 PATH，这是默认状态不是配坏了）。后果不是「少一个 agent」：能力闸门把「帮我改这个函数」正确地判给 claude，然后整轮失败。`core/agents/cli.py` 的 `which()` 因此在 PATH 之后多看一个目录（`_extra_search_dirs`），`check()` 报解析后的**绝对路径**。带目录分隔的命令不走后备
 - **路由跳过「这台机器上没装」的后端，但清单里仍然列着它** —— `DefaultRouter.mark_unavailable()` 与熔断是两件事：熔断记「它一直失败」（会自愈），这个记「主机上没有」（只有重新检查才变）。由 `VoiceRuntime.start()` 从 `adapter.check()` 灌进去。合并两者会让熔断的半开状态把没装的后端放回来
 - **能力闸门挡空了会降级，而不是让这一轮失败** —— `Dispatcher._run_agents` 发现「闸门对了但那个后端没装」时，退一步用能力不设限的计划，`reason` 里带上原因。此前是整轮失败，使用者听到「agent 报告失败」——一句既不回答也不说明的话
+- **两条 agent 路各有一句「这会被念出来」，缺了就答成半分钟** —— HTTP 走 `environment.speech_system_prompt()`（40 字 / 两句的可数上限），CLI 走 `environment.SPEECH_BRIEF` + `cli.py::_prompt_for()`。实测 120 字要念 28 秒，而这把音色 4.3 字/秒。**提示必须是一行**、**分隔符按通道选**（stdin 用空行、命令行参数用一个空格）：cmd.exe 的命令行不能跨行，多行提示会让 `%1` 只剩提示而用户那句话整段消失，回合照报成功
+- **`claude` 仍然看得见 Vox 仓库** —— `cwd = ".agent-workspace"` 在仓库**内部**，git 会往上找仓库根，于是它的回答里会出现本仓库的 `git status`（实测点名了正在改的两个文件）。隔离不完整，已知缺口
 - **测试不许把 `config/*.toml` 当夹具** —— `tests/test_models_config.py` 曾复制 `config/models.toml`，于是使用者在控制台上改一次 LLM 方案就让 11 条测试变红（其中 10 条是「注入坏值」的 `.replace` 变成空操作 → DID NOT RAISE）。夹具用文件内自带的 `FIXTURE`；出厂文件只测**不变式**（加载得动、`active` 指向真实 profile、字段都在 `FIELDS` 里）
 
 ## 注意事项
