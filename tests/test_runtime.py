@@ -651,6 +651,7 @@ class TrayBridge:
     def __init__(self, fail: bool = False) -> None:
         self.trays: list[tuple[str, bool]] = []
         self.events: list[dict] = []
+        self.visible: list[bool] = []
         self.fail = fail
 
     def send(self, event):
@@ -664,6 +665,7 @@ class TrayBridge:
         return True
 
     def set_visible(self, visible):
+        self.visible.append(bool(visible))
         return True
 
     def describe(self):
@@ -1034,3 +1036,100 @@ def test_follow_up_failure_never_fails_the_turn():
 
     assert result.ok is True
     assert runtime._following_up is False
+
+
+# ---------------------------------------------------- 结束本次对话（2026-09-03）
+
+
+def test_a_farewell_never_reaches_the_dispatcher():
+    """「退下吧」不派发。
+
+    一次派发是 2–20 秒和一次出网，换回来的是一句礼貌话 —— 而这句话要的不是话，是动作。
+    """
+    capture = FollowUpCapture()
+    runtime = _talking_runtime(capture)
+
+    result = runtime.say("退下吧")
+
+    assert runtime.dispatcher.calls == [], "结束对话不该走派发"
+    assert result.route == "dismiss"
+    assert result.ok is True
+    assert result.text == runtime_module.FAREWELL
+
+
+def test_a_farewell_closes_the_microphone_instead_of_reopening_it():
+    """**这一条是这个功能的全部要点。**
+
+    让 agent 来答「退下吧」的话，它会说一句「好的再见」，然后 ``_speak_and_follow_up``
+    照旧把话筒留开 8 秒 —— 那正是使用者刚刚要关掉的东西。
+    """
+    capture = FollowUpCapture()
+    runtime = _talking_runtime(capture)
+
+    runtime.say("结束本次对话")
+
+    assert capture.started_listening == 0, "结束之后不该再开聆听"
+    assert runtime._following_up is False
+    assert runtime.plugin.machine.state == VoiceState.IDLE
+
+
+def test_a_farewell_hides_the_orb_at_once():
+    """不是十秒倒计时：人刚明确说了结束，一颗还在桌面上待十秒的球说的是反话。"""
+    bridge = TrayBridge()
+    capture = FollowUpCapture()
+    runtime = _talking_runtime(capture)
+    runtime.bridge = bridge
+
+    runtime.say("没事了")
+
+    assert bridge.visible[-1] is False
+    assert runtime._hide_timer is None, "立刻收，所以不该留着倒计时"
+
+
+def test_a_farewell_is_still_a_whole_turn():
+    """事件序列一条不少，少的只有中间那次派发。
+
+    绕开状态机自己发几个事件的「快路径」会让这一轮在唤醒球和日志里凭空消失，
+    而「我说了它没反应」和「它听见了并且结束了」必须能分开。
+    """
+    bridge = TrayBridge()
+    capture = FollowUpCapture()
+    runtime = _talking_runtime(capture)
+    runtime.bridge = bridge
+
+    runtime.say("退下吧")
+
+    types = [event["type"] for event in bridge.events]
+    for expected in ("turn.started", "asr.final", "llm.delta", "tts.chunk", "turn.done"):
+        assert expected in types, expected
+    # 最后一条状态是待机，而且它排在 turn.done 之后 —— 顺序反了就是「先收摊再说完」。
+    states = [event for event in bridge.events if event["type"] == "state.changed"]
+    assert states[-1]["payload"]["to"] == "idle"
+    assert types.index("turn.done") < len(types) - 1
+    assert runtime.turns == 1
+
+
+def test_the_farewell_is_muted_like_any_other_playback():
+    """告别语也是从扬声器出来的，而采集此刻已经回到唤醒模式 —— 不压窗就是让它听自己说话。"""
+    capture = FollowUpCapture()
+    runtime = _talking_runtime(capture)
+    runtime.plugin.attach_tts(SimpleNamespace(
+        speak_segments=lambda chunks: None, is_stopped=lambda: False, stop=lambda: None
+    ))
+
+    runtime.say("拜拜")
+
+    assert capture.muted[0] == ACK_MUTE_CAP_S
+    assert capture.muted[-1] == ACK_MUTE_TAIL_S
+
+
+def test_an_ordinary_request_still_runs_a_turn():
+    """反向的护栏：结束判定不许把普通请求吞掉。"""
+    capture = FollowUpCapture()
+    runtime = _talking_runtime(capture)
+
+    result = runtime.say("帮我结束这个进程")
+
+    assert runtime.dispatcher.calls[0][0] == "帮我结束这个进程"
+    assert result.route == "agent"
+    assert runtime._following_up is True

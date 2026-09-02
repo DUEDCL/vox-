@@ -34,14 +34,14 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
-from core.agents.contract import AgentDescriptor, Task
+from core.agents.contract import AgentChunk, AgentDescriptor, Task
 from core.agents.registry import load_agents_config, open_agents
 from core.audio.acks import ACK_MUTE_CAP_S, ACK_MUTE_TAIL_S
 from core.desktop_bridge import DesktopBridge, DesktopBridgeError, find_desktop_binary
 from core.dispatch import DefaultAggregator, DefaultRouter, Dispatcher, DispatchResult
 from core.dispatch.breaker import CircuitBreaker
 from core.dispatch.contract import Intent
-from core.dispatch.intent import RuleBasedIntentResolver
+from core.dispatch.intent import RuleBasedIntentResolver, is_dismissal
 from core.events import AGENT_SCHEMA_PATH, build_event, validate_event
 from core.memory import open_memory
 from core.state import VoiceState
@@ -55,6 +55,13 @@ _ANSWERED = frozenset({"tool.confirm_required"})
 #: 「谁在什么时候试图唤醒」的记录，和运行日志同一个姿态（环形、进程内、不进磁盘）。
 #: 30 条约等于一次调声纹的完整过程，够回答「刚才那几次为什么被拒」。
 WAKE_LOG_MAX = 30
+
+#: 「退下吧」之后回的那一句。**短**：它出现在使用者已经决定结束的时刻，多一个字都是挽留。
+#:
+#: 它同时是「怎么回来」的说明 —— 连续对话的窗口不会再开，下一句必须重新喊唤醒词。一个
+#: 只回「好的」的助手把这件事留给使用者自己去发现，而发现的方式通常是对着一颗已经收起来
+#: 的球说话。
+FAREWELL = "好，随时叫我"
 
 
 @dataclass
@@ -373,6 +380,10 @@ class VoiceRuntime:
         if self.dispatcher is None:
             raise RuntimeError("voice runtime dispatcher is not available")
         self._reach_listening()
+        # 「退下吧」「结束本次对话」—— 这一句不派给任何后端，应一声就收。
+        # 判定在 core/dispatch/intent.py 的 is_dismissal（纯函数、整句锚定）。
+        if is_dismissal(text):
+            return self._dismiss(text)
         self.plugin.submit_text(text)
         self.turns += 1
         task = Task(id=f"t-{self.turns}", text=text, session_id=self.session_id)
@@ -546,6 +557,66 @@ class VoiceRuntime:
         """
         capture = getattr(self.plugin, "audio_capture", None)
         return float(getattr(capture, "listen_grace_s", 0.0) or 0.0)
+
+    def _dismiss(self, text: str) -> DispatchResult:
+        """「退下吧」：应一句，然后**真的结束** —— 不派发、不再开窗口、球立刻收。
+
+        ## 为什么不让后端来答这一句
+
+        一次派发是 2–20 秒和一次出网，而这句话的正确回答是固定的一句。更要紧的是它要的
+        **不是一句话而是一个动作**：连续对话的窗口必须不再打开。让 agent 来答的话它会礼貌
+        地说「好的再见」，然后 ``_speak_and_follow_up`` 照旧把话筒开着等 8 秒 —— 那正是
+        使用者刚刚要关掉的东西。
+
+        ## 为什么仍然走 ``submit_text`` / ``complete_turn``
+
+        事件序列一条不少（turn.started → asr.final → THINKING → llm.delta → tts.chunk →
+        SPEAKING → turn.done），记忆里的这一轮也照旧写。少的只有中间那次派发。绕开状态机
+        自己发几个事件的「快路径」会让这一轮在唤醒球和日志里凭空消失，而「我说了它没反应」
+        与「它听见了并且结束了」必须能分开。
+
+        静音窗和 ``_speak_and_follow_up`` 同一个做法：播放前压、返回后补一个短尾巴 ——
+        这一句是从扬声器出来的，而采集此刻已经回到唤醒模式，不压窗就是让它听自己说话。
+        """
+        self.plugin.submit_text(text)
+        self.turns += 1
+        self.log(
+            "turn",
+            f"第 {self.turns} 轮：{text[:120]}（听成「结束对话」，不派发）",
+            turn=self.turns,
+            text=text,
+            route="dismiss",
+        )
+        # 先清标记再说话：``complete_turn`` 会阻塞到播完，而这中间若有别的线程读到
+        # ``_following_up`` 还是 True，它会以为窗口还开着。
+        self._following_up = False
+        if self.acks is not None or self.plugin.tts is not None:
+            self._mute_input(ACK_MUTE_CAP_S)
+        try:
+            self.plugin.complete_turn(FAREWELL)
+        finally:
+            self._mute_input(ACK_MUTE_TAIL_S)
+        # ``complete_turn`` 的最后一步是回 LISTENING（连续对话的落点），所以这一步**必须
+        # 在它之后**：结束的意思正是「不再等下一句」。两个状态事件背靠背同步发出，球看到的
+        # 是 SPEAKING → LISTENING → IDLE，中间那一下不到一毫秒，不会被看见。
+        #
+        # 不用把返回的事件再转一遍：``VoicePlugin._emit`` 已经扇出到 ``self.on_event`` 了。
+        self.plugin.end_conversation()
+        self._hide_now()
+        self.log(
+            "turn",
+            f"第 {self.turns} 轮完成：route=dismiss ok=True（本次对话结束）",
+            turn=self.turns,
+            route="dismiss",
+            ok=True,
+            answer=FAREWELL,
+        )
+        return DispatchResult(
+            route="dismiss",
+            chunks=(AgentChunk(kind="text", text=FAREWELL),),
+            reason="使用者结束了本次对话",
+            ok=True,
+        )
 
     # ------------------------------------------------------------------ 托盘
 
@@ -806,6 +877,20 @@ class VoiceRuntime:
         timer.daemon = True
         self._hide_timer = timer
         timer.start()
+
+    def _hide_now(self) -> None:
+        """立刻收球 —— 「结束本次对话」看得见的那一半。
+
+        不走 ``_schedule_hide()``：那是十秒倒计时，为的是连续对话里球要留着当「我还在听」
+        的信号。而这里人刚刚明确说了结束，一颗还在桌面上待十秒的球说的是反话。
+        """
+        self._cancel_hide()
+        if self.bridge is None:
+            return
+        try:
+            self.bridge.set_visible(False)
+        except Exception:  # noqa: BLE001 - 球是增强，不是前提
+            pass
 
     def pump(self, *, timeout: float | None = None) -> DispatchResult | None:
         """Run one queued utterance as a full turn. ``None`` when none arrived.

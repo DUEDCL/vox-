@@ -878,6 +878,30 @@ P8 唤醒球的具体验收项（都是 REAL-WIN 级）：
 - `VOX_WAKE_VISIBLE` 未设时窗口隐藏、`vox_set_visible(true)` 后可见；
 - 125% / 150% / 175% 缩放下命中区与光标不漂移。
 
+### 改了 CSP、或改了前端里任何一次 `fetch`（必做，dev server 测不出来）
+
+`tauri.conf.json` 的 `app.security.csp` **只在打包后生效**，dev server 一个字节都不发。
+所以「在 5173/5273 上看着好」对 CSP 相关的失败没有任何证明力 —— 2026-09-03 的
+「打包后的球一直不是 AE 序列层」就是这么藏了两天（`connect-src` 少了 `'self'`，取雪碧图
+元数据的 `fetch` 被拒，而加载失败是**静默回退手写渲染器**的）。
+
+```powershell
+Push-Location desktop; npm run build; Pop-Location
+.\.venv\Scripts\python.exe scripts/acceptance/csp_check.py      # 策略从 tauri.conf.json 读
+```
+
+判据：**控制台零 CSP 报错**，且脚本退出时四条资产（`orb/flow.json`、`orb/burst.json`、
+`orb/flow.png`、`orb/burst.png`）全部 `OK`。任何一条缺就意味着打包后那一层不工作，
+而它不会报错给使用者。`--relaxed` 是对照组（不发 CSP，等价于 dev server 那一侧）。
+
+改完要进二进制还得重新链接，而**运行中的 `vox.exe` 会把链接挡住**（`os error 5 拒绝访问`）。
+先退出托盘，或者把它改个名再构建（Windows 允许重命名运行中的 exe，进程跟着 inode 走）：
+
+```powershell
+Move-Item desktop/src-tauri/target/release/vox.exe desktop/src-tauri/target/release/vox.exe.inuse
+Push-Location desktop/src-tauri; cargo build --release; Pop-Location
+```
+
 验证等级说明：`cargo check`/`cargo test` 只算 AUTO；命中表在 `docs/research/prototype-results.md` 里是 SIM；真机手感是 P10（发布阻塞项 #5）。
 
 ## 真机验收：说话（REAL-MIC + REAL-AGENT，**这一步没有替代品**）
@@ -910,6 +934,23 @@ $env:PYTHONUTF8=1; .\.venv\Scripts\python.exe scripts/acceptance/real_mic_e2e.py
 以及无蓝牙的那条路空气通了但 KWS 不命中。**一只笔记本扬声器播放的人声录音不是一个在说话
 的人**，所以那条路只能证明装置本身可用，不能替真人签字。详见
 `docs/research/prototype-results.md`。
+
+### 连续对话与「退下吧」（REAL-MIC，跟着上面那一轮一起做）
+
+改过 `wake.follow_up`、`capture.resume_listening`、`VoiceRuntime._dismiss` 或
+`is_dismissal` 的说法清单之后：
+
+| 说 | 期望 |
+|---|---|
+| 「你好小沃」→「现在几点」→ 等它答完 | 球**不收**，日志有「接着听下一句（8 秒内没人说话就收）」 |
+| 接着直接说「讲个笑话」（**不喊唤醒词**） | 照常起一轮；`shell.run` 仍可用（已验证身份被保留） |
+| 再接着说「退下吧」 | 回一句「好，随时叫我」→ 球**立刻**收 → 状态回待机；日志 `route=dismiss`，**没有** `task.*` 事件 |
+| 什么都不说，等 8 秒 | 日志「这一轮聊完了：8 秒内没听到说话，退回待机」，之后按 `orb.hide_after_s` 收球 |
+| 说「帮我结束这个进程」 | **照常派发**（这是反向护栏，不是结束对话） |
+
+代码级的对应断言在 `tests/test_runtime.py` 的「连续对话」与「结束本次对话」两节
+（`pytest tests/test_runtime.py tests/test_intent.py -q`）。真机要验的只有一件事：
+**说完之后不用再喊唤醒词，而说「退下吧」之后它真的不再听**。
 
 ## 系统托盘验收（REAL-WIN，代码级已过）
 

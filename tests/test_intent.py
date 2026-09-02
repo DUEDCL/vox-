@@ -422,3 +422,102 @@ def test_the_resolver_carries_the_same_answer(resolver):
 
     for text in ("写个脚本", "你好"):
         assert resolver.capabilities(text) == required_capabilities(text)
+
+
+# --------------------------------------------------- 结束本次对话（2026-09-03）
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "退下吧",
+        "退下",
+        "你退下吧",
+        "你先退下",
+        "那你退下吧",
+        "好，退下吧",
+        "结束本次对话",
+        "结束对话",
+        "结束这次对话吧",
+        "退出会话",
+        "停止聊天",
+        "对话到此为止",
+        "聊天就先这样吧",
+        "没事了",
+        "没别的了",
+        "不用了",
+        "不聊了",
+        "就这样吧",
+        "先这样",
+        "到这就行了",
+        "好的，没事了",
+        "嗯，就这样吧",
+        "再见",
+        "拜拜",
+        "晚安",
+        "bye",
+        "goodbye",
+        "that's all",
+        "never mind",
+        "nothing else",
+        "退下吧。",
+        "  没事了  ",
+    ],
+)
+def test_a_farewell_is_recognised_as_the_end_of_the_conversation(text):
+    """这些说法命中之后**不派给任何后端**：应一句就收，见 ``VoiceRuntime._dismiss``。
+
+    「吧」在这一组里是软化语气，不是提问 —— 所以这条路**不能**先过
+    ``_QUESTION_TAIL``（那个正则把「吧」算问句尾）。拿它当前置守卫会把整组静默拒掉，
+    症状是「说了退下吧它还在聊」，而且哪一层都不报错。
+    """
+    from core.dispatch.intent import is_dismissal
+
+    assert is_dismissal(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # **这一组是这个功能的安全属性。** 误判的形状是「对话在人还要说下去的时候被挂掉」。
+        "帮我结束这个进程",
+        "怎么结束本次对话",
+        "结束本次对话吗",
+        "这个不用了，用那个",
+        "不用改了，先跑一下测试",
+        "退下来的时候要注意什么",
+        "这样就行了吗",
+        "再见是什么意思",
+        "晚安用英语怎么说",
+        "拜拜这个词的来源",
+        "停止服务的命令是什么",
+        "关闭窗口",
+        "退出程序",
+        "别说了",
+        "谢谢",
+        "好的",
+        "现在几点",
+        "跑一下测试",
+        "",
+        "   ",
+    ],
+)
+def test_an_ordinary_request_is_not_a_farewell(text):
+    """三类容易擦到的：**带对象但对象不是对话**（结束进程、关闭窗口、退出程序）、
+    **前后还有内容**（「这个不用了，用那个」）、**在问这个词**（「晚安用英语怎么说」）。
+
+    「谢谢」「好的」也在这里：它们出现在对话中间的次数远多于结尾，收进来会让人在道谢
+    之后被挂电话。要结束的人会说「谢谢，没别的了」，那一句由「没别的了」命中。
+    """
+    from core.dispatch.intent import is_dismissal
+
+    assert is_dismissal(text) is False
+
+
+def test_a_farewell_never_reads_as_a_tool_call(resolver):
+    """「结束本次对话」里有「结束」，「退下吧」里有「下」—— 都不许落到工具路径上。
+
+    这一条与 ``is_dismissal`` 无关：即使有人把结束判定摘掉，这些话也不该去跑命令。
+    """
+    for text in ("结束本次对话", "退下吧", "没事了", "就这样吧"):
+        assert resolver.resolve(text).kind == "agent", text

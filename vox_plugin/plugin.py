@@ -187,6 +187,20 @@ class VoicePlugin:
             return []
         return [self._state_event(VoiceState.IDLE, f"listening expired after {seconds:g}s")]
 
+    def end_conversation(self, reason: str = "user ended the conversation") -> list[dict]:
+        """使用者说了「退下吧」-> 退回待机，**这一轮之后不再等下一句**。
+
+        和 ``listening_expired`` 的区别只有一个字：那一条是「没人说话，到点了」，这一条是
+        「说话的人明确说了结束」。合成一条会让日志和事件流分不出「它自己走的」和「我让它
+        走的」—— 而那两件事在排查「它怎么不听了」时是完全不同的线索。
+
+        不用 ``cancel()``：那一步发 ``turn.cancelled``，而这里那一轮是**正常说完的**。
+        不在 LISTENING 时是空操作（不抛），理由和 ``listening_expired`` 同一条。
+        """
+        if self.machine.state != VoiceState.LISTENING:
+            return []
+        return [self._state_event(VoiceState.IDLE, reason)]
+
     def wake_rejected(self, keyword: str, reason: str, score: float = 0.0) -> dict:
         """Record a wake hit the speaker gate refused.
 
