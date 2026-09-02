@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
 from core.agents.contract import AgentChunk, AgentDescriptor, Task
-from core.agents.registry import load_agents_config, open_agents
+from core.agents.registry import apply_llm_profile, load_agents_config, open_agents
 from core.audio.acks import ACK_MUTE_CAP_S, ACK_MUTE_TAIL_S
 from core.desktop_bridge import DesktopBridge, DesktopBridgeError, find_desktop_binary
 from core.dispatch import DefaultAggregator, DefaultRouter, Dispatcher, DispatchResult
@@ -44,6 +44,7 @@ from core.dispatch.contract import Intent
 from core.dispatch.intent import RuleBasedIntentResolver, is_dismissal
 from core.events import AGENT_SCHEMA_PATH, build_event, validate_event
 from core.memory import open_memory
+from core.models_config import active_llm, load_models_config
 from core.state import VoiceState
 from core.tools import open_tools
 from vox_plugin.plugin import VoicePlugin
@@ -283,15 +284,22 @@ class VoiceRuntime:
         The platform's own tools still answer with zero agents configured, so
         refusing to start over an agent entry would take away more than it
         protects.
+
+        ``config/models.toml`` 的当前方案在这里盖到 ``relay`` 上 —— **在此之前那个文件
+        只有控制台在读**，于是「模型配置」那一栏是个能编辑、能保存、什么都不影响的面板，
+        而对话实际走的是 `agents.toml` 里的端点与凭据。套用与没套用都会留一句话：这一层
+        存在的全部理由就是「配了但没生效」。
         """
+        notes: list[str] = []
         try:
             config = load_agents_config()
+            config, notes = apply_llm_profile(config, active_llm(load_models_config()))
             adapters = open_agents(config)
         except Exception as exc:  # noqa: BLE001 - reported, not fatal
             return (), {}, [f"agents are off: {type(exc).__name__}: {exc}"]
         opened: dict[str, Any] = {}
         descriptors: list[AgentDescriptor] = []
-        warnings: list[str] = []
+        warnings: list[str] = list(notes)
         try:
             for adapter in adapters:
                 descriptor = adapter.describe()
@@ -527,7 +535,7 @@ class VoiceRuntime:
         if self.acks is not None or self.plugin.tts is not None:
             self._mute_input(ACK_MUTE_CAP_S)
         try:
-            self.plugin.complete_turn(reply)
+            self._complete_and_watch_tts(reply)
         finally:
             self._mute_input(ACK_MUTE_TAIL_S)
         self._following_up = False
@@ -548,6 +556,30 @@ class VoiceRuntime:
                 f"接着听下一句（{self.follow_up_seconds():g} 秒内没人说话就收）",
                 follow_up_s=self.follow_up_seconds(),
             )
+
+    def _complete_and_watch_tts(self, reply: str) -> None:
+        """说出这一轮的回答，**并且把合成失败写进日志**。
+
+        `VoicePlugin.complete_turn` 刻意吞掉合成异常（一次合成失败不该结束回合），
+        所以「有没有出声」这件事只能在这里看：比一次 `tts_failures`。不这么做的后果
+        2026-09-02 在真机上出现过 —— 云端合成每轮回 HTTP 401，而使用者看到的是
+        「助手一句话都不出声」，日志里一个字都没有。
+
+        error 级不是夸张：对一个语音助手来说不出声与没听见、崩了、网断了在使用者那一侧
+        完全同形，而控制台「只看错误」那一档正是他会打开的地方。
+        """
+        before = int(getattr(self.plugin, "tts_failures", 0) or 0)
+        try:
+            self.plugin.complete_turn(reply)
+        finally:
+            after = int(getattr(self.plugin, "tts_failures", 0) or 0)
+            if after > before:
+                self.log(
+                    "tts",
+                    f"合成失败，这一轮没出声：{getattr(self.plugin, 'last_tts_error', '') or '未说明原因'}",
+                    level="error",
+                    failures=after,
+                )
 
     def follow_up_seconds(self) -> float:
         """连续对话的窗口有多长。**由采集侧的 ``listen_grace_s`` 决定，不另设一个。**
@@ -593,7 +625,7 @@ class VoiceRuntime:
         if self.acks is not None or self.plugin.tts is not None:
             self._mute_input(ACK_MUTE_CAP_S)
         try:
-            self.plugin.complete_turn(FAREWELL)
+            self._complete_and_watch_tts(FAREWELL)
         finally:
             self._mute_input(ACK_MUTE_TAIL_S)
         # ``complete_turn`` 的最后一步是回 LISTENING（连续对话的落点），所以这一步**必须

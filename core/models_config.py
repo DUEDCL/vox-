@@ -226,6 +226,30 @@ def load_models_config(path: str | Path | None = None) -> dict[str, Any]:
     return {"active": active, "profiles": profiles}
 
 
+def active_profile(config: Mapping[str, Any]) -> dict[str, Any]:
+    """当前生效的那一套方案，没有就是空 dict。
+
+    存在的理由是 2026-09-02 的一个真实缺口：这个文件此前**只有控制台在读**
+    （`core/console/routes.py`），运行时一个字都不读。于是使用者在「模型配置」那一栏
+    改完模型、存好 key 变量名、页面显示「已保存」，而对话照旧走 `config/agents.toml`
+    里那条 `relay` —— 一个能编辑、能保存、什么都不影响的配置面。
+    """
+    profiles = config.get("profiles")
+    if not isinstance(profiles, Mapping):
+        return {}
+    active = str(config.get("active", "") or "")
+    entry = profiles.get(active)
+    return dict(entry) if isinstance(entry, Mapping) else {}
+
+
+def active_llm(config: Mapping[str, Any]) -> dict[str, str]:
+    """当前生效方案的 ``[llm]``。字段名与 ``FIELDS`` 一致，值都是已校验的字符串。"""
+    section = active_profile(config).get("llm")
+    if not isinstance(section, Mapping):
+        return {}
+    return {str(key): str(value) for key, value in section.items()}
+
+
 def write_profile_kind(
     profile: str,
     kind: str,
@@ -314,6 +338,8 @@ __all__ = [
     "PROFILE_NAME",
     "PROTOS",
     "ModelsConfigError",
+    "active_llm",
+    "active_profile",
     "check_field",
     "load_models_config",
     "looks_like_secret",

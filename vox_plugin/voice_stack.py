@@ -165,12 +165,16 @@ def _open_tts(resolved: dict[str, Any], warnings: list[str]) -> Any:
     所以这个函数是**唯一**知道有两种 TTS 的地方 —— 插件、编排器、控制台都不需要知道。
     这正是红线 2 说的「组件可替换」。
 
-    云端那条路的失败**不降级到本机**：一个要求 longyuan 的人拿到 VITS 的默认女声会以为
-    配置生效了。报出来、静音，让「没生效」是可见的。
+    **2026-09-02：云端那条路的失败现在降级到本机，而不是静音。** 上一版的立场是「不降级，
+    因为一个要求 longyuan 的人拿到 VITS 的默认女声会以为配置生效了」。真机上那个立场的
+    代价出现了：`VOX_TTS_KEY` 被另一份 key 覆盖 → 百炼 401 → 三层各自吞掉 → **一句话都
+    不出声，而且哪里都不说为什么**。对语音助手来说「不出声」和「没听见」「崩了」在使用者
+    那一侧同形。所以现在是降级 + 大声说（见 `core/audio/tts_fallback.py` 的模块头）。
     """
     provider = str(resolved.get("tts.provider", "sherpa")).strip().lower()
     if provider in ("dashscope", "cosyvoice", "aliyun", "bailian"):
         from core.audio.tts_cloud import DashScopeTtsProvider
+        from core.audio.tts_fallback import FallbackTts
 
         model = str(resolved.get("tts.model", "")).strip() or "cosyvoice-v2"
         voice = str(resolved.get("tts.voice", "")).strip() or "longyuan"
@@ -187,11 +191,22 @@ def _open_tts(resolved: dict[str, Any], warnings: list[str]) -> Any:
             # 不生效的配置项比没有这个配置项糟得多。**
             instruction=str(resolved.get("tts.instruction", "")).strip(),
         )
-        status = cloud.load()
-        if not status.available:
-            warnings.append(f"云端 TTS 不可用：{status.details['reason']}（回答不出声）")
-            return None
-        return cloud
+        local = SherpaTtsProvider(
+            resolved["tts_dir"],
+            num_threads=int(resolved["tts.num_threads"]),
+            speaker_id=int(resolved["tts.speaker_id"]),
+            speed=float(resolved["tts.speed"]),
+        )
+        # 装上退路而不是直接返回 cloud：401 这类失败**只在真的合成时**才暴露，而那时
+        # `complete_turn` 会把异常吞掉。见 tts_fallback.py 的模块头。
+        tts = FallbackTts(cloud, local)
+        # 这里就 load 一次，让「云端起不起来」在启动清单上有答案。`FallbackTts.load()`
+        # 会在失败时自己切到本机并留下原因（原因里带 key_env 的**变量名** —— 「缺 key」
+        # 不可行动，「缺 VOX_… 这个变量」可行动）。
+        tts.load()
+        if tts.latched:
+            warnings.append(f"云端 TTS 不可用：{tts.problems[-1]}")
+        return tts
     if provider not in ("sherpa", "local", ""):
         warnings.append(f"未知的 tts.provider {provider!r}，按本机 sherpa 处理")
     tts = SherpaTtsProvider(

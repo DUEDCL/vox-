@@ -944,6 +944,57 @@ CSP 的指令之间**互不继承**：写了 `connect-src` 就不再回落到 `d
 `connect-src 'self' ipc:`，旧的那份没有。
 
 
+## 「用的不是我配的模型」「没有声音」：两个配置面，一个只有写没有读（2026-09-03）
+
+使用者两句观察，都成立，而且**都不是代码算错了，是配置根本没被读**：
+
+> 现在 vox 在进行对话时使用的是我 claude 配置的模型，并没有调用我给其配置的 api key。
+> 而且最近的对话并没有进行 tts 转写，后台 api 也没有调用。
+
+### 一、`config/models.toml` 只有控制台在读
+
+`grep -rn "load_models_config" core/ vox_plugin/ scripts/` 的结果全部落在
+`core/console/routes.py`。也就是说「模型配置」那一栏能编辑、能保存、页面显示成功，
+**而运行时一个字都不读** —— 答对话的一直是 `config/agents.toml` 里那条 `relay`
+（端点 `api.justwoker.icu`、`key_env = ANTHROPIC_AUTH_TOKEN`，正是 Claude Code 那一套）。
+
+日志里那一行就是它：`agent single → relay(http model=claude-opus-5 endpoint=https://api.justwoker.icu)`。
+
+修法见 `core/agents/registry.py::apply_llm_profile`。要点是**套用与不套用都留一句话**：
+一个静默套用的覆盖层和一个静默不套用的覆盖层一样难查。
+
+### 二、TTS 的 401 是变量被覆盖，不是代码
+
+`.env` 里五个凭据变量的 SHA-256（只比摘要，不打值）：
+
+| 变量 | 长度 | 摘要前 12 位 |
+|---|---|---|
+| `VOX_LLM_KEY` | 51 | `60a50f081b68` |
+| `VOX_AGENT_HTTP_TOKEN` | 51 | `60a50f081b68` |
+| `VOX_TTS_KEY` | 51 | `60a50f081b68` |
+| `VOX_DASHSCOPE_KEY` | 51 | `60a50f081b68` |
+| `ANTHROPIC_AUTH_TOKEN` | 51 | `d002050f42b3` |
+
+四个逐字节相同。而 2026-08-29 记下的那个**能用**的百炼 key 是 **35 字符** —— 它被覆盖掉了。
+拿现在的 `VOX_TTS_KEY` 打百炼：`HTTP 401 {"code":"InvalidApiKey"}`。
+
+三层各自吞掉这件事，合起来就是「一句话都不出声，而哪里都不说为什么」：`_open_tts` 只在
+`load()` 失败时报一次警告（401 在 `load()` 时探不到），`complete_turn` 是
+`except Exception: pass`，云端 provider 自己不重试。**对语音助手来说「不出声」与「没听见」
+「崩了」「网断了」在使用者那一侧完全同形**，所以这三层是同一个缺陷的三段。
+
+现在：`FallbackTts` 换本机嗓子 + 三处留痕，`plugin.tts_failures` 让运行日志答得出
+「这一轮为什么没出声」。**真正的修复仍然在使用者手里**：把 35 字符那个百炼 key 放回
+`VOX_TTS_KEY`。
+
+### 三、顺带一个会把人带偏的观察
+
+排查凭据时用裸 `urllib` 打 `api.justwoker.icu`，三个 key **全部** `HTTP 403 error
+code: 1010` —— 看起来像全都失效。换上 `core/agents/http.py` 的 `API_USER_AGENT` 之后
+全是 200。那是 Cloudflare 按 UA 拦的。**探这个端点必须带项目自己的 UA**，否则得出的结论
+和事实相反。
+
+
 ## Blockers
 
 1. Build a separate-window visual spike before copying audio components.

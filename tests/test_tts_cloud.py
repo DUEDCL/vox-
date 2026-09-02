@@ -404,11 +404,17 @@ def test_the_instruction_field_only_goes_out_when_it_has_a_value(monkeypatch):
     assert told.posted[0][1]["input"]["instruction"] == "用温柔的语气"
 
 
-def test_a_cloud_tts_without_a_key_does_not_fall_back_to_the_local_voice():
-    """缺 key 时**静音并报警告**,不退回本机 VITS。
+def test_a_cloud_tts_without_a_key_falls_back_loudly_to_the_local_voice():
+    """缺 key 时**降级到本机并大声说**，不静音。
 
-    一个要求 longyuan 的人拿到 VITS 的默认女声会以为配置生效了 —— 那比不出声更糟,
-    因为它把一个配置错误伪装成了一次成功。
+    这一条 2026-09-02 反过来了。旧立场是「不降级」，理由是「一个要求 longyuan 的人拿到
+    VITS 的默认女声会以为配置生效了」—— 那个顾虑本身对，可它换来的代价在真机上出现了：
+    `VOX_TTS_KEY` 被另一份 key 覆盖 → 百炼 401 → `_open_tts` 只在 `load()` 失败时报一次、
+    `complete_turn` 又把异常吞掉，于是**助手一句话都不出声，而哪里都不说为什么**。对语音
+    助手来说不出声与没听见、崩了、网断了在使用者那一侧完全同形。
+
+    所以现在：换嗓子 + 三处留痕（启动警告、`problems`、运行日志 error 级）。原来那个顾虑
+    由「大声说」这一半解决，不由静音解决。
     """
     from vox_plugin.voice_stack import _open_tts
 
@@ -423,8 +429,13 @@ def test_a_cloud_tts_without_a_key_does_not_fall_back_to_the_local_voice():
         "tts.speaker_id": 0,
         "tts_dir": "models/vits-melo-tts-zh_en",
     }
-    assert _open_tts(resolved, warnings) is None
+    tts = _open_tts(resolved, warnings)
+
+    # 变量名必须出现在警告里 —— 「缺 key」不可行动，「缺 VOX_… 这个变量」可行动。
     assert warnings and "VOX_DEFINITELY_NOT_SET_KEY" in warnings[0]
+    assert tts is not None, "不该再返回 None：那正是「一句话都不出声」的来源"
+    assert tts.latched is True, "云端起不来之后必须已经切到本机"
+    assert tts.problems, "换嗓子这件事必须留痕"
 
 
 def test_the_configured_instruction_reaches_the_provider(monkeypatch):
@@ -455,7 +466,10 @@ def test_the_configured_instruction_reaches_the_provider(monkeypatch):
     )
     assert warnings == []
     assert tts is not None
-    assert tts.instruction == "用温柔、亲和、放松的语气说"
+    # 云端那条路现在裹在 `FallbackTts` 里（退路是本机 VITS）。断言穿一层到主合成器上：
+    # 这一条要钉的是「instruction 有没有传进去」，不是包装的形状。
+    assert tts.primary.instruction == "用温柔、亲和、放松的语气说"
+    assert tts.latched is False, "key 在、load 成功，就不该已经降级"
 
 
 # ------------------------------------------- 失败分类(2026-09-01 那次 401 的账)

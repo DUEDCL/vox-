@@ -99,6 +99,12 @@ class VoicePlugin:
     #: the event stream is the telemetry. Failures are counted, not propagated.
     on_event: Any = None
     sink_failures: int = 0
+    #: 合成在 ``complete_turn`` 里失败过几次，以及最后一次的原因。**不是遥测** ——
+    #: 运行时每轮比一次这个计数并把增量写进运行日志（error 级）。存在的理由见
+    #: ``complete_turn`` 里那段注释：吞掉合成失败又不留痕，就是「助手不出声而哪里都
+    #: 查不到」的成因。
+    tts_failures: int = 0
+    last_tts_error: str = ""
 
     def _emit(self, event: dict) -> dict:
         """Record, then fan out. Every event in this class goes through here."""
@@ -253,6 +259,12 @@ class VoicePlugin:
         events.append(self._state_event(VoiceState.SPEAKING, "tts playback"))
         if self.tts is not None:
             # Audio is the enhancement; a TTS failure must not end the turn.
+            #
+            # **但它必须留痕。** 这里此前是 `except Exception: pass` —— 一个字都不留。
+            # 2026-09-02 真机上的后果：云端合成回 HTTP 401（key 被另一份覆盖），于是每一轮
+            # 都在这里被吞掉，使用者看到的是「助手一句话都不出声」，而日志、事件、就绪清单
+            # 三处都没有任何线索。对语音助手来说不出声与没听见同形，所以最需要的那条线索
+            # 正是这里删掉的那一条。仍然不重抛（一次合成失败不该结束回合）。
             try:
                 batch = getattr(self.tts, "speak_segments", None)
                 if callable(batch):
@@ -265,8 +277,9 @@ class VoicePlugin:
                         if callable(stopped) and stopped():
                             break
                         self.tts.speak(chunk)
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - 记下来，不结束这一轮
+                self.tts_failures += 1
+                self.last_tts_error = f"{type(exc).__name__}: {exc}"
         events.append(self._event("turn.done", {}))
         events.append(self._state_event(VoiceState.LISTENING, "continuous conversation"))
         self._remember(reply, role="assistant")

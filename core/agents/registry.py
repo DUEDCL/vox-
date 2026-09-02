@@ -118,6 +118,86 @@ def enabled_entries(config: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
     )
 
 
+#: `config/models.toml` 的 `[llm]` 盖在哪一条 agent 上。**名字钉在代码里，不做成配置项。**
+#:
+#: 「控制台上配的那个模型」在这个产品里只有一个角色，多一个可配的间接层只会让
+#: 「我改的到底是哪一条」变成又一个要查的问题。要换成别的后端答对话，改
+#: `config/agents.toml` 里各条的 `enabled` 就够了。
+LLM_AGENT = "relay"
+
+#: `HttpAgentAdapter` 只会讲 OpenAI Chat Completions。`proto` 是别的值时**不套用**
+#: 而不是照着套 —— 把 anthropic 的请求体发给一个只认 OpenAI 形状的适配器，回来的是
+#: 一个格式错误，而使用者会读成「我配的模型不好用」。
+_LLM_PROTO = "openai"
+
+
+def apply_llm_profile(
+    config: Mapping[str, Any], llm: Mapping[str, Any]
+) -> tuple[dict[str, Any], list[str]]:
+    """把 `config/models.toml` 当前方案的 `[llm]` 盖到 ``LLM_AGENT`` 那一条上。
+
+    返回 (新的 agents 配置, 给人看的说明)。**不抛** —— 模型方案配歪了不该让 agent 层
+    整个起不来，但也绝不能静默：每一条不套用的路径都留一句话，因为这个函数存在的全部
+    理由就是「配了但没生效」。
+
+    ## 为什么需要这一层
+
+    2026-09-02 使用者的观察：「vox 在进行对话时使用的是我 claude 配置的模型，并没有调用
+    我给其配置的 api key」。他说的是对的 —— `config/models.toml` 此前**只有控制台在读写**，
+    运行时一个字都不读，于是那一栏是个能编辑、能保存、什么都不影响的面板；真正答对话的是
+    `config/agents.toml` 里的 `relay`，端点与凭据都是 Claude Code 那一套。
+
+    ## 需要 base 与 model 都在才套用
+
+    只有 model 没有 base 时，盖上去的是「新模型 + 旧端点」；只有 base 时是「旧模型名 +
+    新端点」。两种都是半套配置，而半套配置的失败长得像模型不好用。所以缺一个就整条不套用
+    并说清楚缺什么。
+    """
+    resolved = {key: value for key, value in config.items()}
+    entries = [dict(entry) for entry in resolved.get("agents", ()) if isinstance(entry, Mapping)]
+    resolved["agents"] = entries
+    if not llm:
+        return resolved, []
+
+    target = next(
+        (entry for entry in entries if entry.get("name") == LLM_AGENT and entry.get("kind") == "http"),
+        None,
+    )
+    if target is None:
+        return resolved, [
+            f"模型方案里配了 llm，但 config/agents.toml 里没有名为 {LLM_AGENT} 的 http 后端 —— 那一栏因此不生效"
+        ]
+
+    proto = str(llm.get("proto", "") or "")
+    if proto and proto != _LLM_PROTO:
+        return resolved, [
+            f"模型方案的 llm.proto = {proto!r}，而 {LLM_AGENT} 只会讲 {_LLM_PROTO} —— 没有套用，"
+            f"对话仍走 agents.toml 里的设置"
+        ]
+
+    base = str(llm.get("base", "") or "").strip()
+    model = str(llm.get("model", "") or "").strip()
+    if not base or not model:
+        missing = " 和 ".join(name for name, value in (("base", base), ("model", model)) if not value)
+        return resolved, [
+            f"模型方案的 llm 缺 {missing} —— 半套配置比不配更难查，所以整条没有套用"
+        ]
+
+    notes: list[str] = []
+    before = (target.get("url"), target.get("model"), target.get("key_env"))
+    target["url"] = base
+    target["model"] = model
+    key_env = str(llm.get("key_env", "") or "").strip()
+    if key_env:
+        target["key_env"] = key_env
+    after = (target["url"], target["model"], target.get("key_env"))
+    if before != after:
+        notes.append(
+            f"{LLM_AGENT} 按 config/models.toml 生效：model={after[1]} url={after[0]} key_env={after[2]}"
+        )
+    return resolved, notes
+
+
 def open_agents(
     config: Mapping[str, Any] | None = None,
     *,

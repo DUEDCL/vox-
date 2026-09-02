@@ -170,6 +170,13 @@ def main() -> int:
         print(f"warning: {warning}")
 
     if stack.tts is not None:
+        # 降级要能被看见。`FallbackTts` 只在**真的合成**时才知道云端不行（401 这类失败
+        # `load()` 探不到），而那一刻离启动日志已经很远了 —— 所以把它接到运行日志上，
+        # 控制台「只看错误」那一档就能答「为什么不出声 / 为什么换了嗓子」。
+        if hasattr(stack.tts, "on_problem"):
+            stack.tts.on_problem = lambda message: runtime.log(
+                "tts", message, level="error", degraded=True
+            )
         status = stack.tts.load()
         if status.available:
             runtime.plugin.attach_tts(stack.tts)
