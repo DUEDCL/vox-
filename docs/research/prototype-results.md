@@ -35,9 +35,9 @@ Current status: DOC/AUTO/SIM and one REAL-MIC wake are established. REAL-AGENT, 
 | Voiceprint enrollment | `.venv/Scripts/python.exe scripts/enroll_speaker.py --name <名字>` | REAL-MIC |
 | Voice smoke | `.venv/Scripts/python.exe scripts/smoke_voice.py` | SIM |
 | Simulated E2E | `.venv/Scripts/python.exe scripts/e2e_simulated.py` | SIM |
-| t10 stack validation | `.venv/Scripts/python.exe tmp_proto/t10_voice_stack_validation.py` | AUTO+SIM |
+| t10 stack validation | `.venv/Scripts/python.exe scripts/acceptance/t10_voice_stack_validation.py` | AUTO+SIM |
 | TTS→VAD→KWS loop | `.venv/Scripts/python.exe tmp_proto/tts_kws_vad.py` | SIM |
-| Live mic wake | `.venv/Scripts/python.exe tmp_proto/live_wake.py` | REAL-MIC |
+| Live mic wake | `.venv/Scripts/python.exe scripts/acceptance/live_wake.py` | REAL-MIC |
 | Orb render spike | serve `tmp_proto/orb_spike.html`, drive `window.__SPIKE__` | SIM |
 
 ## Completed
@@ -109,7 +109,7 @@ The archive was resumed to a complete **160 MiB** file on 2026-07-23. `bzip2 -tv
 
 ## Session 2026-07-26 (real microphone wake — VERIFIED)
 
-- Added `tmp_proto/live_wake.py`: `SounddeviceWakeCapture` + `SherpaKeywordProvider` over the Realtek mic array (device 1), 16 kHz, threshold 0.25, audio in memory only.
+- Added `scripts/acceptance/live_wake.py`: `SounddeviceWakeCapture` + `SherpaKeywordProvider` over the Realtek mic array (device 1), 16 kHz, threshold 0.25, audio in memory only.
 - Live run: spoken `你好问问` produced a wake hit at **7.193 s** with score 1.0; capture stopped and resources released; nothing saved to disk.
 
 ## Session 2026-07-28 (t10 consolidated voice-stack validation + suite hygiene)
@@ -123,7 +123,7 @@ Suite hygiene:
 - `python -m pytest tests -q` → **19 passed, 2 skipped** (VoxCord optional).
 - `python scripts/smoke_voice.py` → OK. `python scripts/e2e_simulated.py` → OK (17 events, 2 bridge sends, 1 cancel; mock transport).
 
-t10 harness (`tmp_proto/t10_voice_stack_validation.py`) — release-path core sherpa-onnx, all checks passed:
+t10 harness (`scripts/acceptance/t10_voice_stack_validation.py`) — release-path core sherpa-onnx, all checks passed:
 
 | Check | Result | Evidence level |
 |---|---|---|
@@ -693,6 +693,105 @@ skip 掩盖的是一个缺陷，不是在报告「本机没这个可选依赖」
 1.7%（所以「VAD 拖慢回调导致丢块」这个假设可以排除）。
 
 等级是 **SIM**：音频没有经过 D/A → 空气 → A/D。真机对着麦克风喊仍然是 REAL-MIC。
+
+
+## 唤醒率 4/10 的两个真因：解码束宽 + 一个漂掉的设备索引（2026-09-01，SIM + REAL-WIN）
+
+使用者报「10 次只成 4 次」，并明确要求不许无脑降 `keywords_threshold`。两个根因，
+全程 `threshold = 0.25` 不动。
+
+### 1. 解码束宽（sherpa-onnx 默认 4）—— SIM
+
+唤醒词的假设路径要和普通转写路径竞争束里的位置，束太窄时它在噪声里先被剪掉。症状是
+**安静时叫得应、有人说话或开着风扇就叫不应**，而每一层都报告自己健康。
+
+正样本 = 本人三段真录音（5 次机会）逐级加白噪声；负样本 = 本人念的另一个唤醒词
+「你好问问」三遍 + 纯噪声（约 25 秒）：
+
+| beam | 干净 | 20dB | 15dB | 10dB | 5dB | 0dB | -5dB | -10dB | 误唤醒 |
+|---|---|---|---|---|---|---|---|---|---|
+| 4（sherpa 默认） | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | **2/5** | 3/5 | 2/5 | 0 |
+| 8 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 3/5 | 4/5 | 0 |
+| **16（新默认）** | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | **5/5** | 4/5 | 4/5 | 0 |
+| 32 | 5/5 | — | — | — | — | 5/5 | 5/5 | 5/5 | 0 |
+
+代价基本为零：每块 1.10 ms（beam 4）→ 1.21 ms（beam 16），都是 100 ms 预算的约 1%。
+不取 32 的理由是统计功效：「误唤醒 0」这个数字在 25 秒非唤醒词语音上说明不了什么。
+
+同时试过但**没用**的两个旋钮：`keywords_score` 加分（1.5 / 2.0 / 3.0）在 0 dB 只到 4/5；
+`num_trailing_blanks = 0` 没有区别。能抬起来的是束宽，不是加分。
+
+### 2. `input.device = "2"` 已经不是那只耳机了 —— REAL-WIN
+
+2026-08-29 记下那个索引时它是 `耳机 (沉麟的耳机)`；2026-09-01 索引 2 指向
+`麦克风阵列 (Realtek(R) Audio)`，耳机成了 1。**索引由枚举顺序决定，插拔就移位，而移位
+之后不报错**：流照常打开、回调照常触发，只是唤醒率变差。上一版配置注释还写着「[2] 耳机」
+—— 那是配置与现实分岔最安静的一种形式。
+
+两次测量都说那只内建阵列不该用：2026-08-29 同一时刻阵列 peak 0.00003 而耳机 0.188；
+2026-09-01 安静环境阵列 0.00003、耳机 0.00031。
+
+改法是让配置写**名字片段**而不是索引：`resolve_device` 按固定优先级取 WASAPI（这台机器上
+耳机只有 WASAPI 报 16 kHz 原生），排除没有输入通道的设备，同一 host API 下重名才算真歧义。
+名字没匹配上时先给一条可读的警告 —— PortAudio 的原话读起来像「设备 -1 查询失败」，而真实
+情况是「你配的那只麦克风现在不在」。
+
+
+## 一轮语音的耗时构成，以及唯一值得动的那一段（2026-09-01，真实端点 + 真实凭据）
+
+先量整条链，再决定动哪里。
+
+| 段 | 实测 | 结论 |
+|---|---|---|
+| ASR 每块推理 | 4.61 ms 均值 / 15.5 ms p95 | 100 ms 预算的 4.6%，不是瓶颈 |
+| ASR 端点（说完之后的纯等待） | 固定 1.1–1.2 s | 100% 在我们手里，但**不能降**（见下） |
+| LLM 首字（流式） | 5005 ms | 首字比整轮结束只早 **2 ms** |
+| LLM 整轮（流式） | 5007 ms | 这个端点**根本不增量下发** |
+| LLM 非流式 | 5637 ms | 与流式基本同价 |
+| TTS（旧：两个 HTTP 往返） | 3 字 3353 / 11 字 4243 / 38 字 5786 ms | 约 3.3 s 固定开销 |
+
+**「把 LLM 增量喂进 TTS」在这个端点上省不到时间**（首字 = 整轮），所以没有做。一次没有
+收益的重构会把一条受测的状态机路径变脆。真正能省的是 TTS 那 3.3 秒固定开销。
+
+### TTS 改走 SSE：一个请求，音频按帧下发
+
+| 字数 | 旧：音频到手 | SSE：首块 | SSE：音频到手 |
+|---|---|---|---|
+| 3 | 3353 ms | 2405 ms | **2735 ms** |
+| 11 | 4243 ms | 2267 ms | **3117 ms** |
+| 38 | 5786 ms | 2301–2569 ms | **3700–3961 ms** |
+
+生产装配路径复测：2609 / 3233 / 3783 ms，音频时长与峰值正确（0.69 / 2.77 / 7.08 s）。
+
+两个附带结论：**SSE 首块到达时间与句子长度基本无关**（2.3–2.6 s），所以「把第一段切短
+让它早出声」这个策略在流式下不再必要；`stop()` 现在在**帧之间**生效，打断不必等整句合成完。
+
+### 端点静音 `rule2`：量完之后决定**不降** —— SIM
+
+那 1.2 秒是每一轮里唯一完全由我们决定的等待，所以它看起来是最该砍的一刀。
+`.vox-ref/endpoint_probe.py` 把本人真录音喂进**生产那条两段路径**（唤醒前喂 KWS，命中后
+才开识别器，命中那一块不进识别器），测「判定说完的时刻」与「最终文本是否完整」：
+
+| rule2 | 判定说完 | 最后有语音 | 浪费的等待 | 转写 |
+|---|---|---|---|---|
+| **1.2（默认）** | 未在录音内触发 | 6.7 s | — | 「你好小沃你好小沃」（两句合一段） |
+| 1.0 | 5.4 s | 4.3 s | 1.1 s | 「你好小沃」（切开了） |
+| 0.8 | 5.1 s | 4.3 s | 0.8 s | 「你好小沃」（切开了） |
+| 0.5 | 4.8 s | 4.3 s | 0.5 s | 「你好小沃」（切开了） |
+
+关键读数不是延迟那一列，是**切没切开**：这位说话人自己的短语间停顿是 **1.0–1.1 秒**。
+rule2 = 1.2 时那些停顿不切句；降到 1.0 就切 —— 后半句落进下一轮或者干脆丢掉，而使用者
+看到的是「它没听全」。
+
+所以这 1.2 秒**不是余量，是按这个人的停顿长度定的**。三条规则已经从 `load()` 里提成
+构造参数（能量、能调），但默认值不动，并且有一条测试禁止在没有新的停顿分布测量之前调小它。
+
+### 结论：Wake → 第一声回答的构成
+
+约 **1.0 s（应答音）+ 说话时长 + 1.2 s（端点）+ 5.0 s（LLM）+ 2.4 s（TTS 首块）**。
+这一轮省下的是 TTS 那约 0.9 秒。**剩下的 5 秒在 LLM**，而它是所选模型与端点的属性
+（`claude-opus-5` 经中转站，首字 = 整轮）—— 换一个更快的模型是配置决定，不是代码问题，
+控制台的「模型配置」那一栏可以直接改并用「试一句」当判据。
 
 
 ## Blockers

@@ -38,7 +38,7 @@ Windows 平台上的 Vox 本地优先语音唤醒对话平台。
 - `core/session_bridge.py`：带 Bearer Token 认证的 EvoX localhost HTTP 桥接。
 - `vox_plugin/`：`plugin.py` 门面 + `runtime.py` 装配 + `voice_stack.py` 语音栈组装。
 - `contracts/`：语音事件 9 种（**字节不变**，SHA-256 钉死）+ 平台事件 12 种 + agent 与 MCP 配置形状。
-- `desktop/`：Tauri 2 透明置顶唤醒球（Canvas 2D），选择性穿透 + 系统托盘 + Python↔前端事件通道。
+- `desktop/`：Tauri 2 透明置顶唤醒球（AE 预渲染雪碧图序列为主路径，手写 Canvas 2D 为退路），选择性穿透 + 系统托盘（七项）+ Python↔前端事件通道。
 
 ## 技术选型
 
@@ -55,7 +55,7 @@ Windows 平台上的 Vox 本地优先语音唤醒对话平台。
 | 记忆 | SQLite + FTS5 单文件 + Markdown | 明确不做向量检索 |
 | 搜索后端 | 自建 SearxNG（回环）→ DuckDuckGo 无 key 兜底，**都默认关** | — |
 | 控制台 | 标准库 `http.server` + 单文件前端（零新依赖） | — |
-| UI 渲染 | Canvas 2D + CSS | 静态帧；WebGL（v2） |
+| UI 渲染 | AE 预渲染序列（`sequence.ts`）+ Canvas 2D 退路 + CSS | 静态帧；WebGL（v2） |
 | 桌面外壳 | Tauri 2 | — |
 
 完整选型依据见 [`docs/adr/001-voice-stack-selection.md`](docs/adr/001-voice-stack-selection.md)。

@@ -39,12 +39,28 @@ class SherpaStreamingAsrProvider:
         enable_endpoint_detection: bool = True,
         decoding_method: str = "greedy_search",
         prefer_int8: bool = True,
+        rule1_silence: float = 2.4,
+        rule2_silence: float = 1.2,
+        rule3_utterance: float = 20.0,
     ) -> None:
         self.model_dir = Path(model_dir)
         self.num_threads = num_threads
         self.execution_provider = provider
         self.enable_endpoint_detection = enable_endpoint_detection
         self.decoding_method = decoding_method
+        #: 端点检测的三条规则，秒。**它们此前写死在 ``load()`` 里，提上来是为了能被量。**
+        #:
+        #: - ``rule1``：一个字都没解出来时要等多久才算一段结束（唤醒后没人开口那条路）。
+        #: - ``rule2``：**已经说出字之后**要静多久才算说完。这一条直接算进每一轮的延迟 ——
+        #:   人说完最后一个字，到派发开始之间的那段纯等待就是它。
+        #: - ``rule3``：一段话的硬上限，防止一个人一直说导致永不结束。
+        #:
+        #: 降 ``rule2`` 是省延迟最直接的一刀，但它有真实代价：句子中间的停顿（「帮我看看……
+        #: 那个配置文件」）会被当成说完，于是后半句落进下一轮或者干脆丢掉。所以默认值不靠
+        #: 感觉调 —— 见 `docs/research/prototype-results.md` 里那张按真录音测完整度的表。
+        self.rule1_silence = float(rule1_silence)
+        self.rule2_silence = float(rule2_silence)
+        self.rule3_utterance = float(rule3_utterance)
         #: int8 优先。同一个模型的 int8 build 在 CPU 上快一倍多，而这是个常驻负载；
         #: fp32 只在没有 int8 时用。
         self.prefer_int8 = prefer_int8
@@ -104,9 +120,9 @@ class SherpaStreamingAsrProvider:
                 sample_rate=16000,
                 feature_dim=80,
                 enable_endpoint_detection=self.enable_endpoint_detection,
-                rule1_min_trailing_silence=2.4,
-                rule2_min_trailing_silence=1.2,
-                rule3_min_utterance_length=20.0,
+                rule1_min_trailing_silence=self.rule1_silence,
+                rule2_min_trailing_silence=self.rule2_silence,
+                rule3_min_utterance_length=self.rule3_utterance,
                 decoding_method=self.decoding_method,
                 provider=self.execution_provider,
             )

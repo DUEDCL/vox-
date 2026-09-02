@@ -114,3 +114,56 @@ def test_a_wider_beam_does_not_make_silence_a_hit():
     for _ in range(20):
         assert provider.feed(stream, [0.0] * 1600) == []
     provider.close()
+
+
+# --------------------------------------- 端点检测的静音时长（2026-09-01 的延迟测量）
+
+
+def test_the_endpoint_rules_actually_reach_the_recognizer(monkeypatch):
+    """三条端点规则必须真的传进 sherpa。
+
+    和束宽同一类风险：它们此前写死在 ``load()`` 里，于是「说完之后还要等多久」既量不到
+    也调不动 —— 而那 1.2 秒是每一轮延迟里唯一 100% 在我们手里的一段。
+    """
+    import sys
+    import types
+
+    seen: dict[str, object] = {}
+
+    class FakeRecognizer:
+        @staticmethod
+        def from_transducer(**kwargs):
+            seen.update(kwargs)
+            return object()
+
+    fake = types.SimpleNamespace(OnlineRecognizer=FakeRecognizer)
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", fake)
+    from core.audio.asr import SherpaStreamingAsrProvider
+    from core.audio.config import load_voice_config
+
+    provider = SherpaStreamingAsrProvider(
+        load_voice_config()["asr_dir"], rule2_silence=0.8, rule1_silence=2.0
+    )
+    if not provider.available:
+        pytest.skip("streaming ASR model is not unpacked")
+    assert provider.load().available
+    assert seen["rule2_min_trailing_silence"] == 0.8
+    assert seen["rule1_min_trailing_silence"] == 2.0
+    assert seen["rule3_min_utterance_length"] == 20.0
+
+
+def test_the_shipped_endpoint_wait_is_not_shortened_without_evidence():
+    """``rule2`` 默认 1.2 秒。**这一条防的是「顺手把它调小省延迟」。**
+
+    实测（`.vox-ref/endpoint_probe.py`，本人真录音走生产那条两段路径）：这位说话人
+    自己的**短语间停顿是 1.0–1.1 秒**。rule2 = 1.2 时那些停顿不切句；降到 1.0 就切 ——
+    症状是后半句落进下一轮或者干脆丢掉，而使用者看到的是「它没听全」。
+
+    换句话说这 1.2 秒不是余量，是按停顿长度定的。要改它必须先量新的停顿分布，
+    不能因为「省 400 毫秒」就动。
+    """
+    from core.audio.asr import SherpaStreamingAsrProvider
+
+    provider = SherpaStreamingAsrProvider("nonexistent")
+    assert provider.rule2_silence >= 1.2
+    assert provider.rule1_silence >= 2.4

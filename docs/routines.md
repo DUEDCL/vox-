@@ -528,8 +528,6 @@ $env:PYTHONUTF8=1; .\.venv\Scripts\python.exe .vox-ref\wake_path_check.py
 
 ## 声纹录入
 
-## 声纹录入
-
 适用时机：首次录入本人声纹、追加样本提高通过率，或换麦克风后重录。**必须本人在场**。
 
 **首选控制台**（`run_console.py --voice` → 「声纹」页）：页面按 `core/audio/enroll_prompts.py`
@@ -858,7 +856,7 @@ IMPECCABLE_NO_TELEMETRY=1 node ~/.claude/skills/impeccable/scripts/detect.mjs sr
 ```powershell
 Push-Location desktop/src-tauri
 cargo check
-cargo test        # 命中区几何、JS 字符串转义与信封反序列化 15 项
+cargo test        # 命中区几何、JS 字符串转义、信封反序列化与托盘解析 20 项
 Pop-Location
 ```
 
@@ -881,6 +879,33 @@ P8 唤醒球的具体验收项（都是 REAL-WIN 级）：
 - 125% / 150% / 175% 缩放下命中区与光标不漂移。
 
 验证等级说明：`cargo check`/`cargo test` 只算 AUTO；命中表在 `docs/research/prototype-results.md` 里是 SIM；真机手感是 P10（发布阻塞项 #5）。
+
+## 系统托盘验收（REAL-WIN，代码级已过）
+
+适用时机：修改 `build_tray`、`TrayItems`、`{"kind":"tray"}` / `{"kind":"control"}` 两个形状，
+或 `VoiceRuntime` 的 `wake_manually` / `pause_wake` / `open_settings` 后。
+
+代码级：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_runtime.py tests/test_capture_listening.py -q
+```
+
+七项菜单，逐项在实机上点一遍（**这一步没有替代品**，Rust 的托盘 API 没有可注入的假实现）：
+
+| 菜单项 | 期望 | 出错时的样子 |
+|---|---|---|
+| 状态：… | 跟着状态机变（待机/聆听中/思考中/正在回复/需要处理），不可点 | 文字不动 = `{"kind":"tray"}` 没到 Rust；能点 = `enabled` 传错 |
+| 主动唤醒 | 球立刻出现并进「聆听中」，**不问唤醒词** | 球出来但不进聆听 → 看运行日志里 `listen_refused` 那一条 |
+| 暂停唤醒 / 恢复唤醒 | 文字随点击互换；暂停期间喊唤醒词无反应，麦克风**不关**（就绪清单里峰值照常动） | 峰值也停了 = 有人把设备关掉了，那条路的「恢复」会失败 |
+| 显示 / 隐藏 | 球显隐；隐藏时若挂着确认卡，Python 侧按拒绝落定 | 隐藏后确认卡还在等 = fail-closed 被破坏 |
+| 动画：开 / 关 | 关掉后球静止在一帧代表帧（半径/形变/瓣数仍能分辨状态） | 系统开了「减少动态效果」时应当**始终静止**，此项开不回来 |
+| 设置… | 打开控制台（带 token 的那个 URL） | 打不开 → `settings_url` 没注入，日志里有一条 warn |
+| 退出 | 进程结束，托盘图标消失 | 图标残留 = 没走 `app.exit(0)` |
+
+**主动唤醒必须验的那一条：它不给身份。** 点完菜单直接说一句要跑命令的话（例如「运行 git status」），
+应当落在「需要确认」或被拒，**不能**因为「已验证」而直接执行 —— 那一刻没有音频可比对，
+`begin_listening()` 把说话人清成 `None` 就是为了这个。
 
 ## EvoX 会话桥接回归
 

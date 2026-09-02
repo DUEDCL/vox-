@@ -42,7 +42,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | agent 适配器 | `cli` / `evox` / `acp` / `http` **全部已实现**,`config/agents.toml` 已落;http token 只从环境变量读,url 遵循桥接同款回环/凭据约束 |
 | 派发层 | `intent` / `router` / `aggregator` / `breaker` / `dispatcher` **已实现并测过**(159 用例);已接入 `VoiceRuntime`;运行时具备启动回滚、幂等关闭和回合失败恢复 |
 | 记忆 | SQLite + FTS5 单文件 + Markdown 事实层;跨进程持久性 AUTO_MULTI_PROCESS 已验;**多线程并发已修并验**(此前控制台的多线程会撞 `sqlite3.ProgrammingError`) |
-| 唤醒球 UI | 六态 + 展开态 + 工具确认卡 **已实现**,渲染路径为 **Canvas 2D**,Rust 侧选择性穿透与托盘已实现;**Python→桌面事件通道已接线**,真机验收未做 |
+| 唤醒球 UI | 六态 + 展开态 + 工具确认卡 **已实现**,渲染路径为 **AE 预渲染雪碧图序列**（`desktop/src/sequence.ts`,手写 Canvas 2D 降为退路）,Rust 侧选择性穿透与**七项系统托盘**已实现;**Python→桌面事件通道已接线**,真机验收未做 |
 | 真实 EvoX 会话桥接 | **未验证** — 发布阻塞项 |
 | 真实外部 agent | **未验证** — 发布阻塞项(REAL-AGENT)。三后端 2026-08-24 全部**试过被挡**;`scripts/acceptance/probe_agents.py` 是恢复后的重试入口 |
 | 真实透明窗口 | **未验证** — 发布阻塞项(REAL-WIN) |
@@ -62,7 +62,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | agent 接入 | **headless CLI 子进程 + ACP** 双通路 | OpenAI 兼容 HTTP(含 OpenClaw Gateway) |
 | 记忆存储 | **SQLite + FTS5**(单文件)+ Markdown 人类可读层 | — (明确不做向量检索) |
 | 派发模式 | **`single`(默认)/ `race`** | `fanout` 仅显式请求多方验证时 |
-| UI 渲染 | **Canvas 2D 驻波核(v1 主路径,已实现)** + CSS 腔体外光 | 静态帧(降级档,拓扑自带辨识度)、WebGL shader(v2 升级路径) |
+| UI 渲染 | **AE 预渲染序列(v1 主路径,已实现)** + Canvas 2D 驻波核(退路) + CSS 腔体外光 | 静态帧(降级档,拓扑自带辨识度)、WebGL shader(v2 升级路径) |
 | 桌面外壳 | Tauri 2 + TypeScript + Vite | — |
 
 ## 4. 已完成的工作
@@ -73,7 +73,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 - `docs/research/selection-matrix.md` — 9 维度加权打分矩阵(语音核心 + UI 技术两张表)。
 
 ### Phase 3:原型与决策(t10–t13,本轮完成)
-- **t10 语音栈整合验证** — `tmp_proto/t10_voice_stack_validation.py`,6 项全部通过。
+- **t10 语音栈整合验证** — `scripts/acceptance/t10_voice_stack_validation.py`,6 项全部通过。
 - **t11 渲染路线原型** — `tmp_proto/orb_spike.html`,三条路线全部可用。
 - **t12 结果记录** — `prototype-results.md` 补充验证等级图例、环境记录、复现命令索引。
 - **t13 ADR 定案** — 最终语音组件、桥接方式、渲染路线、备选实现、发布阻塞项。
@@ -205,7 +205,7 @@ Phase 3 原型的定位是「EvoX 语音唤醒对话客户端」。Phase 4 起 E
 | P5 | agent 适配器 `cli.py` + `evox.py` + `registry.py` + `config/agents.toml` | AUTO+SIM | ✅ 完成(真实 CLI 留 P9) |
 | P6 | 派发/路由/汇总 `core/dispatch/` | AUTO+SIM | ✅ 完成（已由 `VoiceRuntime` 接入语音路径） |
 | P7 | `acp.py` + `http.py` / `openclaw.py` | AUTO+SIM | ✅ 完成(真实 ACP/HTTP 联调留 P9) |
-| P8 | 唤醒球弹出 + 工具确认 UI + Python→桌面事件通道 | REAL-WIN | 🔄 Canvas 2D 渲染器、Rust 侧与事件通道**均已接线**（DesktopBridge 专项 33 passed、cargo test 15 passed、npm build 通过）；透明窗口真机验收留 P10 |
+| P8 | 唤醒球弹出 + 工具确认 UI + Python→桌面事件通道 + 系统托盘 | REAL-WIN | 🔄 AE 预渲染渲染器、Rust 侧、事件通道与七项托盘**均已接线**（DesktopBridge 专项 33 passed、cargo test 20 passed、npm build 通过）；透明窗口与托盘点击的真机验收留 P10 |
 | **P8.5** | **本机控制台 + 语音生产入口 + MCP 工具**（2026-08-28） | AUTO+SIM | ✅ 完成 —— 控制台 103 例、模型方案 60 例、MCP 51 例、搜索后端 35 例、配置编辑 33 例、语音配置 20 例、语音装配 16 例、声纹身份 15 例、记忆并发 7 例。控制台界面已到第二版并接通模型配置三端点。浏览器真实录音、真实 MCP server、云端模型端点留 P9/P10 |
 | P9 | 真实 agent 联调(`claude` / `opencode` 各一次) | REAL-AGENT | ⬜ 三后端已试过被挡；`probe_agents.py` 是恢复后的重试入口 |
 | P10 | 真实语音端到端(含他人拒绝) | REAL-MIC + REAL-AGENT | ⬜ |

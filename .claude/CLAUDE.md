@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1313 passed, 3 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1383 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -23,7 +23,7 @@
 | `vox_plugin/voice_stack.py` | `pytest tests/test_voice_assembly.py -q` | **16 passed** |
 | `core/audio/speaker.py` `ring.py` `capture.py` | `pytest tests/test_speaker.py tests/test_speaker_privacy.py tests/test_speaker_hardening.py -q` | **63 passed**（**不需要声纹模型**） |
 | 声纹身份接线（capture→plugin→runtime） | `pytest tests/test_speaker_identity.py -q` | **15 passed** |
-| 唤醒后的聆听 / 确认音静音窗 | `pytest tests/test_capture_listening.py tests/test_acks.py tests/test_runtime.py -q` | **79 passed** |
+| 唤醒后的聆听 / 确认音静音窗 / 托盘 | `pytest tests/test_capture_listening.py tests/test_acks.py tests/test_runtime.py -q` | **93 passed** |
 | 云端 TTS（音色、语气、段间预取） | `pytest tests/test_tts_cloud.py -q` | **21 passed**（不打网络） |
 | 声纹阈值或判别力 | `pytest tests/integration/test_speaker_model.py -q` | 5 passed（缺模型时 5 skipped） |
 | TTS 合成（需模型） | `pytest tests/integration/test_tts_model.py -q` | 4 passed（缺模型时 2 skipped） |
@@ -44,7 +44,8 @@
 | `desktop/src/` | `cd desktop && npm run build` | tsc + vite 通过 |
 | `desktop/src/sequence.ts` `scripts/build_orb_assets.py` `desktop/public/orb/` | 上面那条 + **六态渲染取证**（Edge headless 打 `demo.html?state=<态>&big=1&t=1.4`，深浅两底各一轮） | 六态互不相同（听/思/说三档能量 + 朱红 + 琥珀 + 暗）· 球外能透出桌面纹理（雪碧图必须带 alpha）· 中心是白热光核不是黑洞 · 生产页 `index.html?state=idle` **画布全空** |
 | `desktop/src/core.ts`（手写渲染器，现为 fallback） | 上面那条 + 逐帧对照（`replay.html`）+ 12 格并排（`side.html`）+ 八格对照页 | 只需保证退路不炸：雪碧图缺失时球仍然画得出来 |
-| `desktop/src-tauri/` | `cd desktop/src-tauri && cargo check && cargo test` | 零警告 + **15 passed** + **须实机验收** |
+| `core/audio/asr.py`（端点静音时长） | `pytest tests/test_sherpa_provider.py -q` | **8 passed**（含「不许在没有新测量前调小 rule2」那条） |
+| `desktop/src-tauri/` | `cd desktop/src-tauri && cargo check && cargo test` | 零警告 + **20 passed** + **须实机验收** |
 
 必须用隔离环境的 `.venv\Scripts\python.exe`，不用系统 Python（系统环境没装 sherpa-onnx / soundfile）。
 
@@ -68,7 +69,7 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - **云端 ASR 没接过**（TTS 与 LLM 已接通，见下面「已完成」那一节）—— `providers.py` 那 19 条预设的端点抄自各家文档，除了百炼 TTS 与 relay 那两条**其余一次都没打通过**。「探一下」按钮打本机 Ollama 时确实发出了请求（拿到连接被拒）
 - **第三方 MCP server 真实调用** —— `core/tools/mcp.py` 已实现（stdio JSON-RPC，三层默认关），但测试用的是进程内假 server，只算 **SIM**。没有任何真实 MCP server 通过它完成过一次调用
 - 真机说话打断是 REAL，需麦克风+扬声器在场（打断链路本身已通：`wake_detected` 在 SPEAKING/THINKING 先 `cancel()` 停 TTS + transport 再进 LISTENING）
-- 桌面侧的超时/重连（系统托盘已由 `build_tray` 实现：显示/隐藏/退出，Rust 侧建、不扩 IPC 面；真机点开未验）。传输层超时与重试已覆盖：CLI agent 有 120s 超时（错误 chunk）、桥接有 30s 超时 + 仅连接期重试（`attempts` 默认 1 关闭；超时/HTTP 错误永不自动重发——回合可能已执行，重试即重复）
+- 桌面侧的超时/重连（**系统托盘七项已实现**：状态显示、主动唤醒、暂停/恢复唤醒、显示/隐藏、动画开关、设置、退出；Rust 侧建菜单、走 `{"kind":"control"}` 上行，**不扩 IPC 面**；真机点开未验，逐项验收表在 `docs/routines.md`）。传输层超时与重试已覆盖：CLI agent 有 120s 超时（错误 chunk）、桥接有 30s 超时 + 仅连接期重试（`attempts` 默认 1 关闭；超时/HTTP 错误永不自动重发——回合可能已执行，重试即重复）
 - 声纹**反欺骗**：门不防录音回放，这是已知缺口（ADR 002 局限），不是待办
 - 声纹**真机验收**：本人通过率、他人拒绝、回放实测都需你在场（P10）
 - 记忆**跨进程持久性**：双进程自动化实测已过（AUTO_MULTI_PROCESS）+ 多线程并发已过（真线程 7 例），重启后的人工确认仍未做（P10）
@@ -194,11 +195,20 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - **`measureHitRegion()` 用 `offsetLeft`/`offsetWidth`，不用 `getBoundingClientRect()`** —— 球每帧被 rAF 写 `transform`，用渲染盒会让命中区每帧抖动、IPC 每帧都发
 - **命中判定的失败路径一律倒向「窗口吃鼠标」** —— 读不到光标/窗口位置/缩放、或前端还没上报，都当命中。反方向会让确认卡变成一张点不动的图，而点不动的确认等价于没有确认
 - **没有 `capabilities/` 文件，这是故意的** —— Tauri 2 只对 `plugin:` 前缀命令或应用自带 ACL manifest 时才查权限（`tauri-2.10.3` `webview/mod.rs:1802`）。不放反而最紧：所有 `core:*` 插件命令对前端不可达，IPC 面就是四个 `vox_*`（report_layout / start_drag / set_visible / confirm_reply）。代价是前端**永不能 import `@tauri-apps/api`**，只用 `__TAURI_INTERNALS__.invoke`
-- **Python→桌面事件通道已接线（代码级）** —— `core/desktop_bridge.py` 走父进程管道发 `{"kind":"event"|"visible"}`、收 `{"kind":"ready"|"confirm"}`；Rust 侧 `spawn_event_reader` 读 stdin 把整行原样投成 `vox-bridge` CustomEvent（`js_string_literal` 转义防注入，有测试），`vox_confirm_reply` 把确认写回 stdout；前端 `applyEnvelope` 分派 `state.changed`/`turn.*`/`llm.delta`/`task.failed`/`tool.*`，`askConfirm`→`vox_confirm_reply`。cargo test **15 passed**、npm build 通过；**真机窗口上的点击/焦点/Esc 仍未验（P10 REAL-WIN）**
+- **Python→桌面事件通道已接线（代码级）** —— `core/desktop_bridge.py` 走父进程管道发 `{"kind":"event"|"visible"}`、收 `{"kind":"ready"|"confirm"}`；Rust 侧 `spawn_event_reader` 读 stdin 把整行原样投成 `vox-bridge` CustomEvent（`js_string_literal` 转义防注入，有测试），`vox_confirm_reply` 把确认写回 stdout；前端 `applyEnvelope` 分派 `state.changed`/`turn.*`/`llm.delta`/`task.failed`/`tool.*`，`askConfirm`→`vox_confirm_reply`。cargo test **20 passed**、npm build 通过；**真机窗口上的点击/焦点/Esc 仍未验（P10 REAL-WIN）**
 - **系统托盘已实现（`build_tray`）** —— 球是无边框 + skip_taskbar + 置顶，桌面上没有别的入口能关它，托盘是用户唯一的「显示/隐藏/退出」路径。托盘是 Rust 侧直接建的（`Menu` + `TrayIconBuilder` + `on_menu_event`），和四个 `vox_*` 命令无关，**不扩大 IPC 面**。隐藏时若挂着确认卡，Python 侧 `await_confirmation` 60s 超时落定为拒绝（fail-closed）。真机点开托盘菜单未验（REAL-WIN）
 - **`.shadow(false)` 不是可选项** —— 无边框 + 透明还留投影的话，桌面上会有一块跟着球走的方形灰影
 - **拖动是自己的 `vox_start_drag` + 4px 阈值**，不是 `data-tauri-drag-region`（那条路要 `core:window:allow-start-dragging`，等于为拖窗口暴露整个 core:window）。拖完 OS 补的 `click` 只在 `detail > 0` 时吞 —— 键盘激活的 `click` 的 `detail` 是 0，连它一起吞会让球没法用键盘按
 - **`vox_set_visible(false)` 会先把挂起的确认按拒绝落定再隐藏** —— 隐藏一张挂起的确认卡等于让调用方永久挂起，而「挂起」在安全语义上等价于「未拒绝」
+- **一个凭据变量只服务一个角色** —— 云端 TTS 的 key 在 `VOX_TTS_KEY`（35 字符的百炼 key），聊天那四个（`VOX_LLM_KEY` / `VOX_AGENT_HTTP_TOKEN` / `VOX_DASHSCOPE_KEY` / `ANTHROPIC_AUTH_TOKEN`）都是中转站的 key。2026-09-01 的「回答不出声」就是 `config/voice.toml` 的 `tts.key_env` 指着 `VOX_DASHSCOPE_KEY`（名字叫 DashScope，装的是中转站 key）→ 百炼回 401 `InvalidApiKey`。两个角色共用一个变量名时，把一边修好等于把另一边弄坏
+- **TTS/ASR 的运行时读的是 `config/voice.toml`，不是 `config/models.toml`** —— `models.toml` 对这两个角色**没有读侧**（`vox_plugin/voice_stack.py::_open_tts` 读的是 `tts.*`）。控制台「模型配置」那一栏能改能存，但对合成不生效；两处不一致时以 `voice.toml` 为准。`FIELDS` 里现在有 `voice`（每个云端模型只支持一组特定音色，模型与音色是同一个决定的两半）
+- **唤醒率的旋钮是解码束宽，不是阈值** —— `wake.max_active_paths` 默认 **16**（sherpa 默认 4，实测 0 dB SNR 上只剩 2/5）。`keywords_score` 加分和 `num_trailing_blanks` 都试过，都没用。改回 4 不会报错，只是在噪声里少命中
+- **`input.device` 写名字片段，不写索引** —— 索引由枚举顺序决定，插拔就移位而且**不报错**（2026-08-29 的「[2] 耳机」到 2026-09-01 已经指向内建阵列）。`resolve_device` 按固定优先级取 WASAPI 并排除无输入通道的设备；就绪清单报**解析后的真实名字**
+- **`rule2_min_trailing_silence = 1.2` 不许顺手调小** —— 它看起来是每轮延迟里最该砍的一刀，但实测这位说话人的短语间停顿就是 **1.0–1.1 秒**：降到 1.0 就会在句子中间切句，后半句落进下一轮。三条规则已经是构造参数（能量能调），默认值由 `tests/test_sherpa_provider.py` 钉住
+- **托盘绕过的是唤醒词，不是声纹门** —— `capture.begin_listening()` 明确把已验证说话人清成 `None`（点菜单那一刻没有音频可比对），所以 `shell.run` 照旧被拒。`resume_wake()` **只解开自己按下的那一道**：它不动 `enroll_only`，否则点一下「恢复唤醒」就能绕过注册模式
+- **托盘的「暂停唤醒」不关麦克风** —— 关掉设备再重开要重走 PortAudio 初始化，那条路会失败（设备被抢、独占模式），于是「恢复」变成一个可能失败的动作。做法和注册模式一样：设备照常开、缓冲照常填，只是 `wake_held` 多一个来源
+- **`.manage(TrayItems::default())` 漏了会让球根本不出现** —— `app.state::<T>()` 取不到时是 **panic 不是 None**，而它第一次被调用在 setup 期间。`serde_json` 也必须在 `[dependencies]` 而不是只在 `[dev-dependencies]`（`main.rs` 要解析 `{"kind":"tray"}`）
+- **测试不许把 `config/*.toml` 当夹具** —— `tests/test_models_config.py` 曾复制 `config/models.toml`，于是使用者在控制台上改一次 LLM 方案就让 11 条测试变红（其中 10 条是「注入坏值」的 `.replace` 变成空操作 → DID NOT RAISE）。夹具用文件内自带的 `FIXTURE`；出厂文件只测**不变式**（加载得动、`active` 指向真实 profile、字段都在 `FIELDS` 里）
 
 ## 注意事项
 
