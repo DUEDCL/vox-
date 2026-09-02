@@ -1005,9 +1005,13 @@ def test_the_follow_up_window_keeps_the_verified_speaker():
 
 
 def test_the_reply_is_muted_so_it_is_not_transcribed_as_the_next_request():
-    """播放期间必须压静音窗 —— 不压的后果不是多录一点环境声，是**助手把自己的回答
-    转写成下一句请求**（识别器此刻是开着的）。"""
-    capture = FollowUpCapture()
+    """播放期间必须挡住转写 —— 不挡的后果不是多录一点环境声，是**助手把自己的回答
+    转写成下一句请求**（识别器此刻是开着的）。
+
+    **2026-09-03 从硬静音改成半双工窗。** 挡的东西没变（转写、电平、增益适应），
+    继续跑的多了一样：**唤醒判定** —— 那是「朗读时能随时打断」的前提。采集侧不支持
+    ``duck_for`` 时退回硬静音，所以这条测试对两种桩都要成立。"""
+    capture = BargeInCapture()
     runtime = _talking_runtime(capture)
     runtime.plugin.attach_tts(SimpleNamespace(
         speak_segments=lambda chunks: None, is_stopped=lambda: False, stop=lambda: None
@@ -1015,8 +1019,9 @@ def test_the_reply_is_muted_so_it_is_not_transcribed_as_the_next_request():
 
     runtime.say("讲个笑话")
 
-    # 播放前压上限、播放（阻塞）返回之后压短尾巴 —— 和确认音同一个做法。
-    assert capture.muted[0] == ACK_MUTE_CAP_S
+    # 播放前开上限窗、播放（阻塞）返回之后收窗再压短尾巴。
+    assert capture.ducked[0] == ACK_MUTE_CAP_S
+    assert capture.unducks >= 1
     assert capture.muted[-1] == ACK_MUTE_TAIL_S
 
 
@@ -1170,3 +1175,118 @@ def test_an_ordinary_request_still_runs_a_turn():
     assert runtime.dispatcher.calls[0][0] == "帮我结束这个进程"
     assert result.route == "agent"
     assert runtime._following_up is True
+
+
+# ------------------------------------------ 朗读时打断（半双工窗，2026-09-03）
+
+
+class BargeInCapture(FollowUpCapture):
+    """记下半双工窗的开关，好断言「打断之后没有再压尾巴」。"""
+
+    def __init__(self, opens: bool = True) -> None:
+        super().__init__(opens=opens)
+        self.ducked: list[float] = []
+        self.unducks = 0
+        self.verified_speaker = "杜"
+
+    def duck_for(self, seconds):
+        self.ducked.append(seconds)
+
+    def unduck(self):
+        self.unducks += 1
+
+
+def test_the_reply_opens_a_half_duplex_window_not_a_hard_mute():
+    """回答的播放走半双工窗：**转写停，唤醒判定继续** —— 那是能打断的前提。
+
+    此前这里压的是硬静音窗，而硬静音在音频回调最前面 ``return``，播放期间 KWS 一块音频
+    都收不到。「必须等它读完或者重新喊唤醒词」的成因就在这一行上。
+    """
+    capture = BargeInCapture()
+    runtime = _talking_runtime(capture)
+    runtime.plugin.attach_tts(SimpleNamespace(
+        speak_segments=lambda chunks: None, is_stopped=lambda: False, stop=lambda: None
+    ))
+
+    runtime.say("放一句话")
+
+    assert capture.ducked, "回答没有开半双工窗 —— 那样就打断不了"
+    assert capture.unducks >= 1, "播放返回之后没有收窗；上限是保险丝不是窗口长度"
+
+
+def test_a_barge_in_does_not_swallow_the_start_of_the_interrupting_sentence():
+    """打断之后**不压尾巴静音窗**。
+
+    那 0.25 秒是给扬声器余响留的；打断的时候扬声器已经停了、人正在说话，压下去等于把
+    他那句话的头 0.25 秒吃掉 —— 症状是「打断成功了但它听不全我说什么」。
+    """
+    capture = BargeInCapture()
+    runtime = _talking_runtime(capture)
+
+    class InterruptingTts:
+        """播放到一半模拟一次唤醒命中，就像人喊了「你好小沃」。"""
+
+        def __init__(self) -> None:
+            self.stopped = 0
+
+        def speak_segments(self, segments):
+            runtime._woken("你好小沃", 0.62)
+            return None
+
+        def stop(self):
+            self.stopped += 1
+
+    runtime.plugin.attach_tts(InterruptingTts())
+    capture.muted.clear()
+
+    runtime.say("这是一段会被打断的回答")
+
+    assert capture.muted == [], f"打断之后仍然压了静音窗：{capture.muted}"
+    assert capture.unducks >= 1, "打断之后半双工窗还挂着 —— 挂着的那段正是人在说的话"
+
+
+def test_a_barge_in_does_not_re_open_the_follow_up_window():
+    """打断走的是唤醒的正常路径，识别器已经由 ``_authorise`` 开好了。这里再
+    ``resume_listening()`` 会看到 ``_listening`` 已经是 True 而返回 False，然后
+    「连续对话没开起来」被记成一条警告 —— 那是个假故障。"""
+    capture = BargeInCapture()
+    runtime = _talking_runtime(capture)
+
+    class Interrupting:
+        def speak_segments(self, segments):
+            runtime._woken("你好小沃", 0.62)
+
+        def stop(self):
+            pass
+
+    runtime.plugin.attach_tts(Interrupting())
+    written: list[dict] = []
+    runtime.logbook = type(
+        "Book",
+        (),
+        {"write": lambda _s, source, message, **f: written.append({**f, "message": message})},
+    )()
+    before = capture.started_listening
+
+    runtime.say("会被打断")
+
+    assert not any("连续对话没开起来" in row["message"] for row in written), written
+    assert capture.started_listening == before, "打断之后又开了一次聆听 —— 那会重置端点计时"
+
+
+def test_a_barge_in_is_logged_as_an_interruption_not_a_plain_wake():
+    """日志措辞要分开。一次打断和一次从待机叫起来在读日志的人眼里是两件事，而它们此前
+    印的是同一句「命中『你好小沃』」。"""
+    capture = BargeInCapture()
+    runtime = _talking_runtime(capture)
+    # 先把状态机推到 SPEAKING —— 打断只在「正在回答」时才叫打断。
+    runtime._reach_listening()
+    runtime.plugin.submit_text("先开一轮")
+    written: list[str] = []
+    runtime.logbook = type(
+        "Book", (), {"write": lambda _s, source, message, **f: written.append(message)}
+    )()
+
+    runtime._woken("你好小沃", 0.62)
+
+    assert any("打断了正在朗读的回答" in message for message in written), written

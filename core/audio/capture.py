@@ -178,6 +178,11 @@ class SounddeviceWakeCapture:
         #: 被静音窗丢掉的块数。给「就绪清单」和诊断读 —— 一个静音窗如果因为哪里算错了
         #: 一直不解除，症状会是「完全不响应」，那时这个数字是唯一的读数。
         self.muted_blocks = 0
+        #: 半双工窗的截止时刻。扬声器在放回答的这段时间里转写与电平停掉，**唤醒判定继续
+        #: 跑** —— 见 ``duck_for``。这是「朗读时能随时打断」的全部机制。
+        self._duck_until = 0.0
+        #: 半双工窗里没进转写的块数（**不是整块丢掉**：KWS 与环形缓冲照收）。
+        self.ducked_blocks = 0
         #: 唤醒判定被按住到什么时候。见 ``hold_wake_for`` —— 控制台取样期间用。
         self._wake_held_until = 0.0
         self.wake_holds = 0
@@ -649,6 +654,44 @@ class SounddeviceWakeCapture:
         """立刻解除静音窗。"""
         self._mute_until = 0.0
 
+    # -- 半双工窗（扬声器在响，但唤醒词仍然要听得见）---------------------------
+
+    @property
+    def ducking(self) -> bool:
+        """现在是否在**半双工窗**里 —— 扬声器在放回答，而唤醒判定仍然开着。"""
+        return time.monotonic() < self._duck_until
+
+    def duck_for(self, seconds: float) -> None:
+        """扬声器要响 ``seconds`` 秒：**丢转写和电平，但继续听唤醒词。**
+
+        和 ``mute_for`` 的区别是全部的重点。静音窗在回调最前面 ``return``，于是播放期间
+        KWS 一块音频都收不到 —— 那正是「朗读时必须等它读完或者重新喊唤醒词」的成因：
+        想打断的那句话落在一个聋掉的麦克风上。
+
+        半双工窗只关三样：
+
+        * **转写**（``_recognize``）—— 开着的话助手会把自己的回答转写成下一句请求；
+        * **电平观测** —— 拿我们自己放出去的声音证明麦克风活着是假证据；
+        * **自适应增益的适应** —— 让它跟着扬声器的包络走，人一开口就偏了。
+
+        唤醒判定和环形缓冲**继续跑**。缓冲必须继续写，因为打断也要过声纹门，而声纹看的是
+        命中之前那 3 秒 —— 不写缓冲就等于「能听见打断但永远验不过」。
+
+        代价说清楚：缓冲里此刻是「人声 + 扬声器串音」的混合。**戴耳机时几乎没有串音**；
+        用音箱且音量大时相似度会掉，表现是打断偶尔要说两次。反过来，助手自己的 TTS 声音
+        触发 KWS 时会被声纹门拒掉（那不是注册的那个人），所以自激**不会**变成误唤醒 ——
+        半双工窗能开着正是因为门在后面。
+        """
+        try:
+            span = float(seconds)
+        except (TypeError, ValueError):
+            return
+        self._duck_until = time.monotonic() + span if span > 0 else 0.0
+
+    def unduck(self) -> None:
+        """立刻收掉半双工窗。播放提前结束（被打断）时调用。"""
+        self._duck_until = 0.0
+
     # -- capture -------------------------------------------------------------
 
     @staticmethod
@@ -710,9 +753,17 @@ class SounddeviceWakeCapture:
             if self.muted:
                 self.muted_blocks += 1
                 return
+            # 半双工窗：扬声器在放回答。**只关转写与电平，唤醒判定继续跑** —— 这一行是
+            # 「朗读时能随时打断」和「必须等它读完」的分界。见 duck_for 的文档串。
+            ducking = self.ducking
+            if ducking:
+                self.ducked_blocks += 1
             # 电平先看,再分流。放在 _listening 判断**之前**是因为一个死设备在聆听阶段
             # 同样是死的,而那时的症状是「唤醒了但转写永远是空」。
-            self._watch_input_level(samples)
+            #
+            # 半双工窗里不看：拿我们自己放出去的声音去证明麦克风活着是假证据。
+            if not ducking:
+                self._watch_input_level(samples)
             # 自适应增益紧跟在电平观测之后:观测要看**设备真实**电平（否则「全零」判定会被
             # 增益骗过去）。
             #
@@ -736,8 +787,14 @@ class SounddeviceWakeCapture:
             if speaking:
                 self.speech_blocks += 1
             if self.auto_gain is not None:
-                voiced = self.auto_gain.apply(samples, is_speech=speaking)
+                # 半双工窗里不让增益**适应**（`is_speech=False`）：扬声器的包络会把它带跑，
+                # 人一开口时增益已经偏了。仍然按当前增益放大，因为 KWS 要接近训练电平。
+                voiced = self.auto_gain.apply(samples, is_speech=False if ducking else speaking)
             if self._listening:
+                # 扬声器在响的时候不转写 —— 否则助手把自己的回答当成下一句请求。
+                # 这是半双工窗关掉的那三样里唯一一条会产生**错误内容**的。
+                if ducking:
+                    return
                 self._recognize(voiced)
                 return
             self._ring.write(samples)

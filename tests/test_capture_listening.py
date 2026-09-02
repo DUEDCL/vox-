@@ -931,3 +931,81 @@ def test_resume_listening_does_not_restart_an_open_recognizer():
 
     assert capture.resume_listening() is False
     assert capture.asr_provider.streams == streams
+
+
+# ---------------------------------------------- 半双工窗：朗读时能打断（2026-09-03）
+
+
+def test_ducking_still_feeds_kws_so_a_reply_can_be_interrupted():
+    """**这一条就是「朗读时能随时打断」。**
+
+    此前播放期间走的是硬静音窗，而硬静音在音频回调**最前面** ``return`` —— KWS 一块音频
+    都收不到，想打断的那句话落在一个聋掉的麦克风上。半双工窗只关转写、电平和增益适应，
+    唤醒判定继续跑。
+    """
+    woke = []
+    capture, kws = build()
+    capture.on_wake = lambda keyword, score=None: woke.append(keyword) or []
+
+    capture.duck_for(5.0)
+    assert capture.ducking is True
+    kws.hits = ["你好问问"]
+    capture._callback(block(), 160, None, None)
+
+    assert kws.feeds == 1, "半双工窗里 KWS 必须照喂 —— 不喂就打断不了"
+    assert woke == ["你好问问"]
+    assert capture.ducked_blocks == 1
+
+
+def test_ducking_does_not_feed_the_recognizer():
+    """扬声器在响时**不转写** —— 这是半双工窗关掉的三样里唯一会产生错误内容的那一样：
+    开着的话助手会把自己的回答转写成下一句请求。"""
+    asr = StubAsr(endpoint_after=1)
+    capture, _kws = build(asr=asr, recognized=[])
+    capture.begin_listening()
+    assert capture.listening is True
+
+    capture.duck_for(5.0)
+    capture._callback(block(), 160, None, None)
+
+    assert asr.fed == 0, "半双工窗里喂了识别器 —— 助手会把自己的回答当成请求"
+    assert capture.listening is True, "不转写不等于结束聆听"
+
+
+def test_ducking_keeps_writing_the_ring_so_a_barge_in_can_be_verified():
+    """缓冲必须继续写：**打断也要过声纹门**，而门看的是命中之前那 3 秒。
+    不写缓冲就等于「能听见打断但永远验不过」。"""
+    capture, _kws = build()
+    capture.duck_for(5.0)
+
+    capture._callback(block(), 160, None, None)
+
+    assert capture._ring.filled_seconds > 0, "半双工窗里没写缓冲，打断将永远验不过声纹"
+
+
+def test_a_hard_mute_still_drops_everything():
+    """反向的护栏：应答音那条路**没有变**。它只有 0.8–1.6 秒，而那时识别器已经开着，
+    半双工窗关不掉它那一路的风险 —— 所以确认音仍然走硬静音。"""
+    capture, kws = build()
+    kws.hits = ["你好问问"]
+    capture.mute_for(5.0)
+
+    capture._callback(block(), 160, None, None)
+
+    assert kws.feeds == 0
+    assert capture.muted_blocks == 1
+    assert capture._ring.filled_seconds == 0
+
+
+def test_unduck_reopens_transcription_immediately():
+    """播放结束（或被打断）时窗口要能立刻收掉 —— 上限只是保险丝，不是窗口长度。"""
+    asr = StubAsr(endpoint_after=99)
+    capture, _kws = build(asr=asr, recognized=[])
+    capture.begin_listening()
+    capture.duck_for(30.0)
+
+    capture.unduck()
+    assert capture.ducking is False
+    capture._callback(block(), 160, None, None)
+
+    assert asr.fed == 1

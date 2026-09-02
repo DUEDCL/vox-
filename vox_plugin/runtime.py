@@ -109,6 +109,10 @@ class VoiceRuntime:
     follow_up: bool = True
     #: 现在是不是挂着一个连续对话窗口。挂着的时候**不起收球倒计时** —— 窗口结束时才起。
     _following_up: bool = field(default=False, init=False, repr=False)
+    #: 这一次唤醒是不是打断了正在朗读的回答。由 ``_woken`` 在状态机之前置位，
+    #: ``_speak_and_follow_up`` 的收尾读它 —— 打断之后**不能**压尾巴静音窗、也不能
+    #: 重开聆听窗，因为人已经在说话了，而 `_authorise` 已经把识别器开好了。
+    _barged_in: bool = field(default=False, init=False, repr=False)
     #: 控制台地址（带令牌），托盘的「设置」用它。``None`` = 托盘上点了只记一条日志。
     #: 由启动方注入而不是在这里拼：令牌属于控制台那一侧，运行时不该去猜端口。
     settings_url: str | None = None
@@ -533,27 +537,47 @@ class VoiceRuntime:
 
         三件事按这个顺序，每一条都有它必须在这个位置的理由：
 
-        1. **播放前压静音窗。** ``complete_turn`` 里的 ``speak_segments`` 是阻塞的，播放
+        1. **播放前开半双工窗。** ``complete_turn`` 里的 ``speak_segments`` 是阻塞的，播放
            期间麦克风照常在录 —— 而连续对话把识别器留着开，于是不压窗的后果不是「多录一点
            环境声」，是**助手把自己的回答转写成下一句请求**。上限只是保险丝，真正决定窗口
            长度的是播放返回之后那一下（和确认音同一个做法，见 ``core/audio/acks.py``）。
-        2. **播放返回之后压一个短尾巴。** 扬声器的余响和房间反射会拖几十毫秒。
+        2. **播放返回之后立刻收窗**，再压一个短尾巴收余响与房间反射。
         3. **再开聆听。** 顺序反过来（先开聆听再播放）就等于把回答喂给识别器。
 
-        打断仍然是即时的：``wake_detected`` 在 SPEAKING 时先 ``cancel()``，而静音窗只丢
-        输入不影响那条路 —— 唤醒词走的是 KWS，而 KWS 在聆听模式下根本不被喂到，所以
-        打断靠的是使用者说话时识别器听到内容、或者托盘。**这是连续对话的已知代价**：
-        回答正在播的时候喊唤醒词打断不了它（静音窗把那句话丢了）。要打断就等它说完，
-        或者用托盘。
+        **朗读期间可以随时打断（2026-09-03）。** 这里用的是 ``_duck_input`` 而不是硬静音：
+        半双工窗只关转写、电平和增益适应，**唤醒判定与环形缓冲继续跑**。所以朗读到一半喊
+        「你好小沃」会命中 KWS → 走声纹门 → ``wake_detected`` 在 SPEAKING 时 ``cancel()``
+        停掉 TTS 并进 LISTENING。
+
+        此前这里是硬静音窗，而硬静音在音频回调**最前面**就 ``return`` —— 播放期间 KWS
+        一块音频都收不到，想打断的那句话落在一个聋掉的麦克风上。那就是「必须等它读完或者
+        重新喊唤醒词」的全部成因，不是别的哪一层不灵。
+
+        两个仍然存在的代价：戴音箱且音量大时缓冲里是「人声 + 串音」，声纹相似度会掉，
+        表现是打断偶尔要说两次（戴耳机几乎没有）；助手自己的声音触发 KWS 时会被声纹门
+        拒掉 —— 那是**门在后面**才敢开这个窗的原因。
         """
         capture = getattr(self.plugin, "audio_capture", None)
+        self._barged_in = False
         if speak and (self.acks is not None or self.plugin.tts is not None):
-            self._mute_input(ACK_MUTE_CAP_S)
+            self._duck_input(ACK_MUTE_CAP_S)
         try:
             self._complete_and_watch_tts(reply, speak=speak)
         finally:
-            self._mute_input(ACK_MUTE_TAIL_S)
+            # 播放返回就是真的放完了（或者被打断了）：先收掉半双工窗，再压一个短尾巴。
+            # 不收的话上限那一段会继续挂着，而它是保险丝不是窗口长度。
+            self._unduck_input()
+            # **被打断时不压尾巴。** 那 0.25 秒是给扬声器余响留的，而打断的时候扬声器
+            # 已经停了、人正在说话 —— 压下去等于把他那句话的头 0.25 秒吃掉。
+            if not self._barged_in:
+                self._mute_input(ACK_MUTE_TAIL_S)
         self._following_up = False
+        if self._barged_in:
+            # 打断之后识别器已经由 `_authorise` 开好了（那是唤醒的正常路径），这里再
+            # `resume_listening()` 会看到 `_listening` 已经是 True 而返回 False，然后
+            # 「连续对话没开起来」被记成一条警告 —— 那是个假故障。直接让位。
+            self._barged_in = False
+            return
         if not self.follow_up or capture is None:
             return
         resume = getattr(capture, "resume_listening", None)
@@ -928,19 +952,35 @@ class VoiceRuntime:
         返回值仍然是 ``wake_detected`` 的事件列表 —— capture 靠它判断这次唤醒被接受了
         没有（被拒绝的唤醒走的是 ``on_reject``，根本不到这里）。
         """
+        # 打断标记要在状态机之前读：`wake_detected` 的第一件事就是把 SPEAKING 打断掉，
+        # 读完之后状态已经是 LISTENING，分不出这次唤醒是「打断了正在朗读的回答」还是
+        # 「从待机里叫起来的」。这两者的收尾动作不同 —— 见 `_speak_and_follow_up`。
+        self._barged_in = self.plugin.machine.state in {VoiceState.THINKING, VoiceState.SPEAKING}
         events = self.plugin.wake_detected(keyword, score)
         self.wake_stats["accepted"] += 1
         self._record_wake(
             keyword=keyword,
             verdict="accepted",
             score=None if score is None else round(float(score), 3),
+            barge_in=self._barged_in or None,
         )
-        self.log("wake", f"命中「{keyword}」", keyword=keyword, score=score)
+        if self._barged_in:
+            self.log("wake", f"打断了正在朗读的回答（「{keyword}」）", keyword=keyword, score=score)
+        else:
+            self.log("wake", f"命中「{keyword}」", keyword=keyword, score=score)
         # 静音窗要在**这个线程上**开，不能留给 _greet：这里跑在音频回调上，而
         # `_authorise` 紧接着就会 `_start_listening()` 开识别器。晚一步开窗，识别器就已经
         # 吃到了确认音的开头。见 core/audio/capture.py 的 `_mute_until` 那段注释。
-        if self.acks is not None:
+        #
+        # **打断的时候不应答音、不压窗。** 人正在说话，压 5 秒静音窗等于把他要说的整句
+        # 都丢掉；而再应一声「你说吧」会盖在他嘴上。打断本身就是最好的确认 —— 声音停了。
+        if self.acks is not None and not self._barged_in:
             self._mute_input(ACK_MUTE_CAP_S)
+        if self._barged_in:
+            # 朗读被打断：把半双工窗立刻收掉，否则它还挂着，而挂着的那段正是人在说的话。
+            self._unduck_input()
+            self._cancel_hide()
+            return events
         threading.Thread(target=self._greet, daemon=True, name="vox-greet").start()
         return events
 
@@ -954,6 +994,40 @@ class VoiceRuntime:
             muter(seconds)
         except Exception:  # noqa: BLE001 - 静音窗失败不该让唤醒失败
             pass
+
+    def _duck_input(self, seconds: float) -> None:
+        """扬声器要响这么久：**停转写，但唤醒词照听** —— 这是「随时打断」的开关。
+
+        回答的播放走这条而不是 ``_mute_input``：硬静音窗在音频回调最前面就 ``return``，
+        于是朗读期间 KWS 一块音频都收不到，想打断的那句话落在一个聋掉的麦克风上。那正是
+        「必须等它读完或者重新喊唤醒词」的成因。
+
+        应答音仍然走硬静音（``_greet``）：它只有 0.8–1.6 秒，而那一秒里人还没来得及决定
+        要不要打断；更重要的是那时识别器**已经开着**，半双工窗关不掉它那一路的风险。
+
+        采集侧不支持 ``duck_for``（老的替身、无麦克风运行）时退回硬静音 —— 宁可不能打断，
+        也不能把回答转写成下一句请求。
+        """
+        capture = getattr(self.plugin, "audio_capture", None)
+        ducker = getattr(capture, "duck_for", None)
+        if not callable(ducker):
+            self._mute_input(seconds)
+            return
+        try:
+            ducker(seconds)
+        except Exception:  # noqa: BLE001 - 半双工窗失败不该让这一轮失败
+            self._mute_input(seconds)
+
+    def _unduck_input(self) -> None:
+        """立刻收掉半双工窗。播放结束或被打断时调用。"""
+        capture = getattr(self.plugin, "audio_capture", None)
+        for name in ("unduck", "unmute"):
+            action = getattr(capture, name, None)
+            if callable(action):
+                try:
+                    action()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _greet(self) -> None:
         """把球显示出来，再应一声。两个都吞异常：欢迎动作失败绝不能让唤醒失败。
