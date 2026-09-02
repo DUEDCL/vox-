@@ -216,13 +216,22 @@ class VoiceRuntime:
             descriptors, self.adapters, agent_warnings = self._open_agents()
             warnings.extend(agent_warnings)
 
+            router = DefaultRouter(
+                descriptors,
+                breaker=CircuitBreaker(on_event=self.on_event),
+                memory_recaller=self.memory_recaller,
+                memory_writer=self.memory_writer,
+            )
+            # **把「这台机器上没装」告诉路由。** `config/agents.toml` 刻意保留命令不在 PATH
+            # 上的条目（丢掉它会让「少一个 agent」和「配错一个 agent」无法区分），代价是
+            # 路由会选中一个跑不起来的后端 —— 实测 `claude` 装在 `%APPDATA%\npm` 而那个
+            # 目录不在 PATH 上，于是能力闸门把「帮我改这个函数」正确地送给它，然后整轮失败。
+            # 清单里仍然列出它和原因，只是这一轮不会被派到它身上。
+            for name, reason in self._unavailable(self.adapters).items():
+                router.mark_unavailable(name, reason)
+
             self.dispatcher = Dispatcher(
-                router=DefaultRouter(
-                    descriptors,
-                    breaker=CircuitBreaker(on_event=self.on_event),
-                    memory_recaller=self.memory_recaller,
-                    memory_writer=self.memory_writer,
-                ),
+                router=router,
                 aggregator=DefaultAggregator(),
                 resolver=RuleBasedIntentResolver(),
                 tool_runner=self.tool_runner,
@@ -285,6 +294,26 @@ class VoiceRuntime:
                 self._close_resource(adapter)
             raise
         return tuple(descriptors), opened, warnings
+
+    @staticmethod
+    def _unavailable(adapters: Mapping[str, Any]) -> dict[str, str]:
+        """哪些后端这台机器上跑不起来，以及原因。``check()`` 不打网络。
+
+        和 ``_availability`` 的分工：那一个把结果变成给人看的启动警告，这一个把它变成
+        路由的输入。同一次 ``check()`` 调两遍是刻意的 —— 它很便宜（``shutil.which`` 或
+        读几个字段），而把两个消费者耦合到一个缓存上会让「先算警告还是先算路由」变成
+        一个顺序依赖。
+        """
+        blocked: dict[str, str] = {}
+        for name, adapter in adapters.items():
+            try:
+                status = adapter.check()
+            except Exception as exc:  # noqa: BLE001 - 探测失败按「不可用」处理
+                blocked[name] = f"check failed: {type(exc).__name__}"
+                continue
+            if isinstance(status, Mapping) and status.get("available") is False:
+                blocked[name] = str(status.get("reason") or "unavailable")
+        return blocked
 
     @staticmethod
     def _availability(adapter: Any) -> str | None:

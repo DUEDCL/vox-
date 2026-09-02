@@ -822,3 +822,75 @@ def test_a_broken_tray_does_not_break_the_turn():
     runtime.on_event({"type": "state.changed", "payload": {"to": "thinking"}})
 
     assert runtime.seen[-1]["type"] == "state.changed"
+
+
+# ------------------- 「这台机器上没装」要传到路由（2026-09-01）
+
+
+class CheckAdapter:
+    """自报可用性的假适配器。``check()`` 是生产里唯一的可用性来源。"""
+
+    def __init__(self, name: str, available: bool = True, raises: bool = False) -> None:
+        self._name = name
+        self._available = available
+        self._raises = raises
+        self.checks = 0
+
+    def describe(self):
+        from core.agents.contract import AgentDescriptor
+
+        return AgentDescriptor(name=self._name, kind="cli", capabilities=frozenset({"chat"}))
+
+    def check(self):
+        self.checks += 1
+        if self._raises:
+            raise RuntimeError("boom")
+        if self._available:
+            return {"name": self._name, "kind": "cli", "available": True}
+        return {
+            "name": self._name,
+            "kind": "cli",
+            "available": False,
+            "reason": f"'{self._name}' is not on PATH",
+        }
+
+
+def test_an_agent_missing_from_this_machine_is_marked_on_the_router():
+    """`config/agents.toml` 保留命令不在 PATH 上的条目，所以路由必须自己知道跳过它。
+
+    实测这台机器上 `claude` 装在 `%APPDATA%\npm`，那个目录不在 PATH 上 —— 能力闸门把
+    「帮我改这个函数」正确地送给它，然后整轮失败。
+    """
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+    here = CheckAdapter("relay")
+    gone = CheckAdapter("claude", available=False)
+    monkey = {"relay": here, "claude": gone}
+    runtime._open_agents = lambda: (
+        tuple(a.describe() for a in monkey.values()),
+        dict(monkey),
+        [],
+    )
+
+    runtime.start()
+    try:
+        blocked = runtime.dispatcher.router.describe()["unavailable"]
+        assert blocked == {"claude": "'claude' is not on PATH"}
+        # 清单里仍然有它 —— 「配了但没装」和「没配」必须能分开看。
+        assert set(runtime.dispatcher.router.describe()["agents"]) == {"relay", "claude"}
+    finally:
+        runtime.close()
+
+
+def test_a_check_that_raises_is_treated_as_unavailable():
+    """探测自己炸了就当它不可用：派到一个连自检都跑不动的后端上只会晚一点失败。"""
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+    broken = CheckAdapter("broken", raises=True)
+    runtime._open_agents = lambda: ((broken.describe(),), {"broken": broken}, [])
+
+    runtime.start()
+    try:
+        blocked = runtime.dispatcher.router.describe()["unavailable"]
+        assert "broken" in blocked
+        assert "check failed" in blocked["broken"]
+    finally:
+        runtime.close()

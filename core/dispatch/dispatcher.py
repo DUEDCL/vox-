@@ -380,6 +380,30 @@ class Dispatcher:
     ) -> DispatchResult:
         plan = self.router.plan(task)
         available = self._collect(plan, adapters)
+        if not available and task.capabilities:
+            # **能力闸门降级。** 闸门把这一句判给了唯一能做的后端，而那个后端这台机器上
+            # 没装（实测：`claude` 在 `%APPDATA%\npm`，那个目录不在 PATH 上）。此前的行为
+            # 是整轮失败，使用者听到的是「agent 报告失败」—— 一句既不回答问题也不说明
+            # 原因的话。
+            #
+            # 退一步用**能力不设限**的计划：那个后端答不了「帮我改这个函数」，但它的
+            # system prompt 明确要求它说「这个我做不到」（core/agents/environment.py），
+            # 而那是一个诚实且有用的回答。理由写进 reason，日志里能查到是降级来的。
+            relaxed = replace(task, capabilities=frozenset())
+            fallback = self.router.plan(relaxed)
+            available = self._collect(fallback, adapters)
+            if available:
+                self._detail(
+                    "agent",
+                    f"能力降级：{plan.reason} → 改用 {', '.join(fallback.agents)}",
+                    level="warn",
+                    wanted=sorted(task.capabilities),
+                    blocked_reason=plan.reason,
+                    agents=list(fallback.agents),
+                )
+                task, plan = relaxed, replace(
+                    fallback, reason=f"{fallback.reason}（降级：{plan.reason}）"
+                )
         if not available:
             reason = plan.reason or "no agents available"
             return DispatchResult(

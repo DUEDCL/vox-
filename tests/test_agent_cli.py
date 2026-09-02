@@ -310,7 +310,47 @@ def test_check_separates_available_from_missing():
     report = CliAgentAdapter(name="ghost", command="evox-no-such-command").check()
 
     assert report["available"] is False
-    assert "not on PATH" in report["reason"]
+    # 原话要点名**两处**都找过了。只说「不在 PATH 上」会把人送去 PATH 里翻一个本来就
+    # 不该在 PATH 里的东西 —— npm 在 Windows 上装全局包时不改 PATH，见 cli.py 的
+    # `_extra_search_dirs`。
+    assert "PATH" in report["reason"]
+    assert "evox-no-such-command" in report["reason"]
+
+
+def test_a_command_only_in_the_npm_global_dir_is_still_found(tmp_path, monkeypatch):
+    """**这一条是 2026-09-01 那次「所有代码请求都失败」的正解。**
+
+    `claude.cmd` 装在 `%APPDATA%\\npm`，而那个目录既不在用户 PATH 也不在系统 PATH 里
+    （npm 在 Windows 上装全局包时不会去改 PATH，所以这是默认状态）。能力闸门会把
+    「帮我改一下这个函数」正确地判给 claude，然后这一轮失败 —— 而 `check()` 报
+    「不在 PATH 上」，读的人于是去查 PATH。
+    """
+    npm = tmp_path / "npm"
+    npm.mkdir()
+    shim = npm / "faux-agent.cmd"
+    shim.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+
+    report = CliAgentAdapter(name="faux", command="faux-agent").check()
+
+    assert report["available"] is True
+    # 解析后的绝对路径必须报出来：不然「它到底跑的是哪个文件」成了猜测。
+    # 大小写不比：``shutil.which`` 用 PATHEXT 里的写法补后缀（Windows 上是 ``.CMD``）。
+    assert report["path"].casefold() == str(shim).casefold()
+
+
+def test_the_fallback_never_overrides_an_explicit_path(tmp_path, monkeypatch):
+    """带目录分隔的命令不走后备：调用方已经说清要哪个文件，再去别处找就是替它改主意。"""
+    npm = tmp_path / "npm"
+    npm.mkdir()
+    (npm / "faux-agent.cmd").write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+
+    explicit = CliAgentAdapter(name="faux", command="./faux-agent").check()
+
+    assert explicit["available"] is False
 
 
 @pytest.mark.parametrize(

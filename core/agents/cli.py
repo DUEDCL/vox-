@@ -244,19 +244,30 @@ class CliAgentAdapter:
         return env
 
     def check(self) -> dict[str, Any]:
-        """Is the command on PATH? Deliberately outside ``AgentAdapter``.
+        """Is the command reachable? Deliberately outside ``AgentAdapter``.
 
         Availability is host state, not a capability declaration, so it stays out
         of ``AgentDescriptor`` where red line 2 restricts the field types.
+
+        ``path`` 报的是**解析后的绝对路径**，因为 ``which`` 会去 PATH 之外的一个目录找
+        （见它的注释）—— 不报出来的话「它到底跑的是哪个文件」就成了猜测。找不到时的原话
+        点名那个后备目录，否则读的人会去 PATH 里翻一个本来就不该在 PATH 里的东西。
         """
         resolved = which(self.command)
+        if resolved is not None:
+            missing = {}
+        else:
+            extra = ", ".join(_extra_search_dirs()) or "(no fallback dir)"
+            missing = {
+                "reason": f"{self.command!r} 不在 PATH 上，也不在 {extra}",
+            }
         return {
             "name": self.name,
             "kind": "cli",
             "available": resolved is not None,
             "output": self.output,
             "unparsed_lines": self.unparsed,
-            **({"path": resolved} if resolved else {"reason": f"{self.command!r} is not on PATH"}),
+            **({"path": resolved} if resolved else missing),
         }
 
     # -- streaming --------------------------------------------------------
@@ -413,6 +424,26 @@ def _terminate(process: subprocess.Popen[str]) -> None:
         pass
 
 
+#: PATH 之外还去看的目录。**只有一条，而且有具体的理由。**
+#:
+#: 2026-09-01 实测这台机器：`claude.cmd` 装在 `%APPDATA%\npm`，而那个目录**既不在用户
+#: PATH 也不在系统 PATH 里**（`[Environment]::GetEnvironmentVariable("Path","User"/"Machine")`
+#: 两个都不含 npm）。npm 在 Windows 上装全局包时不会自己去改 PATH，所以这是默认状态而
+#: 不是这台机器配坏了。
+#:
+#: 后果不是「少一个 agent」：能力闸门会把「帮我改一下这个函数」正确地判给 claude，然后
+#: 这一轮失败或降级到一个动不了机器的后端。而 `check()` 报的原话是
+#: 「'claude' is not on PATH」—— 技术上对，但读的人会去查 PATH，而 PATH 里本来就不该有它。
+#:
+#: 为什么不算扩大攻击面：能写进 `%APPDATA%\npm` 的人已经能改写用户所有的 npm 全局命令，
+#: 包括用户自己在终端里敲的那些。这里只是让 Vox 找到和用户手动敲 `claude` 时**本该**
+#: 找到的同一个文件。解析结果会出现在 `check()` 的 ``path`` 里，所以它不是隐式行为。
+def _extra_search_dirs() -> tuple[str, ...]:
+    """npm 全局 bin。取不到环境变量就返回空 —— 不去猜路径。"""
+    appdata = os.environ.get("APPDATA", "").strip()
+    return (str(Path(appdata) / "npm"),) if appdata else ()
+
+
 def which(command: str) -> str | None:
     """The absolute target ``command`` names, or ``None``.
 
@@ -420,8 +451,19 @@ def which(command: str) -> str | None:
     on Windows ``shutil.which`` is what applies ``PATHEXT`` -- without it, a
     ``claude`` that exists only as ``claude.cmd`` is reported available by
     ``check()`` and then fails to start.
+
+    PATH 先查，查不到再看 ``_extra_search_dirs()``（见那里的注释）。绝对路径或带目录分隔
+    的命令**不走后备**：调用方已经说清了要哪个文件，再去别处找就是替它改主意。
     """
-    return shutil.which(command, path=os.environ.get("PATH"))
+    found = shutil.which(command, path=os.environ.get("PATH"))
+    if found is not None:
+        return found
+    if os.sep in command or (os.altsep and os.altsep in command):
+        return None
+    extra = _extra_search_dirs()
+    if not extra:
+        return None
+    return shutil.which(command, path=os.pathsep.join(extra))
 
 
 def spawn_target(argv: Sequence[str]) -> tuple[list[str] | str, str | None]:

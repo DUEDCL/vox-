@@ -82,10 +82,43 @@ class DefaultRouter:
         self.memory_writer = memory_writer
         self.weights = dict(DEFAULT_WEIGHTS if weights is None else weights)
         self._load: dict[str, int] = {}
+        #: 主机上装没装这个后端。**和熔断器是两件事**：熔断记的是「它一直失败」（会自愈），
+        #: 这里记的是「这台机器上根本没有它」（只有重新检查才会变）。
+        #:
+        #: 为什么需要它：``config/agents.toml`` 刻意**保留**命令不在 PATH 上的条目 ——
+        #: 丢掉它会让「少一个 agent」和「配错一个 agent」无法区分（见 registry.py 的开头）。
+        #: 代价是路由会选中一个跑不起来的后端：实测这台机器上 `claude` 装在
+        #: `%APPDATA%\npm` 而那个目录不在 PATH 上，于是「帮我改一下这个函数」被能力闸门
+        #: 正确地送给了 claude，然后**整轮失败** —— 使用者听到的是一句「agent 报告失败」。
+        #:
+        #: 保留条目 + 路由时跳过，两件事合起来才对：清单里仍然看得见它、也看得见原因，
+        #: 而这一轮不会被派到它身上。
+        self._unavailable: dict[str, str] = {}
 
     def register(self, descriptor: AgentDescriptor) -> None:
         """Add or replace one agent. Its load and breaker state are untouched."""
         self.agents[descriptor.name] = descriptor
+
+    def mark_unavailable(self, agent: str, reason: str = "") -> None:
+        """这台机器上没有这个后端（命令不在 PATH、模型没装）。路由从此跳过它。
+
+        由启动时的 ``adapter.check()`` 结果驱动 —— 见 ``VoiceRuntime._open_agents``。
+        幂等，且**只影响路由**：``describe()`` 与就绪清单照常列出这个 agent 和原因，
+        因为「配了但这台机器上没有」和「没配」是使用者要能分开看的两件事。
+        """
+        self._unavailable[agent] = reason or "unavailable"
+
+    def mark_available(self, agent: str) -> None:
+        """撤掉上面那条标记（重新检查发现它回来了）。"""
+        self._unavailable.pop(agent, None)
+
+    def allows(self, agent: str) -> bool:
+        """路由现在愿不愿意选这个 agent。熔断与「主机上没有」两条都要过。"""
+        if agent in self._unavailable:
+            return False
+        if self.breaker is not None and not self.breaker.allows(agent):
+            return False
+        return True
 
     # -- scoring -------------------------------------------------------------
 
@@ -98,7 +131,7 @@ class DefaultRouter:
         """
         scores: list[RouteScore] = []
         for name, descriptor in self.agents.items():
-            if self.breaker is not None and not self.breaker.allows(name):
+            if not self.allows(name):
                 continue
             capable = task.capabilities <= descriptor.capabilities
             cost = self._cost_score(descriptor)
@@ -195,12 +228,30 @@ class DefaultRouter:
         """The reason no agent was eligible -- the dispatcher speaks this."""
         if not self.agents:
             return "no agents configured"
-        if self.breaker is not None and all(
-            not self.breaker.allows(name) for name in self.agents
-        ):
+        if all(not self.allows(name) for name in self.agents):
+            # 「这台机器上没装」要和「一直失败被熔断」分开说：前者要去装或改 PATH，
+            # 后者等它自愈或去看它为什么失败。合成一句话的话两种都查不动。
+            missing = sorted(name for name in self.agents if name in self._unavailable)
+            if missing and len(missing) == len(self.agents):
+                return "no agent is installed on this machine: " + ", ".join(
+                    f"{name} ({self._unavailable[name]})" for name in missing
+                )
             return "all agents tripped"
         if task.capabilities:
-            return f"no agent has {', '.join(sorted(task.capabilities))}"
+            wanted = ", ".join(sorted(task.capabilities))
+            blocked = sorted(
+                name
+                for name, descriptor in self.agents.items()
+                if name in self._unavailable and task.capabilities <= descriptor.capabilities
+            )
+            if blocked:
+                # **这一条是「能力闸门 + 后端没装」那个组合的唯一线索。** 闸门把这一句
+                # 正确地判给了唯一能做的后端，而那个后端这台机器上没有 —— 不说出来的话
+                # 读到的是「no agent has code」，看起来像配置里少写了一个能力词。
+                return f"no available agent has {wanted}; " + ", ".join(
+                    f"{name} has it but is {self._unavailable[name]}" for name in blocked
+                )
+            return f"no agent has {wanted}"
         return "no agents available"
 
     # -- outcomes ------------------------------------------------------------
@@ -247,6 +298,8 @@ class DefaultRouter:
             "in_flight": dict(sorted(self._load.items())),
             "breaker": self.breaker is not None,
             "memory": self.memory_recaller is not None,
+            # 「配了但这台机器上没有」必须能被读出来 —— 它是路由结果的一半原因。
+            "unavailable": dict(sorted(self._unavailable.items())),
         }
 
 

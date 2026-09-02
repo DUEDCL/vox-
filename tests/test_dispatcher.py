@@ -717,3 +717,124 @@ def test_a_backend_whose_check_explodes_still_gets_dispatched():
     )
     assert result.ok is True
     assert [entry[2]["backends"] for entry in lines if entry[0] == "agent"] == [["relay"]]
+
+
+# ------------------- 能力闸门降级：闸门对了，但那个后端这台机器上没装（2026-09-01）
+
+
+class GatingRouter:
+    """按 ``task.capabilities`` 给不同计划的路由 —— 生产里 ``DefaultRouter`` 的形状。
+
+    要求 ``code`` 时返回空计划（唯一有这个能力的后端不可用），不要求时返回 relay。
+    """
+
+    def __init__(self) -> None:
+        self.plans: list[frozenset[str]] = []
+        self.recorded: list[tuple[str, bool, int]] = []
+        self.released: list[str] = []
+
+    def score(self, task: Task):  # pragma: no cover
+        return ()
+
+    def plan(self, task: Task) -> DispatchPlan:
+        self.plans.append(frozenset(task.capabilities))
+        if task.capabilities:
+            return DispatchPlan(
+                mode="single",
+                agents=(),
+                reason="no available agent has code; claude has it but is 'claude' is not on PATH",
+            )
+        return DispatchPlan(mode="single", agents=("relay",), reason="relay scored 0.866")
+
+    def record(self, agent: str, *, ok: bool, elapsed_ms: int) -> None:
+        self.recorded.append((agent, ok, elapsed_ms))
+
+    def release(self, agent: str) -> None:
+        self.released.append(agent)
+
+
+class CodeResolver:
+    """把每一句都判成需要 ``code``，好把降级那条路逼出来。"""
+
+    @staticmethod
+    def resolve(text: str) -> Intent:
+        return Intent(kind="agent")
+
+    @staticmethod
+    def capabilities(text: str) -> frozenset[str]:
+        return frozenset({"code"})
+
+
+def test_a_capability_no_available_agent_has_degrades_instead_of_failing():
+    """**此前这里整轮失败**，使用者听到的是「agent 报告失败」—— 一句既不回答问题也不说
+    明原因的话。退一步用能力不设限的计划：那个后端答不了「帮我改这个函数」，但它的
+    system prompt 要求它说「这个我做不到」，而那是一个诚实且有用的回答。
+    """
+    router = GatingRouter()
+    dispatcher = Dispatcher(
+        router=router,
+        aggregator=PassthroughAggregator(),
+        resolver=CodeResolver(),
+    )
+    adapters = {"relay": FakeAdapter(AgentChunk(kind="text", text="这个我做不到"), AgentChunk(kind="done"))}
+
+    result = dispatcher.dispatch(task("帮我改一下这个函数"), adapters)
+
+    assert result.route == "agent"
+    assert result.ok is True
+    assert result.agents == ("relay",)
+    assert result.text == "这个我做不到"
+    # 先带能力问一次、被挡了才放开 —— 顺序反了就等于闸门从来没生效过。
+    assert router.plans == [frozenset({"code"}), frozenset()]
+    # 降级必须留在 reason 里：一个看不出「它本该给 claude」的记录查不动 PATH 问题。
+    assert "降级" in result.reason
+    assert "not on PATH" in result.reason
+
+
+def test_a_turn_with_no_agents_at_all_still_fails_cleanly():
+    """降级不是「无论如何都要找个后端」：一个都没有时仍然是失败，而且带原因。"""
+
+    class EmptyRouter(GatingRouter):
+        def plan(self, task: Task) -> DispatchPlan:
+            self.plans.append(frozenset(task.capabilities))
+            return DispatchPlan(mode="single", agents=(), reason="no agents configured")
+
+    router = EmptyRouter()
+    dispatcher = Dispatcher(
+        router=router,
+        aggregator=PassthroughAggregator(),
+        resolver=CodeResolver(),
+    )
+
+    result = dispatcher.dispatch(task("帮我改一下这个函数"), {})
+
+    assert result.route == "none"
+    assert result.ok is False
+    assert result.reason == "no agents configured"
+
+
+def test_a_plain_chat_turn_is_not_affected_by_the_fallback():
+    """普通对话本来就不带能力要求，所以它只问一次路由。"""
+    router = GatingRouter()
+
+    class ChatResolver:
+        @staticmethod
+        def resolve(text: str) -> Intent:
+            return Intent(kind="agent")
+
+        @staticmethod
+        def capabilities(text: str) -> frozenset[str]:
+            return frozenset()
+
+    dispatcher = Dispatcher(
+        router=router,
+        aggregator=PassthroughAggregator(),
+        resolver=ChatResolver(),
+    )
+    adapters = {"relay": FakeAdapter(AgentChunk(kind="text", text="嗨"), AgentChunk(kind="done"))}
+
+    result = dispatcher.dispatch(task("你好"), adapters)
+
+    assert result.ok is True
+    assert router.plans == [frozenset()]
+    assert "降级" not in result.reason

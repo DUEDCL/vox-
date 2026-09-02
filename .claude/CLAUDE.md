@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1383 passed, 3 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1395 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -39,7 +39,7 @@
 | `core/memory/` | `pytest tests/test_memory.py tests/test_memory_threads.py -q` | **65 + 7 passed** |
 | 工具/记忆与语音路径接线 | `pytest tests/test_memory.py tests/test_plugin_tools.py -q` | **87 passed** |
 | `core/agents/` `config/agents.toml` | `pytest tests/test_agent_contract.py tests/test_agent_cli.py tests/test_agent_evox.py tests/test_agent_acp.py tests/test_agent_http.py -q` | 全绿（contract 14 + cli 28 + evox 17 + acp 12 + http 14） |
-| `core/dispatch/` | `pytest tests/test_router.py tests/test_dispatcher.py tests/test_aggregator.py tests/test_intent.py tests/test_breaker.py -q` | **159 passed**（router 30 + dispatcher 37 + aggregator 20 + intent 54 + breaker 18） |
+| `core/dispatch/` | `pytest tests/test_router.py tests/test_dispatcher.py tests/test_aggregator.py tests/test_intent.py tests/test_breaker.py -q` | **234 passed**（router 35 + dispatcher 47 + aggregator 20 + intent 113 + breaker 19；含能力闸门与「后端没装」降级） |
 | `core/session_bridge.py` | `pytest tests/test_session_bridge.py tests/test_plugin_tools.py -q` | 全绿 |
 | `desktop/src/` | `cd desktop && npm run build` | tsc + vite 通过 |
 | `desktop/src/sequence.ts` `scripts/build_orb_assets.py` `desktop/public/orb/` | 上面那条 + **六态渲染取证**（Edge headless 打 `demo.html?state=<态>&big=1&t=1.4`，深浅两底各一轮） | 六态互不相同（听/思/说三档能量 + 朱红 + 琥珀 + 暗）· 球外能透出桌面纹理（雪碧图必须带 alpha）· 中心是白热光核不是黑洞 · 生产页 `index.html?state=idle` **画布全空** |
@@ -208,6 +208,10 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - **托盘绕过的是唤醒词，不是声纹门** —— `capture.begin_listening()` 明确把已验证说话人清成 `None`（点菜单那一刻没有音频可比对），所以 `shell.run` 照旧被拒。`resume_wake()` **只解开自己按下的那一道**：它不动 `enroll_only`，否则点一下「恢复唤醒」就能绕过注册模式
 - **托盘的「暂停唤醒」不关麦克风** —— 关掉设备再重开要重走 PortAudio 初始化，那条路会失败（设备被抢、独占模式），于是「恢复」变成一个可能失败的动作。做法和注册模式一样：设备照常开、缓冲照常填，只是 `wake_held` 多一个来源
 - **`.manage(TrayItems::default())` 漏了会让球根本不出现** —— `app.state::<T>()` 取不到时是 **panic 不是 None**，而它第一次被调用在 setup 期间。`serde_json` 也必须在 `[dependencies]` 而不是只在 `[dev-dependencies]`（`main.rs` 要解析 `{"kind":"tray"}`）
+- **`%APPDATA%
+pm` 不在 Windows PATH 上，而 `claude` 装在那里** —— 实测用户 PATH 与系统 PATH 都不含 npm（npm 装全局包时不改 PATH，这是默认状态不是配坏了）。后果不是「少一个 agent」：能力闸门把「帮我改这个函数」正确地判给 claude，然后整轮失败。`core/agents/cli.py` 的 `which()` 因此在 PATH 之后多看一个目录（`_extra_search_dirs`），`check()` 报解析后的**绝对路径**。带目录分隔的命令不走后备
+- **路由跳过「这台机器上没装」的后端，但清单里仍然列着它** —— `DefaultRouter.mark_unavailable()` 与熔断是两件事：熔断记「它一直失败」（会自愈），这个记「主机上没有」（只有重新检查才变）。由 `VoiceRuntime.start()` 从 `adapter.check()` 灌进去。合并两者会让熔断的半开状态把没装的后端放回来
+- **能力闸门挡空了会降级，而不是让这一轮失败** —— `Dispatcher._run_agents` 发现「闸门对了但那个后端没装」时，退一步用能力不设限的计划，`reason` 里带上原因。此前是整轮失败，使用者听到「agent 报告失败」——一句既不回答也不说明的话
 - **测试不许把 `config/*.toml` 当夹具** —— `tests/test_models_config.py` 曾复制 `config/models.toml`，于是使用者在控制台上改一次 LLM 方案就让 11 条测试变红（其中 10 条是「注入坏值」的 `.replace` 变成空操作 → DID NOT RAISE）。夹具用文件内自带的 `FIXTURE`；出厂文件只测**不变式**（加载得动、`active` 指向真实 profile、字段都在 `FIELDS` 里）
 
 ## 注意事项
