@@ -98,23 +98,40 @@ class VoiceStack:
         tts_ready = self.tts is not None and self.tts.available
         # 「在哪」对两种 provider 不是同一样东西：本机是模型目录，云端是端点主机 + 音色。
         # 报路径的那一行如果对云端也印目录，读的人会以为配置没生效。
+        #
+        # **穿过 `FallbackTts`。** 云端那条路现在裹在退路里（见 tts_fallback.py），所以
+        # 这里问的必须是它包着的那个主合成器 —— 2026-09-03 这一行直接读 `self.tts.model`
+        # 把 `/api/state` 整个打成 500（`console failed: AttributeError`），症状是控制台
+        # 顶上写「连接失败」而语音其实一直在正常工作。一个包装层让**别的**层报错，
+        # 就是这种「看起来毫不相关」的故障。
+        engine = getattr(self.tts, "primary", self.tts)
+        degraded = bool(getattr(self.tts, "latched", False))
         if self.tts is None:
             where = "(disabled)"
-        elif hasattr(self.tts, "model_dir"):
-            where = str(self.tts.model_dir)
+        elif hasattr(engine, "model_dir"):
+            where = str(engine.model_dir)
         else:
-            where = f"{self.tts.model} / {self.tts.voice} @ {self.tts._safe_endpoint()}"
-        cloud = self.tts is not None and not hasattr(self.tts, "model_dir")
+            where = f"{engine.model} / {engine.voice} @ {engine._safe_endpoint()}"
+            if degraded:
+                # 降级了就把这件事印在「在哪」那一栏：使用者听到的是本机那把嗓子，
+                # 而这一行如果只印云端的音色，他会以为配置生效了。
+                where = f"{where} —— 已降级为本机 VITS"
+        cloud = self.tts is not None and not hasattr(engine, "model_dir")
+        problems = list(getattr(self.tts, "problems", ()) or ())
         row(
             "tts",
-            tts_ready or not tts_on,
+            (tts_ready and not degraded) or not tts_on,
             where,
             ""
-            if tts_ready or not tts_on
+            if (tts_ready and not degraded) or not tts_on
             else (
-                f"云端合成缺密钥：把 key 写进 .env 的 {self.config.get('tts.key_env', 'VOX_DASHSCOPE_KEY')}（当前不出声）"
-                if cloud
-                else "缺合成模型：解压 models/tts.tar.bz2 或设 VOX_TTS_MODEL_DIR（当前不出声）"
+                problems[-1]
+                if problems
+                else (
+                    f"云端合成缺密钥：把 key 写进 .env 的 {self.config.get('tts.key_env', 'VOX_DASHSCOPE_KEY')}（当前不出声）"
+                    if cloud
+                    else "缺合成模型：解压 models/tts.tar.bz2 或设 VOX_TTS_MODEL_DIR（当前不出声）"
+                )
             ),
         )
 

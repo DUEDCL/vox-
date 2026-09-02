@@ -179,6 +179,17 @@ _WEB_OPEN_PATTERNS = (
 #: 参数非空的检查会把这一整类拒掉。
 _NO_ARGUMENT_RULES = frozenset({"time.now", "play.any"})
 
+#: 允许**单字**参数的规则。
+#:
+#: `MIN_ARGUMENT_LEN` 存在的理由是「一个字不可能是路径 / 查询 / 命令」，那条对
+#: `fs.read` / `shell.run` 成立。可是**歌名可以只有一个字** —— 2026-09-03 使用者说
+#: 「给我放首雪」，捕获出「雪」，被这条长度检查扔掉，于是整句漏给了 `web.open`
+#: （它捕获的是「首雪」，一个不存在的歌名），最后落到 agent，agent 回了一句
+#: 「好，搜歌名『雪』给你放上。」**然后什么都没发生。**
+#:
+#: 放宽只对这一条规则：判错的代价是「播放器里搜了一个字」，而不是「跑了一条命令」。
+_SHORT_ARGUMENT_RULES = frozenset({"play.song"})
+
 #: 规则名 -> 真实工具名。``play.any``（「放点音乐」）是 ``app.open`` 的一种说法：它不带
 #: 名字，开哪个由 ``apps.default_music`` 定。分成两条规则而不是一条，是因为**捕不捕获
 #: 参数**不同 —— 合成一条会让「放音乐」和「播放稻香」走同一个提取逻辑，而后者要的是搜索。
@@ -386,7 +397,9 @@ class RuleBasedIntentResolver:
                 if match is None:
                     continue
                 arguments = self._extract(tool, match)
-                if tool not in _NO_ARGUMENT_RULES and not self._plausible(arguments):
+                if tool not in _NO_ARGUMENT_RULES and not self._plausible(
+                    arguments, short_ok=tool in _SHORT_ARGUMENT_RULES
+                ):
                     # A one-character capture is a quantifier artefact, not an
                     # argument. Keep looking, and fall through to the agent if
                     # nothing better matches.
@@ -402,10 +415,15 @@ class RuleBasedIntentResolver:
         return Intent(kind="agent", confidence=0.0)
 
     @staticmethod
-    def _plausible(arguments: Mapping[str, Any]) -> bool:
-        """Reject captures too short to be a real path, query, or command."""
+    def _plausible(arguments: Mapping[str, Any], *, short_ok: bool = False) -> bool:
+        """Reject captures too short to be a real path, query, or command.
+
+        ``short_ok`` 是给歌名开的例外（见 ``_SHORT_ARGUMENT_RULES``）：一个字不可能是
+        路径或命令，但完全可以是一首歌。
+        """
         value = next(iter(arguments.values()), "")
-        return isinstance(value, str) and len(value.strip()) >= MIN_ARGUMENT_LEN
+        floor = 1 if short_ok else MIN_ARGUMENT_LEN
+        return isinstance(value, str) and len(value.strip()) >= floor
 
     @staticmethod
     def capabilities(text: str) -> frozenset[str]:

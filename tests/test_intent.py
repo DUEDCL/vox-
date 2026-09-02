@@ -578,15 +578,28 @@ def test_naming_who_to_listen_to_reaches_the_music_player(resolver, text, query)
     assert intent.arguments == {"query": query}
 
 
+@pytest.mark.parametrize("text", ["给我放首雪", "放首雪", "放一首雪", "来一首夜"])
+def test_a_one_character_song_name_is_not_thrown_away(resolver, text):
+    """**一个字可以是一首歌。** 2026-09-03 使用者说「给我放首雪」，捕获出「雪」，被
+    ``MIN_ARGUMENT_LEN`` 扔掉，整句漏给 ``web.open``（它捕获的是「首雪」——一个不存在的
+    歌名），最后落到 agent，agent 回「好，搜歌名『雪』给你放上。」**然后什么都没发生。**
+
+    放宽只对 ``play.song``：判错的代价是「播放器里搜了一个字」，不是「跑了一条命令」。
+    """
+    intent = resolver.resolve(text)
+
+    assert intent.tool == "app.open"
+    assert len(intent.arguments["query"]) == 1
+
+
+def test_the_length_floor_still_protects_the_dangerous_tools(resolver):
+    """反向的护栏：单字放宽**只对歌名**。一个字仍然不可能是路径或命令。"""
+    assert resolver.resolve("读一下 一下").kind == "agent"
+
+
 @pytest.mark.parametrize(
     "text",
-    [
-        # 「听」对播放和倾听两义，标记词（歌/音乐/一首）是这条规则唯一的边界。
-        "我想听你的意见",
-        "听我说完",
-        "我想听听你怎么想",
-        "听不清能再说一遍吗",
-    ],
+    ["我想听你的意见", "听我说完", "我想听听你怎么想", "听不清能再说一遍吗"],
 )
 def test_listening_to_a_person_is_not_a_music_request(resolver, text):
     """没有「歌 / 音乐 / 一首」这类标记词就不是播放请求。少了这个边界，
