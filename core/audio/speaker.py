@@ -72,6 +72,18 @@ def model_label(path: str | Path) -> str:
 #: 预加重）碰到轨，而那等于自己制造削波。
 EMBED_TARGET_PEAK = 0.7
 
+#: 一段音频里至少要有这么多秒**语音**，说话人嵌入才稳。低于它只写进拒绝原因，
+#: **不参与判决** —— 一个「语音太少所以拒绝」的判据会把「短促但真的是你」也挡掉，
+#: 而那正是使用者报的症状本身。
+#:
+#: 1.5 秒来自 2026-09-02 的真机验收（REAL-MIC）：相似度 0.506 / 0.548 / 0.556 / 0.568，
+#: 阈值 0.5，两次被拒 0.448 —— 余量只有百分之几。使用者的观察给出了机制：「只说唤醒词
+#: 过不了，『你好小沃，现在几点了』能过」。校验窗 1.5 秒里「你好小沃」只占约 0.8 秒，
+#: 另一半是静音；说话人嵌入在语音不足一两秒时明显退化，这是这类模型公认的性质。
+#:
+#: 所以这个常数的用途是**把不可见的原因变成一句能照着做的话**，不是加一道新的门。
+MIN_VOICED_FOR_STABLE_EMBEDDING = 1.5
+
 #: 低于这个峰值就不归一化。一段几乎无声的缓冲被放大 100 倍之后是一段响亮的噪声，
 #: 而它算出来的 embedding 毫无意义 —— 那种输入该被质量门拒掉，不该被放大。
 EMBED_MIN_PEAK = 1e-3
@@ -553,12 +565,27 @@ class SpeakerVerificationProvider:
         # 把测出来的输入质量附上。「below threshold 0.5」单独出现时把人引向「调阈值」或
         # 「换模型」,而实机日志里真正的毛病是 peak=1.000 的削波 —— 那件事此前完全不可见,
         # 因为削波不到 5% 时质量门是放行的。见 input_quality 的注释。
-        quality = self.input_quality(samples)
-        detail = f"below threshold {self.threshold}"
+        quality = self.input_quality(samples, sample_rate)
+        # 差多少要说出来。0.448 和 0.05 是完全不同的两件事：前者是「条件不够好」，
+        # 后者是「不是这个人」。只写「below threshold」把两者混成一句话。
+        detail = (
+            f"相似度 {score:.3f}，差 {self.threshold - score:.3f}"
+            f"（阈值 {self.threshold}）"
+        )
         if quality["clip"] > 0.0:
             detail += f"；输入削波 {quality['clip']:.1%}（峰值 {quality['peak']:.3f}）—— 麦克风增益偏高会削掉说话人特征"
         elif quality["rms"] < self.min_rms * 3:
             detail += f"；输入偏轻（rms {quality['rms']:.4f}）"
+        # 语音太少是 2026-09-02 真机验收指向的那一条：说话人嵌入在语音不足一两秒时明显退化，
+        # 而「你好小沃」只有约 0.8 秒。这句话要给出**能照着做的动作**，不是一个数字。
+        voiced = quality["seconds"] * quality["active"]
+        if voiced < MIN_VOICED_FOR_STABLE_EMBEDDING:
+            detail += (
+                f"；这一窗只有约 {voiced:.1f} 秒语音"
+                f"（{quality['seconds']:.1f} 秒里 {quality['active']:.0%} 有声）—— "
+                f"这个模型在语音不足 {MIN_VOICED_FOR_STABLE_EMBEDDING:.1f} 秒时同人分数会明显下降，"
+                "把唤醒词和请求连着说（「你好小沃，现在几点了」）通常就过了"
+            )
         return self._after_input_rejection(
             VerificationResult(False, None, score, detail), throttle=throttle
         )
@@ -617,8 +644,8 @@ class SpeakerVerificationProvider:
             self._cooldown_until = now + self.cooldown_s
         return result
 
-    def input_quality(self, samples: Any) -> dict[str, float]:
-        """这段音频的 RMS 与削波比例。**给拒绝原因用的，不做判决。**
+    def input_quality(self, samples: Any, sample_rate: int = 16000) -> dict[str, float]:
+        """这段音频的 RMS、削波比例、时长与**有多少是语音**。给拒绝原因用的，不做判决。
 
         为什么需要它：使用者 2026-08-29 的实机日志里，每一次唤醒的块峰值都是 **1.000**，
         而拒绝原因只写「below threshold 0.5」。那句话把人引向「阈值不对」或「模型不行」，
@@ -627,14 +654,42 @@ class SpeakerVerificationProvider:
 
         削波不到 ``max_clip_ratio``（5%）时质量门是**放行**的，所以它此前完全不可见。
         把测出来的数字附在拒绝原因里，这件事就不用猜了。
+
+        ``active`` 是 2026-09-02 加的，为了回答另一个问题。那天的真机验收（REAL-MIC）
+        相似度是 0.506 / 0.548 / 0.556 / 0.568（阈值 0.5），两次被拒是 0.448 —— 余量只有
+        百分之几。而使用者的观察把机制指了出来：
+
+            仅使用唤醒词「你好小沃」会没有反应，且声纹过不了，
+            但是「你好小沃，现在几点了」能过声纹。
+
+        校验窗是 1.5 秒，而「你好小沃」只有约 0.8 秒 —— 窗里另一半是静音。说话人嵌入在
+        语音不足一两秒时会明显退化，所以「窗里有多少是语音」正是要看的那个数。
+
+        **不是 VAD**：这里只按能量比出「有多少帧不是静音」，判「是不是人声」是
+        `core/audio/vad.py` 的事（那条判据必须是模型，见它的模块头）。这一个数只进
+        拒绝原因，不参与任何判决，所以一个便宜的能量比在这里够用而且不会骗人。
         """
         values = np.asarray(samples, dtype=np.float32)
         if values.size == 0:
-            return {"rms": 0.0, "clip": 0.0, "peak": 0.0}
+            return {"rms": 0.0, "clip": 0.0, "peak": 0.0, "seconds": 0.0, "active": 0.0}
+        rms = float(np.sqrt(np.mean(np.square(values))))
+        peak = float(np.max(np.abs(values)))
+        # 20 ms 一帧，帧 rms 超过整段峰值 10% 的算「有声」。阈值取相对值而不是绝对值：
+        # 一段轻的语音和一段响的语音都该量出差不多的语音占比。
+        frame = max(1, int(0.02 * sample_rate))
+        usable = values[: len(values) // frame * frame]
+        if usable.size and peak > 0.0:
+            frames = usable.reshape(-1, frame)
+            energies = np.sqrt(np.mean(np.square(frames), axis=1))
+            active = float(np.mean(energies >= 0.1 * peak))
+        else:
+            active = 0.0
         return {
-            "rms": float(np.sqrt(np.mean(np.square(values)))),
+            "rms": rms,
             "clip": float(np.mean(np.abs(values) >= 0.99)),
-            "peak": float(np.max(np.abs(values))),
+            "peak": peak,
+            "seconds": len(values) / float(sample_rate),
+            "active": active,
         }
 
     def _audio_quality_issue(self, samples: Any) -> str | None:

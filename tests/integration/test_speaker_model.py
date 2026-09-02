@@ -108,7 +108,9 @@ def test_enrolled_speaker_is_admitted_and_others_are_refused(provider):
         refused = provider.verify(_read(index)[0], sample_rate=sample_rate)
         assert not refused.accepted, f"wav {index} is a different speaker: {refused}"
         assert refused.speaker is None
-        assert "below threshold" in refused.reason
+        # 原因是中文，而且带上「差多少」：0.448 和 -0.022 是完全不同的两件事
+        # （条件不够好 vs 不是这个人），只写 below threshold 把两者混成一句话。
+        assert "相似度" in refused.reason and "阈值" in refused.reason
 
 
 def test_appending_samples_keeps_the_earlier_enrollment(provider):

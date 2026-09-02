@@ -158,18 +158,37 @@ def main() -> int:
     inner_recognized = capture.on_recognized
     del kws_sink, wake_sink, reject_sink
 
+    # **每一次尝试单独记一条。** 只记「这一轮的第一次」会把重试混进耗时里：
+    # 2026-09-02 那次验收的「KWS→声纹 7719 ms」就是这么来的 —— 第一次被声纹拒了，
+    # 人又说了一遍，而两次被算成了同一次的耗时。
+    attempts: list[dict] = []
+
+    def window_now() -> dict:
+        """声纹此刻看到的那段音频长什么样。只有统计量，没有音频、没有向量。"""
+        try:
+            if stack.verifier is None:
+                return {}
+            snapshot = capture.snapshot(capture.verify_seconds)
+            return stack.verifier.input_quality(snapshot, capture.sample_rate)
+        except Exception:  # noqa: BLE001 - 诊断不能自己炸
+            return {}
+
     def on_kws(keyword):
         marks.mark("kws")
+        attempts.append({"what": "kws", "at": time.monotonic()})
         return inner_kws(keyword)
 
     def on_wake(keyword, score=None):
         marks.mark("wake")
         marks.score = score
+        attempts.append({"what": "accept", "at": time.monotonic(), "score": score, **window_now()})
         return inner_wake(keyword, score)
 
     def on_reject(keyword, reason="", score=0.0):
         marks.mark("reject")
         marks.rejected = f"{reason}（相似度 {score:.3f}）"
+        attempts.append({"what": "reject", "at": time.monotonic(), "score": score,
+                          "reason": reason, **window_now()})
         return inner_reject(keyword, reason, score)
 
     def on_recognized(text):
@@ -218,7 +237,14 @@ def main() -> int:
             elif result is None:
                 print("    这一轮没有走完（超时）")
             else:
-                print(f"    转写：{marks.text!r}\n    回答：{result.text[:90]}")
+                print(
+                    f"    转写：{marks.text!r}"
+                )
+                print(
+                    f"    路由：{result.route} ok={result.ok} "
+                    f"{chr(47).join(result.agents) or chr(45)} {result.reason[:60]}"
+                )
+                print(f"    回答：{result.text[:90] or chr(40) + chr(31354) + chr(41)}")
     except KeyboardInterrupt:
         print("\n（中断）")
     finally:
@@ -245,6 +271,23 @@ def main() -> int:
             )
         )
 
+    if attempts:
+        print("")
+        print("=== 每一次唤醒尝试（声纹看到的那段音频）===")
+        print(f"  {'判定':<8}{'相似度':>9}{'窗长s':>8}{'有声':>7}{'语音s':>8}{'rms':>9}{'峰值':>8}  原因")
+        for record in attempts:
+            voiced = record.get("seconds", 0.0) * record.get("active", 0.0)
+            score = record.get("score")
+            shown = "—" if score is None else f"{score:.3f}"
+            print(
+                f"  {record['what']:<8}{shown:>9}"
+                f"{record.get('seconds', 0.0):>8.2f}"
+                f"{record.get('active', 0.0):>7.0%}"
+                f"{voiced:>8.2f}"
+                f"{record.get('rms', 0.0):>9.4f}"
+                f"{record.get('peak', 0.0):>8.3f}"
+                f"  {str(record.get('reason', ''))[:78]}"
+            )
     print("\n=== 汇总 ===")
     print(f"  唤醒命中率：KWS {kws_hits}/{args.rounds}  声纹接受 {accepted}  拒绝 {rejected}")
     print(f"  走完整轮：{answered}/{args.rounds}")

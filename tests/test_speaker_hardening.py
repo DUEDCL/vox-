@@ -354,7 +354,9 @@ def test_a_below_threshold_rejection_names_the_clipping(tmp_path):
     result = speaker.verify(samples)
 
     assert result.accepted is False
-    assert "below threshold" in result.reason
+    # 差多少要说出来：0.448 和 0.05 是完全不同的两件事（条件不够好 vs 不是这个人）。
+    assert "相似度 0.400" in result.reason
+    assert "差 0.100" in result.reason
     assert "削波" in result.reason, "削波必须出现在原因里,否则这件事仍然不可见"
     assert "1.9%" in result.reason or "2.0%" in result.reason
 
@@ -367,7 +369,7 @@ def test_a_clean_but_unmatched_input_does_not_cry_clipping(tmp_path):
     result = speaker.verify(clean)
 
     assert result.accepted is False
-    assert "below threshold" in result.reason
+    assert "相似度 0.400" in result.reason
     assert "削波" not in result.reason
 
 
@@ -384,7 +386,13 @@ def test_input_quality_reports_peak_rms_and_clip_without_judging():
     railed = provider.input_quality(np.ones(1600, dtype="float32"))
     assert railed["clip"] == 1.0
     assert railed["peak"] == 1.0
-    assert provider.input_quality(np.zeros(0, dtype="float32")) == {"rms": 0.0, "clip": 0.0, "peak": 0.0}
+    assert provider.input_quality(np.zeros(0, dtype="float32")) == {
+        "rms": 0.0,
+        "clip": 0.0,
+        "peak": 0.0,
+        "seconds": 0.0,
+        "active": 0.0,
+    }
 
 
 # ------------------- 控制台诊断不许消耗本人的暴力防护额度（2026-08-31 实机）
@@ -435,3 +443,65 @@ def test_a_console_diagnostic_still_answers_during_a_cooldown(tmp_path):
     assert result.score == pytest.approx(0.9)
     assert speaker._cooldown_until == clock.now + 25.0, "诊断不许把冷却清掉"
     assert speaker.gate_stats["accepted"] == 0, "也不进漏斗的命中计数"
+
+
+def test_a_short_utterance_rejection_says_what_to_do_about_it(tmp_path):
+    """**这一条是 2026-09-02 真机验收那个症状的出口。**
+
+    那天的相似度是 0.506 / 0.548 / 0.556 / 0.568（阈值 0.5），两次被拒 0.448 —— 余量只有
+    百分之几。而使用者的观察给出了机制：
+
+        仅使用唤醒词「你好小沃」会没有反应，且声纹过不了，
+        但是「你好小沃，现在几点了」能过声纹。
+
+    校验窗 1.5 秒里「你好小沃」只占约 0.8 秒，另一半是静音；说话人嵌入在语音不足一两秒时
+    明显退化。这件事此前在拒绝原因里**一个字都没有**，于是它看起来和「不是这个人」一样。
+
+    断言的是那句话给出了**能照着做的动作**，不是一个数字。
+    """
+    import numpy as np
+
+    speaker = ScriptedSpeaker([[0.4]], tmp_path=tmp_path)
+    # 1.5 秒的窗，只有开头 0.6 秒有声 —— 「只说唤醒词」的形状。
+    samples = np.zeros(24000, dtype="float32")
+    samples[:9600] = (np.sin(np.linspace(0, 300.0, 9600)) * 0.4).astype("float32")
+
+    result = speaker.verify(samples)
+
+    assert result.accepted is False
+    assert "秒语音" in result.reason
+    assert "连着说" in result.reason, "要给动作，不是只报一个数"
+
+
+def test_a_window_that_is_mostly_speech_does_not_get_the_short_hint(tmp_path):
+    """反向断言：语音够长时不许提这一条。一个总在报同一句提示的诊断等于没有诊断。"""
+    import numpy as np
+
+    speaker = ScriptedSpeaker([[0.4]], tmp_path=tmp_path)
+    full = (np.sin(np.linspace(0, 900.0, 32000)) * 0.4).astype("float32")
+
+    result = speaker.verify(full)
+
+    assert result.accepted is False
+    assert "秒语音" not in result.reason
+
+
+def test_input_quality_measures_how_much_of_the_window_is_speech():
+    """``active`` 只按能量比，不判「是不是人声」—— 那条判据必须是模型（core/audio/vad.py）。
+
+    它只进拒绝原因、不参与判决，所以一个便宜的能量比在这里够用，而且不会骗人。
+    """
+    import numpy as np
+
+    from core.audio.speaker import SpeakerVerificationProvider
+
+    provider = SpeakerVerificationProvider(model_path="nope.onnx", store_path="nope.json")
+    half = np.zeros(16000, dtype="float32")
+    half[:8000] = (np.sin(np.linspace(0, 300.0, 8000)) * 0.5).astype("float32")
+
+    quality = provider.input_quality(half)
+
+    assert quality["seconds"] == pytest.approx(1.0)
+    assert 0.4 <= quality["active"] <= 0.6, quality["active"]
+    # 全静音时占比是 0，而不是除零。
+    assert provider.input_quality(np.zeros(1600, dtype="float32"))["active"] == 0.0

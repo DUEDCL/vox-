@@ -14,14 +14,14 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1405 passed, 3 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1408 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
 | `core/audio/`(除 speaker) | `pytest tests/test_provider_adapter.py tests/test_sherpa_provider.py -q` | 全绿 |
 | `core/audio/config.py` `config/voice.toml` | `pytest tests/test_voice_config.py -q` | **31 passed** |
 | `vox_plugin/voice_stack.py` | `pytest tests/test_voice_assembly.py -q` | **17 passed** |
-| `core/audio/speaker.py` `ring.py` `capture.py` | `pytest tests/test_speaker.py tests/test_speaker_privacy.py tests/test_speaker_hardening.py -q` | **63 passed**（**不需要声纹模型**） |
+| `core/audio/speaker.py` `ring.py` `capture.py` | `pytest tests/test_speaker.py tests/test_speaker_privacy.py tests/test_speaker_hardening.py -q` | **66 passed**（**不需要声纹模型**） |
 | 声纹身份接线（capture→plugin→runtime） | `pytest tests/test_speaker_identity.py -q` | **15 passed** |
 | 唤醒后的聆听 / 确认音静音窗 / 托盘 | `pytest tests/test_capture_listening.py tests/test_acks.py tests/test_runtime.py -q` | **93 passed** |
 | 云端 TTS（音色、语气、段间预取） | `pytest tests/test_tts_cloud.py -q` | **21 passed**（不打网络） |
@@ -206,6 +206,8 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - **`.shadow(false)` 不是可选项** —— 无边框 + 透明还留投影的话，桌面上会有一块跟着球走的方形灰影
 - **拖动是自己的 `vox_start_drag` + 4px 阈值**，不是 `data-tauri-drag-region`（那条路要 `core:window:allow-start-dragging`，等于为拖窗口暴露整个 core:window）。拖完 OS 补的 `click` 只在 `detail > 0` 时吞 —— 键盘激活的 `click` 的 `detail` 是 0，连它一起吞会让球没法用键盘按
 - **`vox_set_visible(false)` 会先把挂起的确认按拒绝落定再隐藏** —— 隐藏一张挂起的确认卡等于让调用方永久挂起，而「挂起」在安全语义上等价于「未拒绝」
+- **声纹拒绝的原因必须带「差多少」和「窗里有多少语音」** —— 2026-09-02 真机验收：同人相似度 0.506/0.548/0.556/0.568（阈值 0.5），两次被拒 0.448，余量只有百分之几。使用者的观察给出机制：「只说唤醒词过不了，『你好小沃，现在几点了』能过」—— 校验窗 1.5 秒里唤醒词只占约 0.8 秒，说话人嵌入在语音不足 1.5 秒时明显退化（`MIN_VOICED_FOR_STABLE_EMBEDDING`）。`input_quality()` 现在还报 `seconds` 与 `active`（能量比，**不是 VAD**，只进原因不参与判决）
+- **`.vox-ref/rec/*.wav` 不能用来评估当前的声纹档案** —— 那几段是 2026-08-29 用另一只麦克风录的，拿它们比当前档案得 0.15–0.32，而同一个人现场唤醒是 0.51–0.57。这个模型对采集信道很敏感，跨信道的分数说明不了任何事（`.vox-ref/speaker_window_probe.py` 那张表的用途仅此而已）
 - **一个凭据变量只服务一个角色** —— 云端 TTS 的 key 在 `VOX_TTS_KEY`（35 字符的百炼 key），聊天那四个（`VOX_LLM_KEY` / `VOX_AGENT_HTTP_TOKEN` / `VOX_DASHSCOPE_KEY` / `ANTHROPIC_AUTH_TOKEN`）都是中转站的 key。2026-09-01 的「回答不出声」就是 `config/voice.toml` 的 `tts.key_env` 指着 `VOX_DASHSCOPE_KEY`（名字叫 DashScope，装的是中转站 key）→ 百炼回 401 `InvalidApiKey`。两个角色共用一个变量名时，把一边修好等于把另一边弄坏
 - **TTS/ASR 的运行时读的是 `config/voice.toml`，不是 `config/models.toml`** —— `models.toml` 对这两个角色**没有读侧**（`vox_plugin/voice_stack.py::_open_tts` 读的是 `tts.*`）。控制台「模型配置」那一栏能改能存，但对合成不生效；两处不一致时以 `voice.toml` 为准。`FIELDS` 里现在有 `voice`（每个云端模型只支持一组特定音色，模型与音色是同一个决定的两半）
 - **唤醒率的旋钮是解码束宽，不是阈值** —— `wake.max_active_paths` 默认 **16**（sherpa 默认 4，实测 0 dB SNR 上只剩 2/5）。`keywords_score` 加分和 `num_trailing_blanks` 都试过，都没用。改回 4 不会报错，只是在噪声里少命中
