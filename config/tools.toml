@@ -90,3 +90,35 @@ default_music = "网易云音乐"
 "网易云音乐" = "D:/Music/CloudMusic/cloudmusic.exe"
 "酷狗音乐" = "D:/recreation/KGMusic/KuGou.exe"
 "洛雪音乐" = "D:/recreation/lxmusic/lx-music-desktop/lx-music-desktop.exe"
+
+# 说出来的名字 → 一个**网页**。本机没装客户端、或者就是习惯用网页的那些放这里。
+# 「给我打开抖音」走的是这一张表（使用者原话：「我习惯使用网页版刷视频」）。
+#
+# 和 entries 同一条规矩：白名单，不是搜索。先查 entries 再查这里，所以同名时本机应用赢。
+# 地址里可以带 `{q}`，那样它就是个搜索页，必须有要搜的词才会打开。
+[apps.sites]
+"抖音" = "https://www.douyin.com/"
+"哔哩哔哩" = "https://www.bilibili.com/"
+"B站" = "https://www.bilibili.com/"
+"知乎" = "https://www.zhihu.com/"
+"微博" = "https://weibo.com/"
+"油管" = "https://www.youtube.com/"
+"YouTube" = "https://www.youtube.com/"
+
+# 应用名 → 「带着一个搜索词打开」的模板，`{q}` 是那个词（会被 percent-encode）。
+# 「我想听薛之谦的歌」要的不只是打开播放器，这张表是那句话的后半截。
+#
+# 两种形状：
+#   * `http(s)://…` → 交给默认浏览器。**这一条已验证**：网页播放器打开搜索页就能点播放。
+#   * 其他（`orpheus://search/{q}` 这类）→ 作为**一个 argv** 传给那个 exe。
+#
+# **2026-09-03 的实测状态**：网易云的客户端在这台机器上**没有注册 `orpheus://` 协议**
+# （`HKCR` / `HKCU\Software\Classes` 里都只有 `cloudmusic.*` 文件关联），所以走系统协议
+# 那条路不通；直接把 URI 当 argv 传给 `cloudmusic.exe` 进程能正常起来（不崩、不退出），
+# 但**客户端有没有真的跳到搜索结果只有你在屏幕上看得到** —— 那是 REAL-WIN，我验不了。
+#
+# 所以默认给的是**已验证的那一条**（网页播放器）。想让桌面客户端来接就把下面两行换一下：
+#   "网易云音乐" = "orpheus://search/{q}"
+[apps.play]
+"网易云音乐" = "https://music.163.com/#/search/m/?s={q}"
+"酷狗音乐" = "https://www.kugou.com/yy/html/search.html#searchType=song&searchKeyWord={q}"

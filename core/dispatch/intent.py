@@ -47,8 +47,14 @@ MIN_ARGUMENT_LEN = 2
 #: 「查看」would turn「请帮我查看这个问题」into a file read.
 #: Repeated, because「请帮我搜一下」stacks two of them and one is not enough.
 #: Bounded to three so the regex cannot walk an arbitrary prefix.
+#:
+#: **2026-09-03 加了「给我」这一组。** 使用者说的是「给我打开网易云音乐」，而这个表里
+#: 只有「帮我」—— 于是整句锚定在第一个字就失配，意图落到 agent 上，agent 回了一句
+#: 「好，正在打开网易云音乐。」**然后什么都没发生**（它没有那个工具）。日志里那一行是
+#: `intent 试了给我打开网易云音乐 -> agent`。少一个礼貌前缀的代价不是少一种说法，
+#: 是这条工具路径在他的口语里根本不存在。
 _POLITE = (
-    r"(?:(?:请|請|麻烦|麻煩|帮我|幫我|帮忙|幫忙|能不能|可以|"
+    r"(?:(?:请|請|麻烦|麻煩|帮我|幫我|帮忙|幫忙|给我|給我|替我|为我|為我|能不能|可以|"
     r"please|can\s+you)\s*){0,3}"
 )
 
@@ -140,6 +146,24 @@ _PLAY_ANY_PATTERNS = (
     r"\A(?:play|put\s+on)\s+(?:some\s+)?music\s*[.!]?\s*\Z",
 )
 
+#: ``play.song``：**点名了要听谁 / 听什么**，所以它既要开播放器，又要把这个词交给它。
+#:
+#: 与 ``play.any`` 的分工在于捕不捕获参数：「放点音乐」开默认播放器就完了，「我想听薛之谦
+#: 的歌」不开到那个人的歌就等于没做这件事。使用者的原话：「比如我说『我想听薛之谦的歌』
+#: 就会打开默认音乐播放器并播放薛之谦的歌」。
+#:
+#: **必须带「歌 / 音乐 / 曲子 / 专辑」这一类标记词**（或者「一首 / 一张」）。少了它
+#: 「我想听你的意见」「听我说」都会命中，而那两句要的是对话不是播放器。标记词是这条规则
+#: 唯一的边界 —— 「听」这个动词本身对播放和倾听两义。
+_PLAY_SONG_PATTERNS = (
+    # 我想听薛之谦的歌 / 听薛之谦的歌 / 放周杰伦的音乐 / 来点李荣浩的歌
+    rf"\A{_POLITE}(?:我)?(?:想|要|想要)?\s*(?:听|聽|放|播放|来点|來點|来些|來些)\s*"
+    r"(.+?)(?:的)?(?:歌|歌曲|音乐|音樂|曲子|专辑|專輯)(?:吧|呀|了|嘛)?\s*[。!！]?\s*\Z",
+    # 放一首稻香 / 来一首薛之谦
+    rf"\A{_POLITE}(?:我)?(?:想|要|想要)?\s*(?:听|聽|放|播放|来|來)\s*(?:一)?(?:首|张|張)\s*"
+    r"(.+?)(?:吧|呀)?\s*[。!！]?\s*\Z",
+)
+
 #: ``web.open``：把一个地址或一次搜索交给浏览器。
 #:
 #: 「播放周杰伦的稻香」落在这里而不是 ``web.search``：后者把结果抓回来给平台读，而这句话
@@ -158,7 +182,11 @@ _NO_ARGUMENT_RULES = frozenset({"time.now", "play.any"})
 #: 规则名 -> 真实工具名。``play.any``（「放点音乐」）是 ``app.open`` 的一种说法：它不带
 #: 名字，开哪个由 ``apps.default_music`` 定。分成两条规则而不是一条，是因为**捕不捕获
 #: 参数**不同 —— 合成一条会让「放音乐」和「播放稻香」走同一个提取逻辑，而后者要的是搜索。
-_RULE_TO_TOOL = {"play.any": "app.open"}
+#:
+#: ``play.song`` 也落到 ``app.open``：开哪个播放器仍然由 ``apps.default_music`` 定，
+#: 多出来的只是一个 ``query``。让它去 ``web.search`` 是另一件事 —— 那会把搜索结果**抓回来
+#: 念给人听**，而使用者要的是那首歌响起来。
+_RULE_TO_TOOL = {"play.any": "app.open", "play.song": "app.open"}
 
 
 #: 需要一个**真能动这台机器**的后端的说法。命中它们的一句话带上 ``code`` 能力去路由，
@@ -306,6 +334,7 @@ class RuleBasedIntentResolver:
         self.patterns = dict(patterns) if patterns is not None else {
             "time.now": _TIME_NOW_PATTERNS,
             "play.any": _PLAY_ANY_PATTERNS,
+            "play.song": _PLAY_SONG_PATTERNS,
             "web.search": _WEB_SEARCH_PATTERNS,
             "web.open": _WEB_OPEN_PATTERNS,
             "fs.read": _FS_READ_PATTERNS,
@@ -345,6 +374,7 @@ class RuleBasedIntentResolver:
         for tool in (
             "time.now",
             "play.any",
+            "play.song",
             "web.search",
             "web.open",
             "fs.read",
@@ -402,6 +432,11 @@ class RuleBasedIntentResolver:
             # 错了、也不给他答案的回合。落到 agent 至少能得到一句话。
             return {"path": path} if _looks_like_path(path) else {}
         if tool == "web.search":
+            return {"query": captured}
+        if tool == "play.song":
+            # 只带 ``query``，不带 ``name``：开哪个播放器由 ``apps.default_music`` 定，
+            # 而这个词是要交给它去搜的东西。两个都填会让「打开哪个」和「搜什么」纠缠在
+            # 一句话的两半上。
             return {"query": captured}
         if tool == "web.open":
             value = captured.strip()

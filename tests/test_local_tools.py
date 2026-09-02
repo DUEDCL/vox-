@@ -201,6 +201,127 @@ def test_describe_reports_presence_not_paths(apps):
     assert described["enabled"] is True
 
 
+# -- app.open：网页版与「带一个搜索词打开」（2026-09-03） -------------------------
+
+
+def opening(config):
+    """记下起了哪个 exe（带 argv）和开了哪个网页。"""
+    launched: list[tuple[str, tuple[str, ...]]] = []
+    opened: list[str] = []
+    tool = AppOpenTool(
+        config,
+        spawn=lambda path, *args: launched.append((str(path), args)),
+        opener=lambda url: opened.append(url) or True,
+    )
+    return tool, launched, opened
+
+
+def test_a_site_alias_opens_the_web_version(apps):
+    """「给我打开抖音」在这台机器上要的是网页版（使用者原话：「我习惯使用网页版刷视频」），
+    而抖音根本没装客户端。
+
+    **「打开 X」是一句话一个意图** —— 让意图层去分「X 是应用还是网站」等于让它知道这台
+    机器装了什么，那正是它不该知道的。所以两张白名单都在工具这一层，先应用后网页。
+    """
+    config = {"apps": dict(apps["apps"], sites={"抖音": "https://www.douyin.com/"})}
+    tool, launched, opened = opening(config)
+
+    result = tool.run(ask("app.open", name="抖音"))
+
+    assert result.ok is True
+    assert opened == ["https://www.douyin.com/"]
+    assert launched == [], "网页版不该顺手起一个进程"
+    assert "网页版" in result.output
+
+
+def test_a_local_app_wins_over_a_site_of_the_same_name(apps):
+    """同名时本机应用赢：先查 entries 再查 sites。装了客户端的人说「打开网易云音乐」
+    要的是那个客户端。"""
+    config = {"apps": dict(apps["apps"], sites={"网易云音乐": "https://music.163.com/"})}
+    tool, launched, opened = opening(config)
+
+    assert tool.run(ask("app.open", name="网易云音乐")).ok is True
+    assert launched and launched[0][0].endswith("cloudmusic.exe")
+    assert opened == []
+
+
+def test_a_query_reaches_the_default_player_through_a_web_template(apps):
+    """「我想听薛之谦的歌」：名字不给，开哪个由 ``default_music`` 定，词交给模板。
+
+    ``http(s)://`` 的模板交给浏览器 —— **这是唯一验证过能真的放出声的那条路**
+    （网页播放器打开搜索页就能点播放）。
+    """
+    config = {
+        "apps": dict(apps["apps"], play={"网易云音乐": "https://music.163.com/#/search/m/?s={q}"})
+    }
+    tool, launched, opened = opening(config)
+
+    result = tool.run(ask("app.open", query="薛之谦"))
+
+    assert result.ok is True
+    assert opened and opened[0].endswith("s=%E8%96%9B%E4%B9%8B%E8%B0%A6"), "查询词必须编码"
+    assert launched == []
+
+
+def test_a_non_url_template_goes_in_as_one_argv(apps):
+    """``orpheus://search/{q}`` 这类模板作为**一个** argv 传给 exe。
+
+    一个 —— 不是拼成一行再让 shell 切开。这条路的输入是语音转写，而那是最不该交给第二个
+    解析器的输入源（见模块头 `start` 那一节）。
+    """
+    config = {"apps": dict(apps["apps"], play={"网易云音乐": "orpheus://search/{q}"})}
+    tool, launched, opened = opening(config)
+
+    assert tool.run(ask("app.open", query="薛之谦")).ok is True
+    assert len(launched) == 1
+    path, args = launched[0]
+    assert path.endswith("cloudmusic.exe")
+    assert args == ("orpheus://search/%E8%96%9B%E4%B9%8B%E8%B0%A6",)
+    assert opened == []
+
+
+def test_a_query_without_a_template_says_it_could_not_search(apps):
+    """**不假装搜过了。** 一个说「已经放上薛之谦的歌」而其实只打开了播放器的回答，
+    会让人以为是播放器的问题；说清楚缺什么，那句话才可行动。"""
+    tool, launched, _opened = opening(apps)
+
+    result = tool.run(ask("app.open", query="薛之谦"))
+
+    assert result.ok is True
+    assert launched, "照旧要把播放器打开"
+    assert "没配搜索模板" in result.output and "薛之谦" in result.output
+
+
+def test_a_search_shaped_site_needs_a_word(apps):
+    """网页配的是搜索地址（带 `{q}`）而这句话里没有词时，报错而不是打开一个 `{q}` 页面。"""
+    config = {"apps": dict(apps["apps"], sites={"油管": "https://www.youtube.com/results?q={q}"})}
+    tool, _launched, opened = opening(config)
+
+    assert tool.run(ask("app.open", name="油管")).ok is False
+    assert opened == []
+
+
+def test_a_site_that_is_not_http_is_refused(apps):
+    """``file://`` 能打开本机任意文件，``javascript:`` 能在浏览器里执行代码 ——
+    配歪的网页表不该变成一条新的执行路径。"""
+    config = {"apps": dict(apps["apps"], sites={"坏的": "file:///C:/Windows/win.ini"})}
+    tool, _launched, opened = opening(config)
+
+    assert tool.run(ask("app.open", name="坏的")).ok is False
+    assert opened == []
+
+
+def test_the_refusal_lists_sites_as_well_as_apps(apps):
+    """有信息的失败：能开的应用**和**能开的网页都要列出来，否则使用者只能一个个试。"""
+    config = {"apps": dict(apps["apps"], sites={"抖音": "https://www.douyin.com/"})}
+    tool, _launched, _opened = opening(config)
+
+    result = tool.run(ask("app.open", name="记事本"))
+
+    assert result.ok is False
+    assert "抖音" in str(result.audit) + str(result.output) + str(result.error or "")
+
+
 # -- web.open -----------------------------------------------------------------
 
 

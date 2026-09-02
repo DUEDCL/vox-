@@ -303,11 +303,18 @@ def test_an_address_goes_to_the_browser(resolver, text, url):
 
 @pytest.mark.parametrize(
     "text, query",
-    [("播放周杰伦的稻香", "周杰伦的稻香"), ("放一首稻香", "一首稻香"), ("听周杰伦", "周杰伦")],
+    [("播放周杰伦的稻香", "周杰伦的稻香"), ("听周杰伦", "周杰伦")],
 )
 def test_playing_something_specific_opens_a_search_page(resolver, text, query):
     """这句话要的是一个能点播放的页面 —— 渲染它的是浏览器，不是我们。所以是 ``web.open``
-    而不是 ``web.search``（后者把结果抓回来给平台读）。"""
+    而不是 ``web.search``（后者把结果抓回来给平台读）。
+
+    **「放一首稻香」2026-09-03 从这一组挪走了**：带「一首 / 的歌 / 的音乐」这类标记词的
+    说法现在走 ``play.song`` → ``app.open``，也就是**本机那个播放器**。理由是使用者的
+    原话：「我说『我想听薛之谦的歌』就会打开默认音乐播放器并播放薛之谦的歌」—— 他要的是
+    那个程序，不是一个搜索页。没有标记词的（这一组剩下的两条）仍然走浏览器：那时候连
+    「是不是在说歌」都不确定。
+    """
     intent = resolver.resolve(text)
 
     assert intent.tool == "web.open"
@@ -521,3 +528,67 @@ def test_a_farewell_never_reads_as_a_tool_call(resolver):
     """
     for text in ("结束本次对话", "退下吧", "没事了", "就这样吧"):
         assert resolver.resolve(text).kind == "agent", text
+
+
+# ------------------------------------------ 打开东西 / 听歌（2026-09-03 的两条真机账）
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["给我打开网易云音乐", "给我打开抖音", "替我打开知乎", "为我打开B站"],
+)
+def test_gei_wo_is_a_polite_opener_too(resolver, text):
+    """**这是一次真机故障的账。** 使用者说的是「给我打开网易云音乐」，而 ``_POLITE`` 里
+    只有「帮我」—— 整句锚定在第一个字就失配，这句话落到 agent 上，agent 回了一句
+    「好，正在打开网易云音乐。」**然后什么都没发生**（它没有那个工具）。
+
+    少一个礼貌前缀的代价不是少一种说法，是这条工具路径在他的口语里根本不存在，
+    而失败的样子是「助手答应了但没做」—— 比报错难查得多。
+    """
+    intent = resolver.resolve(text)
+
+    assert intent.kind == "tool"
+    assert intent.tool == "app.open"
+    assert intent.arguments.get("name"), "名字必须被提出来，否则工具只能开默认播放器"
+
+
+@pytest.mark.parametrize(
+    "text, query",
+    [
+        ("我想听薛之谦的歌", "薛之谦"),
+        ("听周杰伦的歌", "周杰伦"),
+        ("放李荣浩的音乐", "李荣浩"),
+        ("来点五月天的歌", "五月天"),
+        ("我要听陈奕迅的专辑", "陈奕迅"),
+        ("放一首稻香", "稻香"),
+        ("来一首晴天", "晴天"),
+        ("给我放王菲的歌", "王菲"),
+    ],
+)
+def test_naming_who_to_listen_to_reaches_the_music_player(resolver, text, query):
+    """使用者的原话：「我说『我想听薛之谦的歌』就会打开默认音乐播放器并播放薛之谦的歌」。
+
+    所以这一类落到 ``app.open`` 而不是 ``web.open``：要开的是**那个程序**。带出来的只有
+    ``query`` —— 开哪个播放器由 `apps.default_music` 定，这两件事不该纠缠在一句话的两半上。
+    """
+    intent = resolver.resolve(text)
+
+    assert intent.kind == "tool"
+    assert intent.tool == "app.open"
+    assert intent.arguments == {"query": query}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # 「听」对播放和倾听两义，标记词（歌/音乐/一首）是这条规则唯一的边界。
+        "我想听你的意见",
+        "听我说完",
+        "我想听听你怎么想",
+        "听不清能再说一遍吗",
+    ],
+)
+def test_listening_to_a_person_is_not_a_music_request(resolver, text):
+    """没有「歌 / 音乐 / 一首」这类标记词就不是播放请求。少了这个边界，
+    「我想听你的意见」会去开音乐播放器 —— 而那句话要的是对话。"""
+    assert resolver.resolve(text).tool != "app.open"
