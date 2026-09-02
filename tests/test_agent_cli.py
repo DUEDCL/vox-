@@ -19,6 +19,7 @@ import time
 
 import pytest
 
+from core.agents.environment import SPEECH_BRIEF
 from core.agents.cli import (
     PROMPT_PLACEHOLDER,
     CliAgentAdapter,
@@ -31,7 +32,8 @@ from core.agents.contract import Task
 ECHO_PROMPT = "import sys; print(sys.argv[1])"
 PROMPT_LENGTH = "import sys; print(len(sys.argv[1]))"
 CONTEXT_PROBE = (
-    "import sys; lines = sys.argv[1].splitlines(); print(lines[0]); print(lines[1])"
+    "import sys; lines = sys.argv[1].splitlines(); print(lines[0].split(']')[-1].strip());"
+    " print(lines[1])"
 )
 ENV_PROBE = (
     "import os; print(os.environ.get('VOX_TEST_TOKEN', 'absent'));"
@@ -55,6 +57,23 @@ def spoken(chunks) -> str:
     return "".join(chunk.text for chunk in chunks if chunk.kind == "text")
 
 
+def body(chunks) -> str:
+    """回显里去掉开头那段语音提示（``environment.SPEECH_BRIEF``）。
+
+    这些测试问的是「用户那句话有没有原样穿过进程边界」，而 2026-09-01 起 CLI 后端的 prompt
+    最前面多了一段固定的语音提示（它此前完全不知道回答会被念出来，于是答了两段 130 字，
+    念完 30 秒）。把它剥掉再断言，好让这些测试继续只回答自己那个问题；提示本身有专门的
+    测试钉住，见 ``test_the_cli_prompt_leads_with_the_speech_brief``。
+
+    **按 ``]`` 切而不是按提示原文切。** 子进程的 stdout 用它自己的代码页（本机 cp936），
+    于是回显里的中文已经不是原来那些字节了 —— 拿中文去匹配必然失败。``]`` 是 ASCII，
+    而提示是唯一一个方括号块。
+    """
+    text = spoken(chunks)
+    _brief, sep, rest = text.partition("]")
+    return (rest if sep else text).lstrip()
+
+
 # --- text streaming ----------------------------------------------------------
 
 
@@ -70,7 +89,7 @@ def test_text_mode_yields_one_chunk_per_line():
 def test_the_prompt_arrives_as_the_last_argument():
     chunks = list(agent(ECHO_PROMPT).stream(task("tell me a joke")))
 
-    assert spoken(chunks).strip() == "tell me a joke"
+    assert body(chunks).strip() == "tell me a joke"
 
 
 def test_a_chinese_prompt_crosses_the_process_boundary_intact():
@@ -78,7 +97,9 @@ def test_a_chinese_prompt_crosses_the_process_boundary_intact():
     but the argument it was handed must not have been mangled on the way in."""
     chunks = list(agent(PROMPT_LENGTH).stream(task("讲个笑话")))
 
-    assert spoken(chunks).strip() == "4"
+    # 提示自己也有长度，所以这里比的是「用户那 4 个字」之外的总长减去提示长度。
+    # 分隔符按通道走：命令行参数这条路是一个空格（不能有换行，见 `_prompt_for`）。
+    assert int(spoken(chunks).strip()) == len(SPEECH_BRIEF) + 1 + 4
 
 
 def test_context_lines_precede_the_request():
@@ -86,6 +107,8 @@ def test_context_lines_precede_the_request():
 
     chunks = list(agent(CONTEXT_PROBE).stream(item))
 
+    # 走命令行参数这条路时提示与 prompt 之间只有一个空格（不能有换行，见 `_prompt_for`），
+    # 所以第 0 行是「提示] Context:」，探针把 `]` 之前的部分切掉。
     assert spoken(chunks).splitlines() == [
         "Context:",
         "- user prefers short answers",
@@ -421,7 +444,9 @@ def test_a_real_batch_shim_receives_the_argument_intact(tmp_path, monkeypatch):
 
     chunks = list(adapter.stream(task("hello & goodbye")))
 
-    assert spoken(chunks).strip() == '"hello & goodbye"'
+    # **这一条是「提示必须是一行」的守卫。** 多行提示走不了 cmd.exe 的命令行，
+    # 于是这条路会整体失败 —— 而失败的形状是「这个 agent 不响应」。
+    assert body(chunks).strip().strip('"').endswith("hello & goodbye")
     assert chunks[-1].error is None
 
 
@@ -458,8 +483,8 @@ def test_a_multiline_prompt_reaches_the_child_intact_over_stdin():
     )
 
     lines = spoken(chunks).splitlines()
-    # Context: + two items + blank + the text
-    assert lines[0] == "5"
+    # 语音提示 1 行 + 空行 + Context: + 两条 + 空行 + 那句话
+    assert lines[0] == "7"
     assert lines[1] == "the real question"
     # ...and nothing was passed on the command line
     assert lines[2] == "0"
@@ -482,7 +507,7 @@ def test_the_default_still_passes_the_prompt_as_an_argument():
     adapter = agent(ECHO_PROMPT)
 
     assert adapter.build_argv("p") == [sys.executable, "-c", ECHO_PROMPT, "p"]
-    assert spoken(list(adapter.stream(task("plain")))).strip() == "plain"
+    assert body(list(adapter.stream(task("plain")))).strip() == "plain"
 
 
 def test_prompt_stdin_and_a_placeholder_are_refused_together():
@@ -544,3 +569,43 @@ def test_the_shipped_claude_entry_does_not_run_in_the_repo_root():
     assert adapter.cwd is not None, "the shipped claude entry must pin a working directory"
     assert Path(adapter.cwd) != workspace_root()
     assert workspace_root() in Path(adapter.cwd).parents
+
+
+# --------------------------------------------------- 语音提示（2026-09-01 的延迟修正）
+
+
+def test_the_cli_prompt_leads_with_the_speech_brief():
+    """CLI 后端**此前完全不知道回答会被念出来**。
+
+    它是本机进程，操作系统和工作目录自己知道，所以那一整段 system prompt 对它是噪音 ——
+    但「这是语音」它猜不到。实测：`claude` 对「帮我改一下这个函数」答了两段约 130 字，
+    而这把音色约 4.3 字/秒，念完 30 秒。那不是它的错。
+    """
+    adapter = agent(ECHO_PROMPT, prompt_stdin=True)
+
+    prompt = adapter._prompt_for(task("帮我改一下这个函数"))
+
+    assert prompt.startswith(SPEECH_BRIEF)
+    assert prompt.endswith("帮我改一下这个函数")
+    # 约束的是**汇报**而不是干活：说「40 字以内」会让一个真该动手的后端少做事。
+    assert "干活照常" in SPEECH_BRIEF
+
+
+def test_the_speech_brief_is_a_single_line():
+    """**多行提示会让走命令行参数那条路整体失败。**
+
+    cmd.exe 的命令行不能跨行，而 `.cmd` shim 就走 cmd.exe —— 一个带换行的提示等于让
+    ``%1`` 只剩提示、用户那句话整段消失，而回合照样报成功。这和 `prompt_stdin` 那段注释
+    记的是同一个坑（记忆召回一接上就有换行，于是第二轮起答非所问）。
+    """
+    assert "\n" not in SPEECH_BRIEF
+    assert "\r" not in SPEECH_BRIEF
+
+
+def test_the_separator_follows_the_channel():
+    """走 stdin 用空行（读起来清楚），走命令行参数用一个空格（不能有换行）。"""
+    over_stdin = agent(ECHO_PROMPT, prompt_stdin=True)._prompt_for(task("问一句"))
+    over_argv = agent(ECHO_PROMPT)._prompt_for(task("问一句"))
+
+    assert over_stdin == f"{SPEECH_BRIEF}\n\n问一句"
+    assert over_argv == f"{SPEECH_BRIEF} 问一句"

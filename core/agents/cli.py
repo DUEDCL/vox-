@@ -43,6 +43,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from core.tools.policy import scrubbed_env
 
 from .contract import AgentChunk, AgentDescriptor, Task, render_prompt
+from .environment import speech_brief
 
 #: Substituted into ``args``. Absent, the prompt is appended as the last argument
 #: -- which is what ``claude -p``, ``codex exec`` and ``opencode run`` all want.
@@ -154,7 +155,7 @@ class CliAgentAdapter:
                     kind="done", error="cancelled", elapsed_ms=self._ms(started)
                 )
                 return
-        prompt = render_prompt(task)
+        prompt = self._prompt_for(task)
         command, problem = spawn_target(self.build_argv(prompt))
         if problem is not None:
             yield AgentChunk(kind="done", error=problem, elapsed_ms=self._ms(started))
@@ -223,6 +224,25 @@ class CliAgentAdapter:
                 pass
 
     # -- argv and environment ---------------------------------------------
+
+    def _prompt_for(self, task: Task) -> str:
+        """要发给子进程的那段文字：语音提示 + 召回的上下文 + 用户那句话。
+
+        **CLI 后端此前完全不知道这是语音。** 它是本机进程，操作系统和工作目录自己知道，
+        所以 ``environment.py`` 那一整段 system prompt 对它是噪音 —— 但「回答会被念出来」
+        这一件它猜不到。2026-09-01 端到端实测：`claude` 对「帮我改一下这个函数」答了两段
+        约 130 字，念完 30 秒。那不是它的错。
+
+        ``speech_brief()`` 约束的是**汇报**而不是干活（见那里的注释）。放在最前面是因为
+        后面紧跟着 ``Context:`` 那几行召回内容，而指令夹在数据中间容易被忽略。
+
+        **分隔符按通道选。** 走 stdin 时用空行（读起来清楚）；走命令行参数时用一个空格 ——
+        cmd.exe 的命令行不能跨行，而 `.cmd` shim 就走 cmd.exe，所以在那条路上加一个换行
+        等于让 ``%1`` 只剩提示、用户那句话整段消失。这不是假设：`prompt_stdin` 那段注释
+        记的就是同一个坑（记忆召回一接上就有换行，于是第二轮起答非所问而回合照报成功）。
+        """
+        separator = "\n\n" if self.prompt_stdin else " "
+        return f"{speech_brief()}{separator}{render_prompt(task)}"
 
     def build_argv(self, prompt: str) -> list[str]:
         if self.prompt_stdin:
