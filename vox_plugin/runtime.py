@@ -112,6 +112,10 @@ class VoiceRuntime:
     #: 控制台地址（带令牌），托盘的「设置」用它。``None`` = 托盘上点了只记一条日志。
     #: 由启动方注入而不是在这里拼：令牌属于控制台那一侧，运行时不该去猜端口。
     settings_url: str | None = None
+    #: 交给球那个子进程的环境变量 —— 它的外观（渲染层 / 尺寸 / 出不出文字）就是这么传的。
+    #: 由启动方从 ``config/voice.toml`` 的 ``[orb]`` 翻译过来
+    #: （``core/audio/config.py::orb_environment``），运行时不读配置文件。
+    orb_env: dict[str, str] = field(default_factory=dict)
     #: 收球的定时器。每次回合结束重置，所以连着说话时球不会中途消失。
     _hide_timer: Any = field(default=None, init=False, repr=False)
     #: 唤醒漏斗的计数与最近几次尝试。**给控制台看的**，不进事件（事件扇出到每个通道，
@@ -357,7 +361,14 @@ class VoiceRuntime:
                 "the orb is not built (desktop/src-tauri/target/... missing); "
                 "running headless -- build it with `npm run tauri build` in desktop/"
             ]
-        bridge = DesktopBridge(visible=self.visible, on_incoming=self._from_desktop)
+        bridge = DesktopBridge(
+            visible=self.visible,
+            on_incoming=self._from_desktop,
+            # 球的外观（渲染层 / 尺寸 / 出不出文字）走子进程环境变量。**这三项以前只能
+            # 靠人手工设**，控制台那一栏只是生成一行让人复制 —— 而一项只能靠环境变量传的
+            # 配置在使用者的路径里等于不存在。现在由 `config/voice.toml` 的 `[orb]` 填。
+            environment=self.orb_env,
+        )
         try:
             bridge.start()
             # Waiting for ``ready`` rather than sleeping: the first line the orb

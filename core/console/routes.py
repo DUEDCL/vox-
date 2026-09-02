@@ -331,6 +331,14 @@ EDITABLE: dict[str, tuple[str, ...]] = {
         "input.blocksize",
         "orb.enabled",
         "orb.visible",
+        # 2026-09-03：球的外观三项。**它们此前只能靠环境变量传** —— 那一栏只会生成一行
+        # `VOX_ORB_SIZE=140 VOX_ORB_RENDERER=bot` 让人复制到启动环境里，而使用者的判断是
+        # 「一项配置只能靠环境变量传，在我的使用路径里等于不存在」。现在存进 voice.toml，
+        # 点重启就生效（`orb_environment()` 在启动时把它们翻译成那三个变量）。
+        "orb.renderer",
+        "orb.size",
+        "orb.show_text",
+        "orb.hide_after_s",
     ),
     "speaker.toml": (
         "speaker.threshold",

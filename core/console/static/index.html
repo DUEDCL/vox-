@@ -1070,7 +1070,7 @@ details[open] > summary::before { content: "▾ "; }
     </div>
 
     <div class="panel glass">
-      <h3>尺寸与文字（本页只做预览，后端还没有这两个键）</h3>
+      <h3>渲染层、尺寸与文字（写进 <code>config/voice.toml</code> 的 <code>[orb]</code>）</h3>
       <div class="grid2">
         <div>
           <label for="orb-renderer">渲染层</label>
@@ -1110,10 +1110,22 @@ details[open] > summary::before { content: "▾ "; }
         </div>
       </div>
       <div class="block">
-        <h3>现在只能这样传</h3>
+        <h3>保存</h3>
         <p class="note" style="margin-top:0">
-          <code>config/orb.toml</code> 还没建，这三项目前只是环境变量，由 Rust 侧拼进 URL query。
-          复制下面这行到启动环境里：
+          三项都写进 <code>config/voice.toml</code> 的 <code>[orb]</code>，然后点刊头那颗
+          <b>重启</b> —— 球的这三个值是<b>启动时读一次</b>的（Rust 侧把它们拼进 URL query），
+          所以没有热切换这回事。
+        </p>
+        <div class="line">
+          <button id="orb-look-save" class="primary" data-od-id="orb-look-save">保存这三项</button>
+          <span class="note" style="margin:0" id="orb-look-note" role="status"></span>
+        </div>
+      </div>
+      <div class="block">
+        <h3>手动覆盖（调参用，不必须）</h3>
+        <p class="note" style="margin-top:0">
+          环境变量<b>仍然赢</b>过配置文件 —— 调一个值试一下、不想留在文件里的时候走这条路。
+          不设就以上面那三项为准。
         </p>
         <input id="orb-env" readonly class="mono" aria-label="启动环境变量行" data-od-id="orb-env">
         <div class="line" style="margin-top:var(--space-3)">
@@ -3415,6 +3427,28 @@ $("orb-copy").onclick = async () => {
   catch { $("orb-env").select(); $("orb-copy-note").textContent = "复制被拦，已选中，按 Ctrl+C。"; }
 };
 
+/* 三项写回 config/voice.toml 的 [orb]。**类型要对**：`orb.size` 是整数、
+   `orb.show_text` 是布尔 —— voice.toml 的加载器按默认值的类型逐个校验，
+   `"140"` 这个字符串会被它拒掉（拒掉是对的，一个字符串型的尺寸不是尺寸）。
+
+   **按钮 id 不能叫 `orb-save`**：那个 id 已经属于下面那张通用键值表
+   （`saveScope("orb", …)`），而后赋的 onclick 会把先赋的静默顶掉 —— 表现是点了没反应。 */
+$("orb-look-save").onclick = async () => {
+  const note = $("orb-look-note");
+  const updates = {
+    "orb.renderer": $("orb-renderer").value,
+    "orb.size": parseInt($("orb-size").value, 10),
+    "orb.show_text": $("orb-text").value === "1",
+  };
+  note.textContent = "写入中…";
+  try {
+    await api("/api/config", { method: "PUT", body: { file: "voice.toml", updates } });
+    note.textContent = "已写进 config/voice.toml —— 点刊头那颗「重启」生效。";
+  } catch (err) {
+    note.textContent = "写不进去：" + err.message;
+  }
+};
+
 /* ================================================== 配置读取（两处共用） */
 
 async function loadConfigFiles() {
@@ -3439,6 +3473,23 @@ async function loadConfigFiles() {
   const orbKeys = ((voice && voice.keys) || []).filter((k) => k.key.startsWith("orb."));
   if (orbKeys.length) for (const key of orbKeys) orbHost.appendChild(kvRow(key, "orb"));
   else orbHost.appendChild(el("p", { class: "note" }, "voice.toml 里没读到 orb 段。"));
+
+  /* 上面那张外观面板的三个控件也从同一份读数回填。**不回填的后果是它撒谎**：
+     页面永远显示出厂默认（seq / 140 / 关），而文件里可能是 bot —— 于是使用者以为
+     自己已经切过去了，或者一保存就把真实值改回默认。 */
+  const orbNow = {};
+  for (const key of orbKeys) orbNow[key.key] = key.value;
+  if (orbNow["orb.renderer"] !== undefined) {
+    $("orb-renderer").value = String(orbNow["orb.renderer"]) === "bot" ? "bot" : "seq";
+  }
+  if (orbNow["orb.size"] !== undefined) {
+    const px = parseInt(orbNow["orb.size"], 10);
+    if (Number.isFinite(px)) $("orb-size").value = String(px);
+  }
+  if (orbNow["orb.show_text"] !== undefined) {
+    $("orb-text").value = (orbNow["orb.show_text"] === true || String(orbNow["orb.show_text"]) === "true") ? "1" : "0";
+  }
+  renderOrbPreview();
 
   /* 安全边界：tools.toml 里能读到的就那几个键，其余根本不在返回里。 */
   limHost.textContent = "";

@@ -37,7 +37,7 @@ if str(ROOT) not in sys.path:
 
 from core.audio import load_voice_config
 from core.audio.acks import AckLibrary, parse_acks
-from core.audio.config import ACK_CACHE_DIR, repo_root
+from core.audio.config import ACK_CACHE_DIR, orb_environment, repo_root
 from core.console import ConsoleApi, ConsoleError, ConsoleServer
 from core.env_file import load_env_file
 from vox_plugin.runtime import VoiceRuntime
@@ -154,12 +154,20 @@ def main() -> int:
     for warning in stack.warnings:
         print(f"warning: {warning}")
 
+    # 球的外观从配置文件翻译成那三个环境变量。**这三项以前只能靠人手工设** —— 控制台的
+    # 「唤醒球」那一栏只会生成一行 `VOX_ORB_SIZE=140 VOX_ORB_RENDERER=bot` 让人复制到
+    # 启动环境里，而一项只能这样传的配置在使用者的路径里等于不存在。
+    orb_env, orb_warnings = orb_environment(config)
+    for warning in orb_warnings:
+        print(f"warning: {warning}")
+
     runtime = VoiceRuntime(
         with_desktop=bool(config["orb.enabled"]) and not args.no_orb,
         visible=bool(config["orb.visible"]),
         hide_after_s=float(config["orb.hide_after_s"]),
         # 连续对话：回答说完之后留着话筒等下一句。见 config/voice.toml 的 [wake] follow_up。
         follow_up=bool(config["wake.follow_up"]),
+        orb_env=orb_env,
     )
     report = runtime.start()
     print(f"orb:    {report.desktop}")

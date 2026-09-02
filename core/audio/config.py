@@ -118,7 +118,26 @@ _SCHEMA: dict[str, dict[str, Any]] = {
     },
     # visible 默认 false = 待机时桌面上没有球。它在唤醒命中之后才弹出，回合结束几秒后
     # 收回去 —— 一个常驻在桌面上的球是个永久的视觉噪声，而它 99% 的时间无事可做。
-    "orb": {"enabled": True, "visible": False, "hide_after_s": 10.0},
+    #
+    # **renderer / size / show_text 是 2026-09-03 加的，它们此前只能靠环境变量传。**
+    # 控制台的「唤醒球」那一栏当时只能**生成一行 `VOX_ORB_SIZE=140 VOX_ORB_RENDERER=bot`
+    # 让人自己复制到启动环境里** —— 而使用者的判断是：一项配置「只能靠环境变量传」在他的
+    # 使用路径里等于不存在。这三个键让那一栏变成真的能存、重启生效。
+    #
+    # 三个值最终仍然以环境变量交给球（`core/desktop_bridge.py` 注入，Rust 侧读它们拼进
+    # URL query）—— 那条通道没变，变的是**谁来填**：配置文件填，不是人填。
+    "orb": {
+        "enabled": True,
+        "visible": False,
+        "hide_after_s": 10.0,
+        # "seq" = AE 预渲染序列（第十一代，出厂默认）；"bot" = bloub 有脸的实体球（第十二代）。
+        # 只认这两个值，拼错的落回 "seq" 而不是落在一个空白的球上（Rust 侧同款立场）。
+        "renderer": "seq",
+        # 布局盒边长，96–420。越界会被钳制并报警告，而不是静默取默认。
+        "size": 140,
+        # 平时出不出文字。报错与拒绝无论这个开关都出文字。
+        "show_text": False,
+    },
 }
 
 
@@ -144,6 +163,59 @@ def model_paths() -> dict[str, Path]:
         "tts_dir": Path(os.getenv("VOX_TTS_MODEL_DIR") or models / DEFAULT_TTS_DIR),
         "vad_model": Path(os.getenv("VOX_VAD_MODEL") or models / DEFAULT_VAD_MODEL),
     }
+
+
+#: 唤醒球的渲染层。只认这两个值。
+#:
+#: 拼错落回 ``seq`` 而不是落在一个空白的球上 —— Rust 侧的 `VOX_ORB_RENDERER` 判的是
+#: `v.trim() == "bot"`，同款立场（**只认一个值**）。两处必须同时改。
+ORB_RENDERERS: tuple[str, ...] = ("seq", "bot")
+
+#: 布局盒边长的钳制范围，与 `desktop/src-tauri/src/main.rs` 里那个 `(96..=420)` 一致。
+#: 那一侧越界直接忽略；这一侧越界钳制**并报警告** —— 配置文件里写了个数字而它悄悄
+#: 变成别的，是「看起来配了但其实没生效」的一种。
+ORB_SIZE_MIN = 96
+ORB_SIZE_MAX = 420
+
+
+def orb_environment(config: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
+    """`[orb]` 的三项 -> 交给球那个子进程的环境变量，以及要报的警告。
+
+    球是另一个进程，它读的是自己的 env（Rust 侧 `setup` 里把它们拼进 URL query）。所以
+    这一层的职责只有一个：**把配置文件翻译成那三个变量**。通道没变，变的是谁来填 ——
+    在这个函数之前只有人能填（控制台生成一行让人复制），而那等于这项配置不存在。
+
+    返回的 dict 只含**需要设**的那些：默认值不写进 env，好让一个手动设了
+    ``VOX_ORB_RENDERER`` 的 shell 仍然赢（调试时那条路必须留着）。
+    """
+    warnings: list[str] = []
+    env: dict[str, str] = {}
+
+    renderer = str(config.get("orb.renderer", "seq") or "").strip().lower()
+    if renderer not in ORB_RENDERERS:
+        warnings.append(
+            f"orb.renderer = {renderer!r} 不认识（只有 {' / '.join(ORB_RENDERERS)}），按 seq 处理"
+        )
+        renderer = "seq"
+    if renderer == "bot":
+        env["VOX_ORB_RENDERER"] = "bot"
+
+    raw_size = config.get("orb.size", 140)
+    try:
+        size = int(raw_size)
+    except (TypeError, ValueError):
+        warnings.append(f"orb.size = {raw_size!r} 不是整数，按 140 处理")
+        size = 140
+    if not ORB_SIZE_MIN <= size <= ORB_SIZE_MAX:
+        clamped = max(ORB_SIZE_MIN, min(ORB_SIZE_MAX, size))
+        warnings.append(f"orb.size = {size} 越界，钳制到 {clamped}（{ORB_SIZE_MIN}–{ORB_SIZE_MAX}）")
+        size = clamped
+    if size != 140:
+        env["VOX_ORB_SIZE"] = str(size)
+
+    if bool(config.get("orb.show_text", False)):
+        env["VOX_SHOW_TEXT"] = "1"
+    return env, warnings
 
 
 def default_voice_config() -> dict[str, Any]:
@@ -183,6 +255,32 @@ def _coerce(section: str, key: str, value: Any, default: Any) -> Any:
     raise VoiceConfigError(f"{where} has an unsupported type")
 
 
+#: 除了类型，还要检查**取值**的那几个键。返回错误信息，``None`` = 通过。
+#:
+#: 类型对而值离谱的键是「看起来配了但其实没生效」的另一种形状：`orb.size = 900` 是个
+#: 合法整数，可球只能在 96–420 之间，于是它在启动时被悄悄钳成 420 —— 而使用者在控制台上
+#: 看到的是自己填的 900。所以这里**报错**，和「拼错的键报错而不是被忽略」同一条立场。
+#:
+#: 这也是控制台那一侧的校验器：`/api/config` 写之前会用这个加载器试一遍
+#: （`core/console/routes.py::_validator`），所以页面上填 900 会被**当场拒绝并说明范围**，
+#: 而不是存下去再在下一次启动时变成别的数。
+_VALUE_CHECKS: dict[str, Any] = {
+    "orb.renderer": lambda value: (
+        None
+        if str(value).strip().lower() in ORB_RENDERERS
+        else f"只能是 {' / '.join(ORB_RENDERERS)}"
+    ),
+    "orb.size": lambda value: (
+        None
+        if ORB_SIZE_MIN <= int(value) <= ORB_SIZE_MAX
+        else f"要在 {ORB_SIZE_MIN}–{ORB_SIZE_MAX} 之间（球的布局盒）"
+    ),
+    "orb.hide_after_s": lambda value: (
+        None if float(value) <= 3600 else "最多 3600 秒 —— 再长就该用 orb.visible = true"
+    ),
+}
+
+
 def load_voice_config(path: str | Path | None = None) -> dict[str, Any]:
     """Read ``config/voice.toml``. A missing file yields the shipped defaults.
 
@@ -209,7 +307,14 @@ def load_voice_config(path: str | Path | None = None) -> dict[str, Any]:
         for key, value in values.items():
             if key not in _SCHEMA[section]:
                 raise VoiceConfigError(f"unknown config key: {section}.{key}")
-            merged[f"{section}.{key}"] = _coerce(section, key, value, _SCHEMA[section][key])
+            flat = f"{section}.{key}"
+            coerced = _coerce(section, key, value, _SCHEMA[section][key])
+            check = _VALUE_CHECKS.get(flat)
+            if check is not None:
+                problem = check(coerced)
+                if problem:
+                    raise VoiceConfigError(f"{flat} = {coerced!r} 不行：{problem}")
+            merged[flat] = coerced
     return merged
 
 
@@ -381,12 +486,16 @@ __all__ = [
     "DEFAULT_TTS_DIR",
     "DEFAULT_VAD_MODEL",
     "DEFAULT_KEYWORDS_FILE",
+    "ORB_RENDERERS",
+    "ORB_SIZE_MAX",
+    "ORB_SIZE_MIN",
     "custom_keywords_path",
     "VoiceConfigError",
     "default_voice_config",
     "describe_device",
     "load_voice_config",
     "model_paths",
+    "orb_environment",
     "repo_root",
     "resolve_device",
     "resolve_keywords_file",

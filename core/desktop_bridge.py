@@ -104,11 +104,21 @@ class DesktopBridge:
         visible: bool = True,
         confirm_timeout_s: float = DEFAULT_CONFIRM_TIMEOUT_S,
         on_incoming: Callable[[Mapping[str, Any]], None] | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> None:
         self.command = tuple(command) if command is not None else None
         self.visible = visible
         self.confirm_timeout_s = confirm_timeout_s
         self.on_incoming = on_incoming
+        #: 额外交给球那个子进程的环境变量。球的外观（渲染层 / 尺寸 / 出不出文字）就是
+        #: 这么传的：Rust 侧 `setup` 读自己的 env 拼进 URL query。**由配置文件填，不是
+        #: 由人填** —— 在这个参数之前控制台只能生成一行让人复制到启动环境里，而那等于
+        #: 这项配置不存在（见 `core/audio/config.py::orb_environment`）。
+        #:
+        #: 手动设过的同名变量仍然赢：这里只写调用方点名要设的那些，而
+        #: ``orb_environment`` 对默认值不产出条目。调试时 `VOX_ORB_SIZE=240 python …`
+        #: 那条路因此还在。
+        self.environment = dict(environment or {})
         self.process: subprocess.Popen[str] | None = None
         self.sent = 0
         #: Write failures and rejected envelopes, counted rather than raised.
@@ -131,6 +141,10 @@ class DesktopBridge:
         token makes an old reader harmless if it finishes after that restart.
         """
         env = dict(os.environ)
+        # 已经在环境里设过的赢：手动 `VOX_ORB_SIZE=240 python scripts/run_console.py`
+        # 是调参用的那条路，配置文件不该把它顶掉。
+        for name, value in self.environment.items():
+            env.setdefault(name, value)
         if self.visible:
             env[VISIBLE_ENV] = "1"
         else:
