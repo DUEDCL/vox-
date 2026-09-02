@@ -45,6 +45,7 @@
 | `core/session_bridge.py` | `pytest tests/test_session_bridge.py tests/test_plugin_tools.py -q` | 全绿 |
 | `desktop/src/` | `cd desktop && npm run build` | tsc + vite 通过 |
 | `desktop/src/sequence.ts` `scripts/build_orb_assets.py` `desktop/public/orb/` | 上面那条 + **六态渲染取证**（Edge headless 打 `demo.html?state=<态>&big=1&t=1.4`，深浅两底各一轮） | 六态互不相同（听/思/说三档能量 + 朱红 + 琥珀 + 暗）· 球外能透出桌面纹理（雪碧图必须带 alpha）· 中心是白热光核不是黑洞 · 生产页 `index.html?state=idle` **画布全空** |
+| `desktop/src/bot-render.ts` `desktop/src/bot/`（第十二代 bloub） | `cd desktop && npm run build` + **六态渲染取证**（Edge headless 打 `demo.html?renderer=bot&state=<态>&t=1.4&big=1`，深浅两底各一轮） | 六态互不相同（`render_bot_to_text` 的包围盒/眼数/点数逐对不同）· `?state=idle` **画布亮像素 0** · thinking 三点**分开**（挤成两团 = `settle` 的起点错了） · 深浅两底球都可读 |
 | `desktop/src/core.ts`（手写渲染器，现为 fallback） | 上面那条 + 逐帧对照（`replay.html`）+ 12 格并排（`side.html`）+ 八格对照页 | 只需保证退路不炸：雪碧图缺失时球仍然画得出来 |
 | `core/audio/asr.py`（端点静音时长） | `pytest tests/test_sherpa_provider.py -q` | **8 passed**（含「不许在没有新测量前调小 rule2」那条） |
 | `desktop/src-tauri/` | `cd desktop/src-tauri && cargo check && cargo test` | 零警告 + **20 passed** + **须实机验收** |
@@ -109,6 +110,17 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 
 
 **已完成但容易记错的**：
+- **唤醒球有第十二代了，但它是第二层不是替换：bloub（有脸的实体球）与 AE 雪碧图并存**（2026-09-02）。默认仍是 `seq`，切过去要 `VOX_ORB_RENDERER=bot`（控制台「唤醒球」栏有下拉，生成这一行）或 `?renderer=bot`。`sequence.ts` / `core.ts` / `public/orb/` **一个字节都没删**，所以回滚就是把那个下拉选回去。
+  - **换的理由不是好看**：前十一代都在画**一团光**，而一团光没有注意力方向。bloub 是有脸的实体，它 14 个态里有 5 个几乎正好是 Vox 要的（睁大眼在听、三点在想、感叹号出错、球带一个点在等确认、缩成小点被取消）。上游是 `jeremy-prt/bloub`（MIT，作者 Jérémy Perret），自我描述是 "SVG recreation of the x.ai bot avatar" —— **它是 Grok 那张脸的复刻**，换球色拉低了相似度但没消除，这是产品身份的已知事实。
+  - **搬进来的是 `desktop/src/bot/`（11 个文件 2837 行，零改动）**。能零改动是因为上游架构明文禁止那个目录出现 Vue import 或 `Date.now()`，`engine.sample(t)` 是**时间的纯函数**。两个后果：①它脱离 Vue 能跑 ②**几何重新变成可断言的** —— 雪碧图那条路没有几何，判据只能是像素级的。`cycles.ts` 没搬（那是编辑器的时间轴）。改动它之前先读上游的 `docs/architecture.md`，那里记着七个版本试错才定下来的 `eyefit.ts` 表（**眼睛偏移必须查表，不能每帧解**）。
+  - **不引 Vue、不引 SVG DOM**：引擎吐的 path 字符串 canvas 直接吃（球体 `M`+`C`+`Z`、眼睛 `M`+`A`+`L`+`Z`、环 `M`+`L`），环的渐变是两点线性 + 3 个 stop 直译成 `createLinearGradient`。所以 `#core` canvas、`resizeMain()`、`measureHitRegion()` 那套接线一个字没动。
+  - **眼睛是洞，而洞不能真透出桌面**。三步管线：离屏填球色 → `destination-out` 按每只眼睛自己的 alpha 挖洞（半透明挖 = 半透明洞，所以眼睛转到球侧面的淡出保留了）→ 主画布**用同一个 `bodyPath` 填眼睛色**，于是眼睛色只出现在「球轮廓内 且 被挖空」的地方，天然被轮廓裁剪、零额外几何。`EYE = #f1efe9` 是钉死的常量：填透明的话深色壁纸上就是「黑球 + 黑洞」。
+  - **球色 `#2fbfa0`（turquoise）不是挑好看的**：素材的纯黑 `#0a0a0c` 在深色桌面上看不见。这一档相对亮度 0.42 是 bloub 自带 12 色里最接近中值的**有彩色**（深浅两底都有对比），且色相离朱红/琥珀两个安全语义色最远。`creme` 会在浅底上消失（与纯黑对称的问题），`gris` 两边都不消失但读作灰扑扑。
+  - **`speaking` 是发明出来的** —— bloub 没有说话态而它没有嘴。落法是 `idle` 基形 + 音量驱动的 `sy` 起伏（±14% @ 5.02 rad/s，频率沿用第十代实测的那一档）。于是 listening 与 speaking 在**静止一帧**上也分得开：眼睛像素 5659 vs 1068（`wide` 的大眼 vs 常态眼），FR-6.6 成立。**注意两个 `idle` 不是一回事**：契约的 `VoiceState.idle` → 不画；bloub 的 `StateId.idle` → speaking 的基形。
+  - **`settle()` 必须把状态起点固定在 0，不是 `now`** —— 这是个静默错，实测踩过。`reset(id, now)` 会让 `sample(now)` 的 `local` 变成 **0**，每个态停在自己第一帧上：`thinking` 的 `emerge` 于是只有 0.3，三个点只张开到 ±0.167 半径而不是 ±0.557，渲出来是两团挤在一起的光斑 —— **而读数（态、点数、颜色）全是对的**。另一半是不调 settle 时 ratio 为 0，`blendPose` 返回**上一个态**（从 hidden 出来时那是 `sleep`），实测 listening 只有 962 个非透明像素而该有约 36000。序列层那句 `motion.w = 1` 修的是同一件事的前半。
+  - **`VIEW_HALF = 130` 不是上游的 `DEMI_VIEWBOX`（158）**。那 158 的余量是给 `orbit`/`comet` 的环留的，而这一代用到的六个态一个都不带 arcs。按 158 铺满的话球本体只剩显示宽的 63%（140px 盒子里球 88px、眼睛 8px 宽），偏小到读不出表情；130 让球占 77%（约 108px）。**哪天启用 `orbit` 表达多路 thinking，这个数必须改回 158**，否则环被裁掉。
+  - **语义色走换填充色，不走 multiply 染色** —— 球是单色实心填充，所以 `error` 直接填朱红、`cancelled` 填压暗去饱和的青。上一代那套「乘法 + `gain` 补亮度 + `destination-in` 收 alpha」的 workaround 在这一层整个不需要了。
+  - **取证面**：`demo.html` 右上角两个按钮同一页切两层（深浅两底、放大 420px、音量、六态按钮全部现成）；`?renderer=bot&state=<态>&t=1.4` 固定一帧可复现；`window.render_bot_to_text(now)` 吐几何读数。**视觉证据走 Edge headless**（`--headless=new --virtual-time-budget=2500`）—— 隐藏的浏览器面板会把 rAF 整个暂停，`demo.ts` 因此在末尾**同步画第一帧**，不然截图是空画布 + 读数停在 HTML 里那个 `…`。
 - **唤醒球是第十一代：渲染层是 AE 预渲染的帧序列，不是手写 Canvas 2D**（2026-08-31）。使用者的判断：「现在你和 ae 也打通了，就不要重复造轮子了，直接用他渲染出的东西」—— 在手写渲染器被否六轮之后。手写那条路（`core.ts`，第十代 3D 薯片）**保留为 fallback**，雪碧图缺失/加载失败时退回它。
   - **换的理由是能力边界不是参数**：Canvas 2D 没有逐像素 UV 采样、没有逐像素法向、没有 z-buffer、没有线性色空间，而素材那团光的质感全部来自这四样（E3D 的羽化 Alpha 贴图 + 球面法向明暗 + 深度雾 + 六层高斯）。
   - **和 AE 直连的两个入口都是 AE 自带的**，不装任何东西：`AfterFX.exe -r <script.jsx>`（ExtendScript ES3，只读 dump 工程参数）与 `aerender.exe`（无头渲染）。**跑 aerender 前必须先 `taskkill /F /IM AfterFX.exe`** —— GUI 实例在跑时 aerender 报 `Unable to receive at line 463`，而且要 **9 分钟才失败**（不是立即报错，白等）；关掉后 24 帧只要 21 秒。
