@@ -22,7 +22,14 @@ Windows 平台上的 Vox 本地优先语音唤醒对话平台。
 
 ## 当前实现
 
-一条命令起来，浏览器里看得见缺什么、点得动补什么：
+日常启动：桌面上的 **Vox** 快捷方式（指向 `scripts/vox.cmd`，起控制台 + 麦克风 + 唤醒球）。
+快捷方式不在版本控制里，重建它：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/make_desktop_shortcut.ps1
+```
+
+只要控制台、不要麦克风时，一条命令起来，浏览器里看得见缺什么、点得动补什么：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/run_console.py

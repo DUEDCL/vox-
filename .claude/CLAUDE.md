@@ -67,6 +67,8 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 
 三个入口：`scripts/run_console.py`（控制台，浏览器里补齐配置）· `scripts/run_voice.py`（说话）· `scripts/run_desktop.py`（打字）。
 
+日常启动是桌面快捷方式 → `scripts/vox.cmd`（= `run_console.py --voice`，控制台 + 麦克风 + 球）。它做三件代码里不该做的事：`chcp 65001`（Python 写的是 UTF-8 字节，控制台按 cp936 解释才乱码 —— 修在终端层不修代码）、按脚本自身位置 `pushd` 到仓库根（双击时当前目录是桌面）、非零退出时 `pause`（不然报错一闪就没了）。快捷方式本身不进版本控制，用 `scripts/make_desktop_shortcut.ps1` 重建（那个 `.ps1` **必须带 UTF-8 BOM**，PowerShell 5.1 否则按 cp936 读它、中文注释直接语法错误）。
+
 
 **未实现，不要假设存在**：
 - **`config/models.toml` 没有读侧** —— 控制台能读能写能探端点（`core/models_config.py` + 三个 API），但**没有任何运行时代码按它组装模型**：语音栈仍然由 `config/voice.toml` + 四个环境变量（`VOX_*_MODEL_DIR`）决定，LLM 仍然由 `config/agents.toml` 的 agent 决定。所以 `active` 现在只是一个被记录的意图，改它不改变任何行为 —— 也正因为如此控制台不提供切换 `active` 的按钮（`docs/backlog.md` B7）
