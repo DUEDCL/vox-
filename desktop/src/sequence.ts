@@ -69,9 +69,17 @@ const LOOK: Record<SeqState, Look> = {
   // 叠上辉光之后视觉上是一团光在搅。**我量过三遍确认没有「六个分离的点等分在一圈上」那一相**：
   // `预合成 3` 逐帧 0–205、`合成 1` 全 30 秒抽样、`预合成 1` 全 30 秒抽样，环带角向峰数
   // 最多 4–5 个且起伏只有均值的 17%。所以这一态靠**速率**表达，不换几何。
+  //
+  // **2026-09-03 从 2.20 降到 1.15，boost 从 ×1.7 降到 ×1.25。** 使用者的原话是「思考状态
+  // 跟鬼畜了一样」，而那是一道算术题不是审美分歧：`burst` 是 **28 帧 @ 24fps**，一个循环
+  // 1.17 秒。rate 2.20 让它 0.53 秒转一圈，再乘上思考 6 秒后的 ×1.7 就是 **0.31 秒一圈** ——
+  // 一段爆发式的素材每秒循环 3.2 次，读出来是频闪，不是「在想」。
+  //
+  // 现在：1.15 → 1.02 秒一圈，久想之后最快 0.81 秒一圈。仍然比「在听」（0.70）快得明显，
+  // 而且**久想会更紧**这层语义留着了 —— 只是它现在是一个渐强，不是一次抽搐。
   // 用 `burst` 而不是 `flow`：flow 段含一次完整的涌起→消退，播快之后会落在能量低谷上，
   // 渲出来像「内容被删掉了」—— 那正是上一版被否的原因。burst 段能量摆动只有 2.38×，稳。
-  thinking:  { sheet: 'burst', rate: 2.20, scale: 0.97, breath: 0.022, breathHz: 2.40, gain: 0.98, tint: null },
+  thinking:  { sheet: 'burst', rate: 1.15, scale: 0.97, breath: 0.022, breathHz: 2.40, gain: 0.98, tint: null },
   speaking:  { sheet: 'burst', rate: 1.00, scale: 1.00, breath: 0.090, breathHz: 5.02, gain: 1.00, tint: null },
   cancelled: { sheet: 'flow',  rate: 0.26, scale: 0.86, breath: 0.026, breathHz: 1.20, gain: 0.44, tint: null },
   // 染色走乘法，亮度会被乘掉一大档 —— `gain` 提到 1 以上是在补它，不是在「调亮一点」。
@@ -149,8 +157,9 @@ export function stepMotion(m: Motion, dt: number): void {
 }
 
 /** 思考越久转得越快 —— 上限 1.7 倍，到顶要 6 秒。「在忙」是可以升级的，但不能无限升。 */
+/** 思考越久，搅得越紧。**上限刻意很低** —— 见下面那段算术。 */
 function thinkingBoost(m: Motion): number {
-  return 1 + 0.7 * Math.min(1, m.thinkingFor / 6);
+  return 1 + 0.25 * Math.min(1, m.thinkingFor / 8);
 }
 
 /** 当前该播第几帧。素材是 24fps；`rate` 是倍率。 */
@@ -227,15 +236,25 @@ function layer(
 }
 
 /** 浅色桌面上唯一能产生对比的是减色 —— 球必须自带一层暗底，加色画不出边界。
-    渐变必须**单调衰减**：把更不透明的一档放在外圈会得到一道暗环。 */
+    渐变必须**单调衰减**：把更不透明的一档放在外圈会得到一道暗环。
+
+    **2026-09-03 收窄并压暗一档。** 此前它以 `R * 0.99`（几乎整张画布）为半径画一层
+    `rgba(8,11,20,0.16)` 的暗盘，而球体本身只占约 0.69 的半径 —— 于是球外面那一圈是一块
+    没有任何东西盖住的灰。使用者在浅色背景上圈出来的「暗灰色的边边」就是它，同时它也把
+    球身中段的加色压掉一档，读作「颜色有点淡有点看不清」。
+
+    现在两条都跟着球体走：半径由调用方按实际画出来的直径给，而且 0.62 之后就完全透明 ——
+    暗底只该垫在球**底下**，不该铺在它周围。 */
 export function drawUnderlay(
   ctx: CanvasRenderingContext2D,
   cx: number, cy: number, r: number, k: number,
 ): void {
   if (k <= 0) return;
   const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-  g.addColorStop(0, `rgba(8,11,20,${(0.16 * k).toFixed(4)})`);
-  g.addColorStop(0.72, `rgba(7,12,23,${(0.10 * k).toFixed(4)})`);
+  g.addColorStop(0, `rgba(8,11,20,${(0.13 * k).toFixed(4)})`);
+  g.addColorStop(0.42, `rgba(7,12,23,${(0.075 * k).toFixed(4)})`);
+  // 0.62 就归零：再往外是球体之外的空气，那里任何不透明度都是一圈可见的灰。
+  g.addColorStop(0.62, 'rgba(7,12,23,0)');
   g.addColorStop(1, 'rgba(7,12,23,0)');
   ctx.globalCompositeOperation = 'source-over';
   ctx.globalAlpha = 1;
@@ -269,9 +288,15 @@ export function drawOrb(
   if (m.appear <= 0 && m.state === 'hidden') return;
 
   const ease = m.appear * m.appear * (3 - 2 * m.appear);   // smoothstep：出现不要线性
-  drawUnderlay(ctx, cx, cy, R * 0.99, ease);
-
   const base = R * 2 * (256 / 280) * (0.86 + 0.14 * ease);
+  // **暗底跟着球体走，不铺满画布。** 以前这里传的是 `R * 0.99`，而球体只占约 0.69 的
+  // 半径 —— 球外面那一圈是一块没有任何东西盖住的灰（使用者圈出来的「暗灰色的边边」），
+  // 同时球身中段的加色被压掉一档（「颜色有点淡有点看不清」）。
+  //
+  // `base` 是这一帧真正画出来的直径，所以 `base / 2` 就是球体半径。乘 1.02 留一点余量给
+  // 素材自己的柔边，再往外由渐变在 0.62 处归零。
+  drawUnderlay(ctx, cx, cy, (base / 2) * 1.02, ease);
+
   const boost = m.state === 'thinking' ? thinkingBoost(m) : 1;
   ctx.save();
   if (m.w < 1 && m.prev !== m.state) {
