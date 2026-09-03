@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1418 passed, 3 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1706 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -42,6 +42,9 @@
 | 工具/记忆与语音路径接线 | `pytest tests/test_memory.py tests/test_plugin_tools.py -q` | **87 passed** |
 | `core/agents/` `config/agents.toml` | `pytest tests/test_agent_contract.py tests/test_agent_cli.py tests/test_agent_evox.py tests/test_agent_acp.py tests/test_agent_http.py -q` | 全绿（contract 14 + cli 28 + evox 17 + acp 12 + http 14） |
 | `core/dispatch/` | `pytest tests/test_router.py tests/test_dispatcher.py tests/test_aggregator.py tests/test_intent.py tests/test_breaker.py -q` | **234 passed**（router 35 + dispatcher 47 + aggregator 20 + intent 113 + breaker 19；含能力闸门与「后端没装」降级） |
+| `core/tools/app_index.py`（发现已装应用） | `pytest tests/test_app_index.py -q` | **18 passed**（扫描器被注入，不碰真注册表） |
+| `core/memory/promote.py`（隐式记忆） | `pytest tests/test_memory_promote.py -q` | **29 passed** |
+| `core/channels/weixin_login.py`（扫码） | `pytest tests/test_weixin_login.py -q` | **17 passed**（假 transport，**不打网络**） |
 | `core/channels/` `config/channels.toml` | `pytest tests/test_channels.py tests/test_channel_crypto.py -q` | **41 passed**（channels 26 + crypto 15；crypto 那 15 条钉在 FIPS-197 官方向量上，因为那份 AES 是我们自己写的） |
 | `core/session_bridge.py` | `pytest tests/test_session_bridge.py tests/test_plugin_tools.py -q` | 全绿 |
 | `desktop/src/` | `cd desktop && npm run build` | tsc + vite 通过 |
@@ -242,6 +245,10 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
   - **AES-128-ECB 是我们自己写的**（`core/channels/crypto.py`，纯 Python，因为这台机器没有 `cryptography`）。S-box 是算的不是抄的，钉在 FIPS-197 官方向量上。ECB 不是密码学选择是协议要求 —— 密钥每个文件一把、随机生成、随消息交给对端
   - **上传用 POST 不用 PUT**（上游踩过：PUT 在微信 CDN 上回 404），媒体只从 `*.weixin.qq.com` 下载（一个能指向任意主机的字段就是一次 SSRF，有测试钉着）
 - **微信这条路上 `speaker` 永远是 `None`** —— 一个微信 id 证明不了对面是谁，所以 `shell.run` 天然进不来（它要 `require_verified_speaker`）。这不是限制，是这条链路唯一正确的答案
+- **三条本机快路径，都不派发** —— `is_dismissal`（「退下吧」→ 收窗收球）· `is_progress_query`（「进度怎么样了」→ 报手上那件活跑了多久，`_inflight` / `_last_done` 两份状态）· 工具快路径。前两条都是**整句锚定**的纯函数：「这个项目进度怎么样」带宾语，仍然派给 agent；漏掉这道边界的症状是一句明显的误答而不是报错。`DispatchResult` 没有 `text` 字段（它是从 chunks 派生的属性），本机答案要走 `chunks=(AgentChunk(kind="text", text=...),)`
+- **`shell.run` 2026-09-03 在出厂配置里打开了**（使用者点名要「能直接执行终端命令」），但 `policy.py` 的**代码默认仍然是 False** —— 删掉配置文件不会获得代码执行。那个 `true` 的可接受性由三条断言共同担保：白名单只读（20 条，`git status`/`dir`/`tasklist` 这类，测试逐条检查没有 `pip`/`python`/`rm`/`git commit`）· `require_confirmation` · `require_verified_speaker`。危险模式仍在代码里。就绪清单里那条 `shell.run is enabled: a misrecognised utterance can reach a command` 警告有测试看着，**不要去消除它**
+- **发现已装应用走枚举，不是拿话当路径**（`core/tools/app_index.py`）—— 开始菜单 `.lnk` + 注册表 App Paths，实测本机 188 项。三个坑：`.lnk` **不解析**、交给 `os.startfile`（`Popen(["x.lnk"])` 报 `%1 is not a valid Win32 application`，所以发现出来的项走 `launch` 不走 `spawn`）· 噪声词**只从候选那一侧剥**（两侧都剥会让「QQ音乐」精确匹配到本机的「QQ」，开出来是聊天软件）· 歧义不猜（「音乐」同时对上两个播放器时报候选）
+- **改了 `desktop/src/` 之后 `cargo build --release` 会失败，如果球正在跑** —— `拒绝访问。(os error 5)`：Windows 不让替换一个正在运行的可执行文件。先从托盘退出球再 build，否则前端改动进不了二进制而**一切看起来都成功了**
 - **朗读期间可以打断，机制是「半双工窗」不是静音窗** —— `capture.duck_for()` 只关**转写、电平观测、增益适应**三样，**KWS 与环形缓冲继续跑**；`mute_for()` 才是在回调最前面 `return` 的硬静音（应答音仍然走它）。此前回答的播放走硬静音，于是播放期间 KWS 一块音频都收不到 —— 「必须等它读完或者重新喊唤醒词」的成因就是那一行，不是哪一层不灵。三条容易记错的：缓冲**必须**在窗里继续写（打断也要过声纹门，门看的是命中前那 3 秒，不写就是「听得见但永远验不过」）· 打断之后**不压尾巴静音窗、不重开聆听窗**（`_barged_in`：那 0.25 秒会吃掉他那句话的头，而识别器已经被 `_authorise` 开好了）· 助手自己的 TTS 触发 KWS 会被**声纹门**拒掉，所以自激不会变成误唤醒 —— 门在后面才敢开这个窗
   - **凭据是扫出来的，不是填的** —— `core/channels/weixin_login.py` 走 `get_bot_qrcode` → 轮询 `get_qrcode_status`，`confirmed` 时凭据在同一份响应里（`ilink_bot_id`/`bot_token`/`baseurl`）。落 `.vox/channels/weixin.json`（gitignored，chmod 0600），**不是环境变量** —— 那个 token 本来就是扫码换来的，要求人手抄进 `.env` 只会抄错。`VOX_WEIXIN_TOKEN` 仍然优先，自动化那条路没关。三个坑：`scaned_but_redirect` **必须**换掉后续所有请求的 base_url（忽略它的症状是「扫完了一直卡在 wait」）· 过期重取要走 `_fetch()` 不是 `begin()`（`begin` 会清零 `refreshes`，于是「最多刷三次」变成永远刷）· 二维码要编的是 `qrcode_img_content` 那个 URL，不是 hex 票据（编错了扫不出来，而且**没有任何报错**）
   - **二维码在服务端渲**（`segno`，纯 Python）。让页面去 CDN 拉一个 JS 二维码库等于把登录流程交给第三方，而那一页上过的是使用者的微信账号
