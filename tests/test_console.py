@@ -2161,3 +2161,84 @@ def test_the_message_cursor_only_returns_new_entries(weixin_api):
     runner._record("in", chat_id="c1", text="第二条")
     again = weixin_api.weixin_messages(first["next"])
     assert [row["text"] for row in again["entries"]] == ["第二条"]
+
+
+# ------------------------------------- 日志：能实时看「所有」日志（2026-09-03）
+
+
+def test_the_log_ring_holds_enough_for_a_real_investigation():
+    """使用者要「能实时查看所有日志」。500 条在一次认真的排查里大约十几分钟 ——
+    一次唤醒失败的完整上下文（漏斗 + 声纹分数 + 派发 + 工具参数）能占掉几十条。"""
+    from core.console.logbook import MAX_ENTRIES
+
+    assert MAX_ENTRIES >= 2000
+
+
+def test_the_level_filter_means_at_least_this_level():
+    """选 warn 的人要的是「有问题的那些」，而 error 比 warn 更有问题 ——
+    一个把 error 滤掉的 warn 筛选是个陷阱。"""
+    from core.console.logbook import Logbook
+
+    book = Logbook()
+    book.write("turn", "普通一轮")
+    book.write("wake", "声纹差一点", level="warn")
+    book.write("tool", "拒绝了", level="error")
+
+    assert len(book.read(level="warn")["entries"]) == 2
+    assert len(book.read(level="error")["entries"]) == 1
+    assert len(book.read()["entries"]) == 3
+
+
+def test_the_search_looks_inside_the_fields_too():
+    """「`fs.read` 收到的 path 到底是什么」这个问题的答案在**字段**里，
+    而那正是这份日志存在的理由。"""
+    from core.console.logbook import Logbook
+
+    book = Logbook()
+    book.write("tool", "fs.read 被拒", level="error", path="C:/keys/id_rsa")
+    book.write("turn", "第 1 轮：读一下 README")
+
+    hits = book.read(query="id_rsa")["entries"]
+
+    assert [row["message"] for row in hits] == ["fs.read 被拒"]
+
+
+def test_the_cursor_does_not_depend_on_the_filter():
+    """**这是这一层最容易错的地方。** 先滤再取窗的话，``next`` 会停在最后一条*匹配*的条目
+    上；于是被滤掉的每次轮询都重新扫，而一旦当前条件下再没有新条目，游标就永远不动 ——
+    表现是「日志卡住不更新」。"""
+    from core.console.logbook import Logbook
+
+    book = Logbook()
+    book.write("tool", "错误一条", level="error")
+    for index in range(5):
+        book.write("turn", f"普通 {index}")
+
+    filtered = book.read(level="error")
+    unfiltered = book.read()
+
+    assert filtered["next"] == unfiltered["next"] == 6
+    # 用那个游标再问一次：两边都该是空的，而不是把前五条又扫一遍。
+    assert book.read(filtered["next"], level="error")["entries"] == []
+
+
+def test_the_source_list_is_reported_so_the_page_can_build_a_dropdown():
+    """一个要人手打 `weixin` 的筛选框没人会用。"""
+    from core.console.logbook import Logbook
+
+    book = Logbook()
+    book.write("weixin", "收到一条")
+    book.write("wake", "命中")
+
+    assert book.read()["sources"] == ["wake", "weixin"]
+
+
+def test_the_route_passes_the_filters_through():
+    """接线：查询参数要真的到 logbook。漏接的症状是筛选框点了没反应。"""
+    api = ConsoleApi(runtime=None, stack=None)
+    api.logbook.write("tool", "拒绝", level="error", path="C:/x")
+    api.logbook.write("turn", "普通一轮")
+
+    assert len(api.log_view(level="error")["entries"]) == 1
+    assert len(api.log_view(source="turn")["entries"]) == 1
+    assert len(api.log_view(query="C:/x")["entries"]) == 1

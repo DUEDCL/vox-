@@ -226,6 +226,9 @@ class ConsoleServer:
                 return api.log_view(
                     int((query.get("cursor") or ["0"])[0] or 0),
                     int((query.get("limit") or ["200"])[0] or 200),
+                    level=(query.get("level") or [""])[0],
+                    source=(query.get("source") or [""])[0],
+                    query=(query.get("q") or [""])[0],
                 )
             if path == "/api/weixin":
                 return api.weixin_view()

@@ -1327,9 +1327,17 @@ details[open] > summary::before { content: "▾ "; }
         <label for="lg-level" class="note" style="align-self:center">
           <select id="lg-level" aria-label="只看哪一级">
             <option value="all">全部</option>
+            <option value="warn">警告及以上</option>
             <option value="error">只看错误</option>
           </select>
         </label>
+        <label for="lg-source" class="note" style="align-self:center">
+          <select id="lg-source" aria-label="只看哪个来源">
+            <option value="">所有来源</option>
+          </select>
+        </label>
+        <input id="lg-q" placeholder="搜正文或字段…" aria-label="搜索日志"
+               autocomplete="off" style="max-width:14em">
         <button id="lg-refresh" data-od-id="debug-log-refresh">刷新</button>
         <button id="lg-clear" data-od-id="debug-log-clear">清空</button>
       </div>
@@ -2572,11 +2580,12 @@ function logLevelClass(level) {
 
 function renderLog() {
   const host = $("lg-rows");
-  const onlyErrors = $("lg-level").value === "error";
-  const rows = onlyErrors ? logSeen.filter((e) => e.level === "error") : logSeen;
+  /* **不再在这里滤级别** —— 筛选整个交给服务端了（见 pullLog）。两处都滤的后果是
+     「选了错误却还看到 info」或者反过来，而那种不一致查起来要先想清楚是哪一层在滤。 */
+  const rows = logSeen;
   host.textContent = "";
   /* 最新的在上：查「刚才那次为什么失败」的人不该先滚到底。 */
-  for (const entry of rows.slice(-200).reverse()) {
+  for (const entry of rows.slice(-400).reverse()) {
     const row = el("div", { class: "logrow" });
     const when = new Date(entry.at * 1000).toTimeString().slice(0, 8);
     const head = el("div", { class: "lg-head" });
@@ -2604,7 +2613,19 @@ function renderLog() {
 
 async function pullLog() {
   try {
-    const page = await api(`/api/log?cursor=${logCursor}&limit=200`);
+    /* **筛选走服务端**：缓冲里有两千条而屏幕上放得下几十条，把两千条拉回来自己滤等于
+       每两秒传一遍整个缓冲。级别 / 来源 / 关键词都作为查询参数交给 /api/log。
+
+       游标与筛选**无关**（后端按原始序号取窗再滤），所以改筛选条件不会让日志卡住 ——
+       但本地已经攒的那些是按上一套条件滤过的，所以改条件时要清掉重新拉。 */
+    const level = $("lg-level").value === "all" ? "" : $("lg-level").value;
+    const source = $("lg-source").value;
+    const q = $("lg-q").value.trim();
+    const url = `/api/log?cursor=${logCursor}&limit=300`
+      + (level ? `&level=${encodeURIComponent(level)}` : "")
+      + (source ? `&source=${encodeURIComponent(source)}` : "")
+      + (q ? `&q=${encodeURIComponent(q)}` : "");
+    const page = await api(url);
     if (page.dropped) {
       /* 缓冲被裁过：说出来，不然那段空白看起来像「什么都没发生」。 */
       logSeen.push({
@@ -2614,9 +2635,20 @@ async function pullLog() {
     }
     for (const entry of page.entries) logSeen.push(entry);
     logCursor = page.next;
-    if (logSeen.length > 400) logSeen.splice(0, logSeen.length - 400);
+    if (logSeen.length > 1200) logSeen.splice(0, logSeen.length - 1200);
+    /* 来源下拉由后端报的清单填 —— 一个要人手打 `weixin` 的筛选框没人会用。 */
+    const select = $("lg-source");
+    const known = new Set(Array.from(select.options).map((o) => o.value));
+    for (const name of page.sources || []) {
+      if (known.has(name)) continue;
+      const option = document.createElement("option");
+      option.value = name; option.textContent = name;
+      select.appendChild(option);
+    }
+    const filtered = level || source || q;
     $("lg-note").textContent =
-      `共 ${page.total} 条，本地留了 ${logSeen.length} 条。`;
+      `共 ${page.total} 条（缓冲里留着 ${page.held} 条），本地 ${logSeen.length} 条`
+      + (filtered ? " · 正在按条件筛选" : "");
     renderLog();
   } catch (err) {
     $("lg-note").textContent =
@@ -2626,8 +2658,24 @@ async function pullLog() {
   }
 }
 
+/* 改筛选条件 = 换了一套要看的东西，所以清空本地重新拉。不清的话屏幕上会是两套条件
+   混在一起的结果，而那比没有筛选更难读。 */
+function refilterLog() {
+  logCursor = 0;
+  logSeen.length = 0;
+  pullLog();
+}
+
 $("lg-refresh").onclick = () => pullLog();
-$("lg-level").onchange = () => renderLog();
+/* 三个筛选都走服务端，所以改任何一个都要清掉本地重新拉（见 refilterLog）。
+   搜索框做 300 ms 防抖：每敲一个字母就打一次接口，而人打字的速度比那快。 */
+$("lg-level").onchange = () => refilterLog();
+$("lg-source").onchange = () => refilterLog();
+let logSearchTimer = null;
+$("lg-q").addEventListener("input", () => {
+  if (logSearchTimer) clearTimeout(logSearchTimer);
+  logSearchTimer = setTimeout(refilterLog, 300);
+});
 $("lg-clear").onclick = async () => {
   try {
     await api("/api/log/clear", { method: "POST", body: {} });

@@ -1066,14 +1066,31 @@ class ConsoleApi:
 
     # ------------------------------------------------------------------------ log
 
-    def log_view(self, cursor: int = 0, limit: int = 200) -> dict[str, Any]:
-        """运行日志，从游标之后读。
+    def log_view(
+        self,
+        cursor: int = 0,
+        limit: int = 200,
+        *,
+        level: str = "",
+        source: str = "",
+        query: str = "",
+    ) -> dict[str, Any]:
+        """运行日志，从游标之后读，可按级别 / 来源 / 关键词筛。
 
         这是「``route=tool ok=false tool=fs.read 0ms``」这类报告唯一查得下去的地方：事件流
         按契约不带参数（它扇出到球、传输和每个消费者），所以哪个 path 被谁拒了只在这里。
+
+        筛选走服务端：缓冲里有两千条而界面上放得下几十条，把两千条送过去让页面自己滤等于
+        每两秒传一遍整个缓冲。
         """
         try:
-            return self.logbook.read(int(cursor), int(limit))
+            return self.logbook.read(
+                int(cursor),
+                int(limit),
+                level=str(level or ""),
+                source=str(source or ""),
+                query=str(query or ""),
+            )
         except (TypeError, ValueError) as exc:
             raise ApiError(f"cursor/limit 得是整数：{exc}") from exc
 
