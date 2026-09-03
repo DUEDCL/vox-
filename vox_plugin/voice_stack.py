@@ -44,6 +44,10 @@ from core.audio import (
 from core.audio.gain import AutoGain
 from core.audio.vad import SileroSpeechGate
 
+#: 云端识别的出厂模型。写在这里而不是只写在 `asr_cloud.py`：``_open_asr`` 要在
+#: `asr.model` 为空时填一个默认值，而那个默认值该和控制台上显示的是同一个。
+DEFAULT_CLOUD_ASR_MODEL = "qwen-audio-3.0-asr-flash"
+
 
 @dataclass
 class VoiceStack:
@@ -52,7 +56,9 @@ class VoiceStack:
     config: dict[str, Any]
     capture: SounddeviceWakeCapture | None = None
     kws: SherpaKeywordProvider | None = None
-    asr: SherpaStreamingAsrProvider | None = None
+    #: 识别器。**类型是 Any** —— 2026-09-03 起它也可能是 `DashScopeAsrProvider`。
+    #: 和 tts 同一个理由：标死一个具体类会让红线 2 的「可替换」变成谎话。
+    asr: Any = None
     #: 合成器。**类型是 Any 而不是 SherpaTtsProvider** —— 2026-08-29 起它也可能是
     #: `DashScopeTtsProvider`。两者摆同一个形状，标死一个具体类会让「可替换」变成谎话。
     tts: Any = None
@@ -85,13 +91,33 @@ class VoiceStack:
 
         asr_on = bool(self.config.get("asr.enabled", True))
         asr_ready = self.asr is not None and self.asr.available
+        # 「在哪」对两种 provider 不是同一样东西，和 TTS 那一行同一个道理：本机是模型目录，
+        # 云端是模型名 + 端点主机。给云端印一个目录会让读的人以为配置没生效。
+        if self.asr is None:
+            asr_where = "(disabled)"
+        elif hasattr(self.asr, "model_dir"):
+            asr_where = str(self.asr.model_dir)
+        else:
+            asr_where = f"{self.asr.model} @ {self.asr._safe_endpoint()}"
+            latency = int(getattr(self.asr, "last_latency_ms", 0))
+            failures = int(getattr(self.asr, "failures", 0))
+            if latency:
+                asr_where = f"{asr_where}（上一次 {latency} ms）"
+            if failures:
+                asr_where = f"{asr_where} —— 失败 {failures} 次"
+        asr_cloud = self.asr is not None and not hasattr(self.asr, "model_dir")
         row(
             "asr",
             asr_ready or not asr_on,
-            str(self.asr.model_dir) if self.asr else "(disabled)",
+            asr_where,
             ""
             if asr_ready or not asr_on
-            else "缺识别模型：解压 models/asr.tar.bz2 或设 VOX_ASR_MODEL_DIR（当前只唤醒不转写）",
+            else (
+                f"云端识别缺 {getattr(self.asr, 'key_env', 'VOX_ASR_KEY')} —— "
+                "在控制台「密钥」那一栏存进去"
+                if asr_cloud
+                else "缺识别模型：解压 models/asr.tar.bz2 或设 VOX_ASR_MODEL_DIR（当前只唤醒不转写）"
+            ),
         )
 
         tts_on = bool(self.config.get("tts.enabled", True))
@@ -238,6 +264,48 @@ def _open_tts(resolved: dict[str, Any], warnings: list[str]) -> Any:
     return tts
 
 
+def _open_asr(resolved: dict[str, Any], warnings: list[str]) -> Any:
+    """按 ``asr.provider`` 建识别器。两个 provider 同形，所以这是唯一知道有两种的地方。
+
+    与 ``_open_tts`` 的一个**故意的差别：没有 FallbackAsr。** TTS 的降级发生在合成那一刻
+    （401 只在真的合成时暴露），而识别的降级只能发生在启动时 —— 一句话说到一半切引擎会
+    让那句话的前半段丢在云端、后半段丢在本机，两边都不完整。所以这里的选择在开麦之前
+    就定下来，并把「为什么不是你配的那个」大声说出来。
+    """
+    provider = str(resolved.get("asr.provider", "sherpa")).strip().lower()
+    if provider in ("dashscope", "qwen", "aliyun", "bailian", "cloud"):
+        from core.audio.asr_cloud import DashScopeAsrProvider
+
+        cloud = DashScopeAsrProvider(
+            model=str(resolved.get("asr.model", "")).strip() or DEFAULT_CLOUD_ASR_MODEL,
+            key_env=str(resolved.get("asr.key_env", "")).strip() or "VOX_ASR_KEY",
+            silence_s=float(resolved["asr.silence_s"]),
+            max_utterance_s=float(resolved["asr.max_utterance_s"]),
+            timeout_s=float(resolved["asr.timeout_s"]),
+            vad_model=str(resolved.get("vad_model", "")) or None,
+        )
+        if cloud.available:
+            return cloud
+        # 缺 key。**退回本机而不是不转写** —— 「唤醒了，球弹出来了，一个字都没转」在使用者
+        # 那一侧和「崩了」同形。退回去还能用，只是会把「小沃」听成「小吴」。
+        warnings.append(
+            f"云端识别不可用：{cloud.key_env} 没有值 —— 这一轮退回本机模型"
+            "（它的字表里没有「沃」，专名会听错）。在控制台「密钥」那一栏存进去即可"
+        )
+        provider = "sherpa"
+    if provider not in ("sherpa", "local", ""):
+        warnings.append(f"未知的 asr.provider {provider!r}，按本机 sherpa 处理")
+    asr = SherpaStreamingAsrProvider(
+        resolved["asr_dir"], num_threads=int(resolved["asr.num_threads"])
+    )
+    if not asr.available:
+        warnings.append(
+            f"asr model not found at {resolved['asr_dir']}; wake only, no transcription"
+        )
+        return None
+    return asr
+
+
 def open_voice_stack(
     config: dict[str, Any] | None = None,
     *,
@@ -284,14 +352,7 @@ def open_voice_stack(
 
     asr = None
     if with_asr if with_asr is not None else bool(resolved["asr.enabled"]):
-        asr = SherpaStreamingAsrProvider(
-            resolved["asr_dir"], num_threads=int(resolved["asr.num_threads"])
-        )
-        if not asr.available:
-            warnings.append(
-                f"asr model not found at {resolved['asr_dir']}; wake only, no transcription"
-            )
-            asr = None
+        asr = _open_asr(resolved, warnings)
 
     tts = None
     if with_tts if with_tts is not None else bool(resolved["tts.enabled"]):

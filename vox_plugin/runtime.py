@@ -1056,6 +1056,25 @@ class VoiceRuntime:
         # 措辞跟着分：一个刚回答完的助手说「聆听结束」读起来像出错了。
         following = self._following_up
         self._following_up = False
+        # **云端识别失败会走到这一条上，而它和「真的没人说话」长得一样。** 云端那条路的
+        # 失败以「空文本 + 端点」到达 capture（那是刻意的：一次网络失败不该结束整轮），
+        # 于是宽限期走完就落在这里。没有下面这两行的话，一个 401 在使用者那一侧就是
+        # 「我说了话它说我没说话」—— 2026-09-01 的 TTS 401 已经演过一遍这种失败。
+        asr_error = ""
+        capture = getattr(self.plugin, "audio_capture", None)
+        taker = getattr(getattr(capture, "asr_provider", None), "take_error", None)
+        if callable(taker):
+            try:
+                asr_error = str(taker() or "")
+            except Exception:  # noqa: BLE001 - 报错这件事本身不该失败一轮
+                asr_error = ""
+        if asr_error:
+            self.log(
+                "asr",
+                f"云端识别失败，所以这一轮没有文本：{asr_error}",
+                level="error",
+                reason=asr_error,
+            )
         self.log(
             "wake",
             f"{'这一轮聊完了' if following else '聆听结束'}：{seconds:g} 秒内没听到说话，退回待机",

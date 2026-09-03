@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-Proto = Literal["openai", "anthropic", "ollama", "custom"]
+Proto = Literal["openai", "anthropic", "ollama", "dashscope", "custom"]
 
 
 @dataclass(frozen=True)

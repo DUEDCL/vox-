@@ -57,7 +57,13 @@ KINDS: tuple[str, ...] = ("asr", "tts", "llm")
 FIELDS: tuple[str, ...] = ("provider", "model", "voice", "base", "proto", "key_env")
 
 #: Request shapes an adapter can speak. ``custom`` means "a human will wire it".
-PROTOS: tuple[str, ...] = ("openai", "anthropic", "ollama", "custom")
+#:
+#: **``dashscope`` 是 2026-09-03 加的，而它不是修饰。** 在那之前这张表里只有兼容协议，
+#: 于是百炼的原生接口只能被写成 `proto = "openai"` —— 而使用者的云端 ASR 400 正是这件事
+#: 的后果：`qwen-audio-3.0-asr-flash` 要 `parameters.format`，OpenAI 协议里没有地方放它，
+#: 兼容端点恒回 `UNSUPPORTED_FORMAT: format is empty`。一个说不出「这是另一种协议」的
+#: 配置面，会逼人把它写成一个谎，而这个谎在运行时表现为一条摸不着的 400。
+PROTOS: tuple[str, ...] = ("openai", "anthropic", "ollama", "dashscope", "custom")
 
 #: A profile name becomes a TOML table name, so it is restricted to bare-key
 #: characters. No dots: a dot would nest the table somewhere else entirely.

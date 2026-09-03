@@ -4,7 +4,7 @@
 
 ## 三条设计红线(不得违反)
 
-1. **音频本地，算力上云**（2026-08-29 由使用者更改，此前写作「本地优先」）— **音频永不出这台机器**：唤醒、VAD（语音活动检测）、ASR、TTS（语音合成）、声纹校验全部本机执行，项目代码不保存、不上传音频，声纹环形缓冲永不落盘，记忆库只存文本、永不存音频。**但决策与推理以云端算力为主** —— 本机算力不足以承载一个每轮都要跑的规划器，所以主脑（意图规划、汇总、督促）走云端 LLM 是既定方向，不再以本地模型为默认。<br>**这两件事必须分开说**：「不上传音频」是不变的隐私不变式；「转写文本发到云端」是**已被接受的**姿态，因为文本是用户明确说给助手听的内容，而音频还带着声纹与环境声。新增依赖含 telemetry（遥测）仍然直接否决 —— 那是未经同意的上报，与用户主动发起的一次请求不是一回事。
+1. **音频本地，算力上云**（2026-08-29 由使用者更改，此前写作「本地优先」；2026-09-03 再次收窄，见下）— 唤醒、VAD（语音活动检测）、声纹校验全部本机执行，项目代码不保存音频，声纹环形缓冲永不落盘，记忆库只存文本、永不存音频。**但决策与推理以云端算力为主** —— 本机算力不足以承载一个每轮都要跑的规划器，所以主脑（意图规划、汇总、督促）走云端 LLM 是既定方向，不再以本地模型为默认。<br>**2026-09-03：识别（ASR）默认上云，所以「音频永不出这台机器」这句话不再成立，必须改口。** 使用者的指令是「不要再考虑本地模型了，现在全云端模型」，判据是本机 14M 模型的字表只有 1426 个汉字、**写不出「沃」**，任何阈值都救不回来（实测见 ADR 009）。现在的不变式是三句话，一句都不许含糊：<br>　· **唤醒词的音频永不出网** —— KWS 在本机，待机时的环形缓冲只在内存里；<br>　· **声纹永不出网** —— 校验、注册、向量全部本机，`enrollment/` 不进版本库；<br>　· **只有「被接受的唤醒之后说的那一句」会出网**，以 base64 内联进一次 HTTPS POST，不写盘、不留缓存、不传 URL（传 URL 那条路要求先把录音放到一个公网可取的地方，本项目不做）。<br>换回全本机只要把 `config/voice.toml` 的 `asr.provider` 改成 `"sherpa"`，那条路一个字节都没删。新增依赖含 telemetry（遥测）仍然直接否决 —— 那是未经同意的上报，与用户主动发起的一次请求不是一回事。
 2. **组件可替换** — KWS/ASR/TTS/会话传输/**agent 后端**都在契约之后。任何 `sherpa-onnx`、`sounddevice`、VoxCord 的类型都不得出现在 `contracts/voice-events.schema.json` 或公开事件结构里（`additionalProperties: false` 是第一道闸门）。`AgentDescriptor`/`Task`/`AgentChunk` 的字段只许 `str`/`int`/`float`/`frozenset`/`tuple`/`Mapping`。
 3. **验证等级诚实** — 七级证据 DOC < AUTO < SIM < REAL-MIC < **REAL-AGENT** < REAL-EVOX < REAL-WIN。禁止把低等级当高等级用，禁止把 mock（模拟）验证写成真机验收。**mock 子进程只算 SIM，不算 REAL-AGENT**。声明结论必须标注等级。
 
@@ -14,11 +14,12 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1736 passed, 3 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1784 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
 | `core/audio/`(除 speaker) | `pytest tests/test_provider_adapter.py tests/test_sherpa_provider.py -q` | 全绿 |
+| `core/audio/asr_cloud.py`（云端识别） | `pytest tests/test_asr_cloud.py -q` | **33 passed**（**一次网络都不打**；真机探针在 `.vox-ref/asr_cloud_*probe.py`） |
 | `core/audio/config.py` `config/voice.toml` | `pytest tests/test_voice_config.py -q` | **31 passed** |
 | `vox_plugin/voice_stack.py` | `pytest tests/test_voice_assembly.py -q` | **17 passed** |
 | `core/audio/speaker.py` `ring.py` `capture.py` | `pytest tests/test_speaker.py tests/test_speaker_privacy.py tests/test_speaker_hardening.py -q` | **66 passed**（**不需要声纹模型**） |
@@ -68,7 +69,7 @@
 
 Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事件契约、P3 记忆系统、P4 本地工具与安全门、P5 agent 适配器、P6 派发/路由/汇总、P7 ACP/HTTP 适配器、P8 唤醒球 UI 与事件通道已落地。**本轮新增（2026-08-28）**：语音生产入口 + 配置化、声纹已验身份接线、`web.search` 两级后端、TOML 行级写入器、**本机 web 控制台**（ADR 006）、**MCP 工具接入**（ADR 007）、无人值守验收脚本、**控制台第二版界面（九视图）+ 模型配置模块**（ADR 006 第 8、9 节）。下一步 P9/P10 真机验收。十阶段划分与发布阻塞项见 `docs/project-overview.md` 第 5、6 节。
 
-决策记录：ADR 001 语音栈 · ADR 002 声纹准入 · ADR 003 agent 接入 · ADR 004 记忆 · ADR 005 派发与工具门 · **ADR 006 本地控制台** · **ADR 007 MCP 工具**。识别但故意没做的技术债见 `docs/backlog.md`。
+决策记录：ADR 001 语音栈 · ADR 002 声纹准入 · ADR 003 agent 接入 · ADR 004 记忆 · ADR 005 派发与工具门 · **ADR 006 本地控制台** · **ADR 007 MCP 工具** · ADR 008 Vox 为主脑 · **ADR 009 识别上云**。识别但故意没做的技术债见 `docs/backlog.md`。
 
 三个入口：`scripts/run_console.py`（控制台，浏览器里补齐配置）· `scripts/run_voice.py`（说话）· `scripts/run_desktop.py`（打字）。
 

@@ -324,6 +324,18 @@ EDITABLE: dict[str, tuple[str, ...]] = {
         "wake.max_active_paths",
         "asr.enabled",
         "asr.num_threads",
+        # 2026-09-03：识别也上云了，所以这一栏和 TTS 那一栏对称起来。
+        #
+        # **`asr.key_env` 刻意不在这里**，和 `tts.key_env` 同一条理由：它是「去读哪个环境
+        # 变量」，让网页改它等于让它决定把哪个凭据发给百炼。密钥的**值**走 /api/secret。
+        #
+        # 三个时长放开是因为它们决定「它多久算你说完了」—— 使用者对自己说话的节奏最清楚，
+        # 而 `silence_s` 调短一点点就会把句中换气当成句末（表现是「它总打断我」）。
+        "asr.provider",
+        "asr.model",
+        "asr.silence_s",
+        "asr.max_utterance_s",
+        "asr.timeout_s",
         "tts.enabled",
         # 2026-08-29:合成的 provider / 模型 / 音色可从页面改 —— 这正是「控制台不能配置
         # 云端 TTS」缺的最后一环(前三环是:没有云端 provider、schema 没有这几个键、

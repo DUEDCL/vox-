@@ -86,7 +86,29 @@ _SCHEMA: dict[str, dict[str, Any]] = {
         # 请求。要打断就等它说完，或者用托盘。设成 false 退回「每句都要先喊唤醒词」。
         "follow_up": True,
     },
-    "asr": {"enabled": True, "num_threads": 2},
+    # 识别走本机还是云端。**2026-09-03 加的六个键** —— 在那之前 ASR 只有本机一条路。
+    #
+    # provider = "sherpa"     本机流式 zipformer，num_threads 生效
+    # provider = "dashscope"  百炼 qwen-audio-3.0-asr-flash，model / key_env / 三个时长生效
+    #
+    # 为什么默认换成云端：同一条真录音，本机把「小沃」听成「小吴」而云端全对还带标点。
+    # 差别不在阈值上 —— 本机那个 14M 模型的字表只有 1426 个汉字，「沃」不在里面，它
+    # **写不出**这个字。见 core/audio/asr_cloud.py 模块头那张表。
+    #
+    # 代价说清楚：**被接受的唤醒之后说的那句话会以 base64 出网。** 唤醒词与声纹仍然
+    # 一步都不出网（那两件事在 KWS 与声纹门里，都是本机）。不写盘、不留缓存。
+    "asr": {
+        "enabled": True,
+        "provider": "sherpa",
+        "num_threads": 2,
+        "model": "",
+        "key_env": "VOX_ASR_KEY",
+        # 尾部静音判「说完了」。云端往返本身要几秒，端点上省下的每 100 ms 都落在等待里。
+        "silence_s": 0.8,
+        # 一段最长多久。到了不等静音也发 —— 念清单、读地址那种没有句末的长句不该卡死整轮。
+        "max_utterance_s": 30.0,
+        "timeout_s": 60.0,
+    },
     # provider 选本机还是云端。**这是 2026-08-29 新加的四个键** —— 在那之前 TTS 只有
     # 本机 sherpa 一条路，所以「在控制台把合成换成 cosyvoice、音色 longyuan」在任何一层
     # 都做不到（见 core/audio/tts_cloud.py 模块头列的三条原因）。
@@ -293,6 +315,19 @@ _VALUE_CHECKS: dict[str, Any] = {
     # 块长决定唤醒的响应粒度。太小 CPU 上升、太大唤醒变钝；16000 = 1 秒已经明显迟钝。
     "input.blocksize": lambda value: (
         None if 160 <= int(value) <= 16000 else "要在 160–16000 之间（1600 = 100 ms/块）"
+    ),
+    # 云端识别的端点参数。下限不是审美：0.2 s 的尾部静音会把句中换气切成两句（换气实测
+    # 0.2–0.5 s），而那时上半句先被发上去、下半句变成第二次请求，表现是「它总打断我」。
+    "asr.silence_s": lambda value: (
+        None if 0.3 <= float(value) <= 5.0 else "要在 0.3–5.0 之间（0.8 是实测起点）"
+    ),
+    # 一段的长度上限。30 s 的 16 kHz 单声道 base64 后约 1.3 MB；120 s 是这一层愿意
+    # 塞进一个 JSON 请求体的上限，不是推荐值。
+    "asr.max_utterance_s": lambda value: (
+        None if 2.0 <= float(value) <= 120.0 else "要在 2–120 秒之间"
+    ),
+    "asr.timeout_s": lambda value: (
+        None if 5.0 <= float(value) <= 300.0 else "要在 5–300 秒之间"
     ),
 }
 

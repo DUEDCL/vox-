@@ -33,8 +33,15 @@ active = "local"
 label = "语音本机 + 云端合成与推理"
 
 [profiles.local.asr]
-provider = "sherpa-local"
-model = "zipformer-zh-14M"
+provider = "custom"
+model = "qwen-audio-3.0-asr-flash"
+# **必须是原生多模态端点，不是 compatible-mode/v1。** 使用者 2026-09-03 报的那个 400
+# 就是这一行写成兼容端点：`qwen-audio-3.0-asr-flash` 要 `parameters.format`，而 OpenAI
+# 协议里**没有地方放它**，于是兼容端点恒回 `UNSUPPORTED_FORMAT: format is empty`。
+# 实测原生端点 + `data:audio/wav;base64,…` + `parameters.format` = 200，转写正确。
+base = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation"
+proto = "dashscope"
+key_env = "VOX_ASR_KEY"
 
 # **运行时读的是 config/voice.toml 的 [tts]，不是这里。** 这一栏是控制台上的显示与编辑
 # 面；两处必须一致，不一致时以 voice.toml 为准（见下面 key_env 那条的教训）。
