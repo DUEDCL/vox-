@@ -1363,3 +1363,82 @@ def test_asking_for_progress_keeps_the_microphone_open():
 
     assert capture._listening is True
     assert runtime._following_up is True
+
+
+# ------------------------- 停嘴不需要授权：打断的真正修法（2026-09-03）
+
+
+def test_a_kws_hit_stops_the_speaker_before_the_voiceprint_gate():
+    """**这一条是「朗读时打断不了」的真正修法。**
+
+    上一版把停 TTS 放在 `wake_detected` 里，也就是声纹门**之后**。可是打断发生在扬声器正在
+    响的时候，而那时环形缓冲里是「人声 + 扬声器串音」—— 使用者用音箱不戴耳机（他自己实测那样
+    唤醒率最好），串音把相似度压到门槛以下，于是唤醒被拒、TTS 一个字都没停。半双工窗让 KWS
+    听得见了，而听得见之后那一步仍然卡在门上。
+
+    停自己的嘴**不是安全动作**：它不读文件、不跑命令、不动状态机。所以它在门前面。
+    """
+    capture = BargeInCapture()
+    runtime = _talking_runtime(capture)
+    stops = []
+    runtime.plugin.attach_tts(SimpleNamespace(
+        speak_segments=lambda chunks: None,
+        is_stopped=lambda: False,
+        stop=lambda: stops.append(1),
+    ))
+    runtime._reach_listening()
+    runtime.plugin.submit_text("先开一轮")  # 状态推到 THINKING
+
+    runtime._kws_hit("你好小沃")
+
+    assert stops, "KWS 命中时没停嘴 —— 那就是「必须等它读完」"
+    assert capture.unducks >= 1, "半双工窗没收掉，而挂着的那段正是人在说的话"
+
+
+def test_hushing_does_not_move_the_state_machine():
+    """状态由 `wake_detected`（过了声纹）或者这一轮自己的收尾来改。在这里改状态会让
+    「声纹没过」变成「状态说在听但没人在听」—— 一个说谎的状态。"""
+    runtime = _talking_runtime(BargeInCapture())
+    runtime.plugin.attach_tts(SimpleNamespace(
+        speak_segments=lambda chunks: None, is_stopped=lambda: False, stop=lambda: None
+    ))
+    runtime._reach_listening()
+    runtime.plugin.submit_text("先开一轮")
+    before = runtime.plugin.machine.state
+
+    runtime._kws_hit("你好小沃")
+
+    assert runtime.plugin.machine.state is before
+
+
+def test_an_idle_kws_hit_does_not_touch_the_speaker():
+    """待机时命中不该去动播放 —— 那时没有在播的东西，而一次多余的 `stop()` 会把
+    「刚才那次为什么停了」变成一个要查的问题。"""
+    runtime = _talking_runtime(BargeInCapture())
+    stops = []
+    runtime.plugin.attach_tts(SimpleNamespace(
+        speak_segments=lambda chunks: None, is_stopped=lambda: False, stop=lambda: stops.append(1)
+    ))
+
+    runtime._kws_hit("你好小沃")
+
+    assert stops == []
+
+
+def test_a_rejected_barge_in_still_left_the_room_quiet():
+    """两种结果都要可用：门过了 → 正常打断并开始听；**门没过 → 声音停了**，
+    人在安静里再喊一次，而这一次没有串音。在这之前第二种情况是「它继续读完，你无能为力」。"""
+    capture = BargeInCapture()
+    runtime = _talking_runtime(capture)
+    stops = []
+    runtime.plugin.attach_tts(SimpleNamespace(
+        speak_segments=lambda chunks: None, is_stopped=lambda: False, stop=lambda: stops.append(1)
+    ))
+    runtime._reach_listening()
+    runtime.plugin.submit_text("先开一轮")
+
+    runtime._kws_hit("你好小沃")          # 声音停了
+    runtime._wake_rejected("你好小沃", "below threshold 0.5", 0.41)  # 门没过
+
+    assert stops, "门没过就连声音都没停 —— 那是修之前的行为"
+    assert runtime.wake_stats["rejected"] == 1

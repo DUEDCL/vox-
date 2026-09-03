@@ -985,10 +985,50 @@ class VoiceRuntime:
         del self.wake_recent[WAKE_LOG_MAX:]
 
     def _kws_hit(self, keyword: str) -> None:
-        """KWS 命中，声纹之前。这一条是「第 2 层通过了」的唯一证据。"""
+        """KWS 命中，声纹之前。这一条是「第 2 层通过了」的唯一证据。
+
+        **同时：正在朗读的话立刻停嘴。** 这是「朗读时打断不了」的真正修法。
+
+        上一版把停 TTS 放在 ``wake_detected`` 里，也就是**声纹门之后**。可是打断发生在扬声器
+        正在响的时候，而那时环形缓冲里是「人声 + 扬声器串音」—— 使用者用音箱不戴耳机（他自己
+        实测那样唤醒率最好），串音把余弦相似度压到门槛以下，于是这次唤醒被拒，TTS 一个字都
+        没停。半双工窗让 KWS **听得见**了，可听得见之后那一步仍然卡在门上。
+
+        **停自己的嘴不需要授权。** 那不是一个安全动作，是一个界面动作 —— 它不读文件、不跑
+        命令、不动状态机。所以它挪到门前面。声纹门保留它真正的职责：决定**要不要开识别器**
+        （要不要听你接下来说什么）。
+
+        于是两种结果都是可用的：门过了 → 正常打断并开始听；门没过 → 声音停了，你在安静里
+        再喊一次，而这一次没有串音，门会过。而在这之前，第二种情况是「它继续读完，你无能为力」。
+        """
         self.wake_stats["kws"] += 1
         self._record_wake(keyword=keyword, verdict="kws")
+        speaking = self.plugin.machine.state in {VoiceState.THINKING, VoiceState.SPEAKING}
+        if speaking:
+            self._hush()
+            self.log(
+                "kws",
+                f"唤醒词命中「{keyword}」—— 先停嘴，再过声纹",
+                keyword=keyword,
+                interrupted=True,
+            )
+            return
         self.log("kws", f"唤醒词命中「{keyword}」（还没过声纹）", keyword=keyword)
+
+    def _hush(self) -> None:
+        """立刻停掉正在播的回答，并收掉半双工窗。**跑在音频回调线程上，所以要便宜。**
+
+        只碰播放，不碰状态机：状态由 ``wake_detected``（过了声纹）或者这一轮自己的收尾来改。
+        一个在这里改状态的实现会让「声纹没过」变成「状态说在听但没人在听」。
+        """
+        tts = getattr(self.plugin, "tts", None)
+        stopper = getattr(tts, "stop", None)
+        if callable(stopper):
+            try:
+                stopper()
+            except Exception:  # noqa: BLE001 - 停不掉也不能带走音频线程
+                pass
+        self._unduck_input()
 
     def _listen_refused(self, reason: str) -> None:
         """唤醒被接受了，但识别器没开起来。**error 级，而且它就是「没有后文」本身。**

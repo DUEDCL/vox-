@@ -2338,3 +2338,27 @@ def test_the_view_reports_what_this_machine_can_actually_open(sites_api):
 
     assert isinstance(view["discovered"], list)
     assert view["entries"], "白名单里那几个也要报出来"
+
+
+def test_every_nav_link_has_a_view_and_a_section():
+    """**点了「微信」却跳到运行态** —— 使用者 2026-09-03 报的。
+
+    真因是三处要同时改而我只改了两处：加了 `<a data-view="weixin">`、加了
+    `<section id="v-weixin">`，但**忘了把 `weixin` 加进 `VIEWS` 数组** ——
+    而 `setView` 是 `VIEWS.includes(name) ? name : "overview"`，所以它静默落回运行态。
+
+    这一条把「三处必须一致」变成一个断言：导航链接、`VIEWS`、`<section id="v-...">`。
+    """
+    import re
+
+    html = (Path(__file__).resolve().parents[1] / "core/console/static/index.html").read_text(
+        encoding="utf-8"
+    )
+    nav = set(re.findall(r'<a href="#[^"]*" data-view="([^"]+)"', html))
+    listed = set(re.findall(r'const VIEWS = \[([^\]]+)\]', html)[0].replace('"', "").split(", "))
+    sections = set(re.findall(r'<section class="view" id="v-([^"]+)"', html))
+
+    assert nav, "一个导航链接都没找到 —— 这条测试的正则跟着标记漂了"
+    assert nav - listed == set(), f"导航里有但 VIEWS 里没有（会静默落回运行态）：{nav - listed}"
+    assert nav - sections == set(), f"导航里有但没有对应的 section：{nav - sections}"
+    assert listed - sections == set(), f"VIEWS 里有但没有 section：{listed - sections}"
