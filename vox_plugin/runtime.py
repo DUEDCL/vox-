@@ -146,6 +146,9 @@ class VoiceRuntime:
     memory_store: Any = None
     memory_writer: Any = None
     memory_recaller: Any = None
+    #: 隐式记忆的晋升器（``core/memory/promote.py``）。``None`` = 不自动记 ——
+    #: 记忆关掉时它也不该存在，否则会往一个不存在的 store 里写。
+    promoter: Any = None
     adapters: dict[str, Any] = field(default_factory=dict)
     #: Recognised utterances waiting for a turn. The microphone callback only
     #: ever *enqueues*: running a turn there would block the audio device for
@@ -266,6 +269,16 @@ class VoiceRuntime:
             self.plugin.on_event = self.on_event
             self.plugin.attach_tools(self.tool_runner)
             self.plugin.attach_memory(self.memory_writer, self.memory_recaller)
+            # 隐式记忆：不用说「记住」也记得住。记忆没开时它是 None —— 一个往不存在的
+            # store 里写的晋升器只会每轮记一条警告。
+            if self.memory_writer is not None and self.promoter is None:
+                from core.memory.promote import MemoryPromoter  # noqa: PLC0415
+
+                self.promoter = MemoryPromoter(
+                    writer=self.memory_writer,
+                    recaller=self.memory_recaller,
+                    store=self.memory_store,
+                )
 
             if self.with_desktop:
                 warnings.extend(self._open_desktop())
@@ -415,6 +428,7 @@ class VoiceRuntime:
         self.turns += 1
         task = Task(id=f"t-{self.turns}", text=text, session_id=self.session_id)
         self.log("turn", f"第 {self.turns} 轮：{text[:120]}", turn=self.turns, text=text)
+        self._remember_facts(text)
         self._active_task_id = task.id
         speaker = self.effective_speaker
         try:
@@ -983,6 +997,35 @@ class VoiceRuntime:
             return events
         threading.Thread(target=self._greet, daemon=True, name="vox-greet").start()
         return events
+
+    def _remember_facts(self, text: str) -> None:
+        """不用说「记住」它也记得住 —— 但**只记够证据的那些**。
+
+        使用者的要求：「我把我的个人网站告诉他，下次对话他就能直接记住，而不是我说了
+        『给我记住我的个人网站』他才会记住。」
+
+        抽取与晋升闸门在 ``core/memory/promote.py``：一条第一人称自述（「我的网站是 X」）
+        本身就是显式陈述，直接进长期层；只出现过一次又不是自述的留在候选层等下一次证据。
+        闸门不是洁癖 —— Hermes 引的测量说例行记忆保存把短期污染固化成长期记忆最高到 91%。
+
+        **吞掉异常**：记忆是增强不是对话的前提，和 ``_recall_context`` 同一个立场。
+        跑在派发**之前**是因为这一轮的召回就该看见它 —— 使用者说完「我的网站是 X」紧接着
+        问「我的网站是什么」是最自然的一次验证。
+        """
+        if self.promoter is None:
+            return
+        try:
+            promoted = self.promoter.observe(text, session_id=self.session_id)
+        except Exception as exc:  # noqa: BLE001 - 记忆失败不该让这一轮失败
+            self.log("memory", f"记忆抽取失败：{type(exc).__name__}: {exc}", level="warn")
+            return
+        for candidate in promoted:
+            self.log(
+                "memory",
+                f"记住了：{candidate.statement}（凭据：{candidate.channel}）",
+                channel=candidate.channel,
+                about=candidate.key,
+            )
 
     def _mute_input(self, seconds: float) -> None:
         """让采集在这段时间里丢弃输入。没接麦克风时什么也不做。"""
