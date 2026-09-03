@@ -38,11 +38,19 @@ argv 列表，没有第二个解析器。
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 import urllib.parse
 import webbrowser
 from pathlib import Path
 from typing import Any, Mapping
+
+from core.tools.app_index import AppIndex
+
+
+def _on_windows() -> bool:
+    return sys.platform.startswith("win")
 
 from .browser import url_problem
 from .contract import ToolRequest, ToolResult
@@ -90,6 +98,8 @@ class AppOpenTool:
         *,
         spawn: Any = None,
         opener: Any = None,
+        index: Any = None,
+        launch: Any = None,
     ) -> None:
         self.config = dict(config) if config is not None else load_tools_config()
         self.settings = dict(self.config.get("apps", {}))
@@ -111,6 +121,14 @@ class AppOpenTool:
         self.spawn = spawn or self._spawn
         #: 注入的开网页函数，测试用。生产上是 ``webbrowser.open``。
         self.opener = opener or webbrowser.open
+        #: 已装应用的索引（开始菜单 + 注册表 App Paths）。``None`` = 不发现，只认白名单。
+        #:
+        #: 这一层让「装了什么就能开什么」成立 —— 使用者点名不想每次先往白名单里加一行。
+        #: 候选集永远来自**枚举**，参数只用来在候选里挑，所以它不是「把话当路径执行」。
+        self.index = index if index is not None else (AppIndex() if _on_windows() else None)
+        #: 启动一个发现出来的项。快捷方式要交给系统去跟（``os.startfile``），
+        #: 而不是当成可执行文件去 spawn —— `.lnk` 不是程序。
+        self.launch = launch or self._launch
 
     @property
     def enabled(self) -> bool:
@@ -163,11 +181,21 @@ class AppOpenTool:
             for key in keys:
                 if key in self.sites:
                     return self._open_site(wanted, key, self.sites[key], query)
+            # 白名单和网站表都没有 —— **去问这台机器装了什么**。
+            #
+            # 使用者的要求：「我让他打开网易云就打开，而不是每次都需要添加名单才能打开。」
+            # 候选集来自开始菜单与注册表 App Paths 的**枚举**，不是拿他说的字符串当路径 ——
+            # 后者等于把「说一句话」变成任意代码执行。发现出来的是他自己装的应用，
+            # 开它和他在开始菜单里点一下是同一件事。
+            discovered = self._discover(wanted)
+            if discovered is not None:
+                return discovered
             known = "、".join(self.available_names()) or "（白名单是空的）"
             sites = "、".join(sorted(self.sites)) or "（没有配网页）"
             return refuse(
                 self.name,
-                f"「{wanted}」不在可启动的应用里。现在能开的应用是：{known}；能开的网页是：{sites}",
+                f"「{wanted}」不在可启动的应用里，这台机器的开始菜单里也没找到。"
+                f"现在能开的应用是：{known}；能开的网页是：{sites}",
                 requested=wanted,
             )
         if not target.is_file():
@@ -197,6 +225,53 @@ class AppOpenTool:
             ok=True,
             output=f"已经打开{wanted}",
             audit={"decision": "executed", "app": matched, "exe": target.name},
+        )
+
+    def _discover(self, wanted: str) -> ToolResult | None:
+        """去开始菜单和注册表里找这个应用。找不到返回 ``None``（让调用方去报那句长错误）。
+
+        `apps.discover` 关掉时直接返回 ``None`` —— 那时行为回到「只认白名单」，
+        和这个功能不存在时一模一样。
+        """
+        if not bool(self.settings.get("discover", True)):
+            return None
+        if self.index is None:
+            return None
+        try:
+            matches, score = self.index.find(wanted)
+        except Exception as exc:  # noqa: BLE001 - 扫描失败不该让这条路变成一个崩溃
+            return refuse(self.name, f"扫描已装应用时出错：{type(exc).__name__}: {exc}", requested=wanted)
+        if not matches:
+            return None
+        if len(matches) > 1:
+            # **歧义不猜。** 开错一个应用比问一句更糟：前者会让人以为它听错了。
+            names = "、".join(item.label for item in matches[:4])
+            return refuse(
+                self.name,
+                f"「{wanted}」对上了好几个，说得再具体一点：{names}",
+                requested=wanted,
+            )
+        item = matches[0]
+        if not item.exists:
+            return refuse(
+                self.name,
+                f"开始菜单里有「{item.label}」但它指向的东西不在了 —— 大概是卸载后残留的快捷方式",
+                requested=wanted,
+            )
+        try:
+            self.launch(item.target)
+        except OSError as exc:
+            return refuse(self.name, f"启动失败：{type(exc).__name__}: {exc}", requested=wanted)
+        return ToolResult(
+            tool=self.name,
+            ok=True,
+            output=f"已经打开{item.label}",
+            audit={
+                "decision": "executed",
+                "app": item.label,
+                "via": item.source,
+                "score": score,
+            },
         )
 
     def _open_site(self, wanted: str, matched: str, url: str, query: str) -> ToolResult:
@@ -268,6 +343,25 @@ class AppOpenTool:
             ok=True,
             output=f"已经打开{wanted}并放上「{query}」",
             audit={"decision": "executed", "app": matched, "exe": target.name, "query": True},
+        )
+
+    @staticmethod
+    def _launch(target: str) -> None:
+        """启动一个**发现出来**的项。
+
+        和 ``_spawn`` 分开是因为发现出来的多半是 ``.lnk``，而 `.lnk` 不是程序 ——
+        `Popen(["x.lnk"])` 会报 `%1 is not a valid Win32 application`。``os.startfile``
+        让 Windows 自己去跟这个快捷方式，目标路径、工作目录、参数、图标全由系统处理，
+        和 Explorer 双击一样。
+
+        非 Windows 上退回 ``Popen`` —— 那里没有 `.lnk`。
+        """
+        starter = getattr(os, "startfile", None)
+        if callable(starter):
+            starter(target)  # noqa: S606 - 来自开始菜单枚举的路径，不是话里的字符串
+            return
+        subprocess.Popen(  # noqa: S603 - 同上
+            [target], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
 
     @staticmethod

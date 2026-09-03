@@ -381,6 +381,7 @@ EDITABLE: dict[str, tuple[str, ...]] = {
         # `apps.play` 是表不是标量，`set_scalars` 写不了它们 —— 那是下一步的工作，
         # 不是一条立场（见 scripts/audit_config_surface.py）。
         "apps.enabled",
+        "apps.discover",
         "apps.default_music",
         "web.open_enabled",
         "web.open_search_url",
