@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import pytest
 
-from core.dispatch.intent import MIN_ARGUMENT_LEN, RuleBasedIntentResolver
+from core.dispatch.intent import MIN_ARGUMENT_LEN, RuleBasedIntentResolver, is_progress_query
 
 
 @pytest.fixture
@@ -605,3 +605,47 @@ def test_listening_to_a_person_is_not_a_music_request(resolver, text):
     """没有「歌 / 音乐 / 一首」这类标记词就不是播放请求。少了这个边界，
     「我想听你的意见」会去开音乐播放器 —— 而那句话要的是对话。"""
     assert resolver.resolve(text).tool != "app.open"
+
+
+# ------------------------------------------ 「进度怎么样了」（2026-09-03）
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "进度怎么样了", "进度呢", "你在干什么", "你现在在做什么", "还要多久",
+        "好了吗", "搞定了吗", "怎么样了", "做到哪了", "什么情况",
+        "status", "how is it going", "are you done",
+    ],
+)
+def test_a_progress_question_is_recognised(text):
+    """朗读期间现在可以打断，所以「打断 → 问进度」是一条真实路径。它必须由本机答：
+    把「你在干什么」发给云端 agent 既答不出来，又要再等一轮 —— 而这句话的意思正是
+    「我不想再等了」。"""
+    assert is_progress_query(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "这个项目进度怎么样",  # 带宾语 —— 问的是那个项目，该派给 agent
+        "帮我看看进度报告怎么写",
+        "打开网易云",
+        "现在几点了",
+        "退下吧",
+        "读一下 README",
+        "",
+    ],
+)
+def test_things_that_are_not_progress_questions(text):
+    """整句锚定。少了这道边界，「这个项目进度怎么样」会被本机用一句「现在没有在做的事」
+    打回去 —— 而那是个明显的误答。"""
+    assert is_progress_query(text) is False
+
+
+def test_a_progress_question_is_not_a_dismissal():
+    """两条快路径不能互相吃掉。"""
+    from core.dispatch.intent import is_dismissal
+
+    assert is_dismissal("进度怎么样了") is False
+    assert is_progress_query("退下吧") is False

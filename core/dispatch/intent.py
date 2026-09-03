@@ -330,6 +330,48 @@ def is_dismissal(text: str) -> bool:
     return any(rule.match(stripped) for rule in _DISMISS_RULES)
 
 
+#: 「进度怎么样了」这一类 —— 使用者在问**现在手上那件事**做到哪了，不是在提一个新请求。
+#:
+#: 存在的理由：一次派给 `claude` 的活可能跑十几秒到几分钟，而朗读期间现在可以打断了
+#: （见 `capture.duck_for`）。于是「打断 → 问进度」成了一条真实的路径，而它**必须由本机
+#: 回答** —— 把「你在干什么」发给云端 agent 是荒谬的：它不知道，而且答它还要再等一轮。
+#:
+#: 边界比 `is_dismissal` 更要紧，因为这几个词的日常用法多：
+#: 「这个项目进度怎么样」是在问一个**项目**，得派给 agent；「你进度怎么样」问的是助手自己。
+#: 所以带主语的那些只认第二人称，不带主语的（「进度呢」「还要多久」）才无条件收。
+_PROGRESS_PATTERNS = (
+    # 你/现在 + 进度/在干什么/做到哪了
+    r"(?:你|您|现在|目前)?\s*(?:的)?\s*(?:进度|進度|进展|進展)\s*(?:怎么样|怎麼樣|如何|呢|了)*",
+    r"(?:你|您)\s*(?:现在|目前)?\s*(?:在)?(?:干|做|忙)\s*(?:什么|啥|什麼)\s*(?:呢|了)*",
+    r"(?:做|跑|处理|處理)\s*(?:到|得)\s*(?:哪|怎么样|怎麼樣)\s*(?:了|儿|兒)*",
+    r"(?:还要|還要|还得|還得|要)\s*(?:等)?\s*(?:多久|多长时间|多長時間)\s*(?:呢|啊)*",
+    r"(?:好了吗|好了沒|好了没|完成了吗|完成了嗎|弄好了吗|弄好了嗎|搞定了吗|搞定了嗎)",
+    r"(?:什么情况|什麼情況|怎么样了|怎麼樣了)",
+    # 英文侧
+    r"(?:status|progress|any\s+update|how(?:'?s|\s+is)\s+it\s+going|are\s+you\s+done|what\s+are\s+you\s+doing)\s*\??",
+)
+
+_PROGRESS_RULES = tuple(
+    re.compile(
+        rf"\A{_LEAD_IN}{_POLITE}(?:{body})\s*[。．.!！?？~…、,，]*\Z",
+        re.IGNORECASE | re.UNICODE,
+    )
+    for body in _PROGRESS_PATTERNS
+)
+
+
+def is_progress_query(text: str) -> bool:
+    """这一句是「你现在做到哪了」而不是一个新请求。
+
+    纯函数，和 ``is_dismissal`` 同一个姿态。**整句锚定**：「这个项目的进度怎么样」不匹配
+    （它带了一个宾语，要问的是那个项目），而「进度怎么样了」匹配。
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return any(rule.match(stripped) for rule in _PROGRESS_RULES)
+
+
 class RuleBasedIntentResolver:
     """Keyword and regex matching, with the patterns above baked in.
 

@@ -41,7 +41,7 @@ from core.desktop_bridge import DesktopBridge, DesktopBridgeError, find_desktop_
 from core.dispatch import DefaultAggregator, DefaultRouter, Dispatcher, DispatchResult
 from core.dispatch.breaker import CircuitBreaker
 from core.dispatch.contract import Intent
-from core.dispatch.intent import RuleBasedIntentResolver, is_dismissal
+from core.dispatch.intent import RuleBasedIntentResolver, is_dismissal, is_progress_query
 from core.events import AGENT_SCHEMA_PATH, build_event, validate_event
 from core.memory import open_memory
 from core.models_config import active_llm, load_models_config
@@ -174,6 +174,12 @@ class VoiceRuntime:
     _started: bool = field(default=False, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _active_task_id: str | None = field(default=None, init=False, repr=False)
+    #: 现在手上那件活（``None`` = 空闲）。「进度怎么样了」读它。
+    #: 在派发**之前**写：派发是阻塞的，写在之后就永远等不到那一行。
+    _inflight: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    #: 上一件做完（或被打断）的活的快照。被打断之后问「刚才那个怎么了」是最自然的追问，
+    #: 而那时 ``_inflight`` 已经空了 —— 没有这一份，答案只能是「现在没事在做」。
+    _last_done: dict[str, Any] | None = field(default=None, init=False, repr=False)
 
     # ------------------------------------------------------------------- wiring
 
@@ -431,12 +437,21 @@ class VoiceRuntime:
         # 判定在 core/dispatch/intent.py 的 is_dismissal（纯函数、整句锚定）。
         if is_dismissal(text):
             return self._dismiss(text)
+        # 「进度怎么样了」—— 问的是**手上这件事**，本机答，不派发。
+        #
+        # 把「你在干什么」发给云端 agent 是荒谬的：它不知道，而且答它还要再等一轮 ——
+        # 而这句话的全部意义就是「我不想再等了，先告诉我情况」。
+        if is_progress_query(text):
+            return self._report_progress(text)
         self.plugin.submit_text(text)
         self.turns += 1
         task = Task(id=f"t-{self.turns}", text=text, session_id=self.session_id)
         self.log("turn", f"第 {self.turns} 轮：{text[:120]}", turn=self.turns, text=text)
         self._remember_facts(text)
         self._active_task_id = task.id
+        # 「进度怎么样了」要答得出来，所以现在手上是什么活得被记下来。**在派发之前记**：
+        # 派发是阻塞的，记在之后就永远等不到那一行。
+        self._inflight = {"task": task.id, "text": text, "started": time.monotonic()}
         speaker = self.effective_speaker
         try:
             try:
@@ -454,6 +469,14 @@ class VoiceRuntime:
                 return result
         finally:
             self._active_task_id = None
+            # 手上这件事结束了。**留一份快照**（`_last_done`）给「进度怎么样」用 ——
+            # 被打断之后问「刚才那个怎么了」是最自然的一次追问，而那时 `_inflight` 已经空了。
+            if self._inflight is not None:
+                self._last_done = {
+                    **self._inflight,
+                    "elapsed_s": round(time.monotonic() - float(self._inflight["started"]), 1),
+                }
+                self._inflight = None
 
         try:
             self._speak_and_follow_up(self._spoken(result), speak=speak)
@@ -737,6 +760,69 @@ class VoiceRuntime:
         """
         capture = getattr(self.plugin, "audio_capture", None)
         return float(getattr(capture, "listen_grace_s", 0.0) or 0.0)
+
+    def _report_progress(self, text: str) -> DispatchResult:
+        """「进度怎么样了」：本机答，不派发。
+
+        ## 为什么这一句不能派出去
+
+        把「你在干什么」发给云端 agent 有两个问题，而第二个是致命的：它**不知道**（在流程
+        里它只看到自己那一轮），以及答它**还要再等一轮**。而这句话的全部意义就是「我不想
+        再等了，先告诉我情况」—— 用一次 2–20 秒的出网去回答它，正好把它问的那件事变得更糟。
+
+        ## 报什么
+
+        三种情况三句话，每一句都带**数字**：
+
+        * 手上有活 —— 报它是什么、跑了多少秒。
+        * 刚做完 / 刚被打断 —— 报那件事和它花了多久（`_last_done` 的快照）。
+        * 从来没有过 —— 如实说空闲，不编一个「正在处理」。
+
+        朗读期间可以打断（见 `capture.duck_for`），所以「打断 → 问进度」是一条真实路径，
+        而它现在有一个 0 秒、不出网的答案。
+        """
+        self.plugin.submit_text(text)
+        self.turns += 1
+        inflight = self._inflight
+        if inflight is not None:
+            waited = round(time.monotonic() - float(inflight.get("started", 0.0)), 1)
+            answer = f"还在做「{str(inflight.get('text', ''))[:24]}」，已经 {waited:g} 秒了"
+        elif self._last_done is not None:
+            done = self._last_done
+            answer = (
+                f"刚才那件「{str(done.get('text', ''))[:24]}」用了 "
+                f"{float(done.get('elapsed_s', 0.0)):g} 秒，现在没事在做"
+            )
+        else:
+            answer = "现在没有在做的事"
+        self.log(
+            "turn",
+            f"第 {self.turns} 轮：{text[:60]}（问进度，本机答，不派发）",
+            turn=self.turns,
+            text=text,
+            route="progress",
+        )
+        self._following_up = False
+        self._complete_and_watch_tts(answer)
+        # 问完进度**要接着听** —— 他问这一句多半是为了决定下一步做什么，
+        # 而让他为了说下一句再喊一次唤醒词，正是这个功能想解决的那种摩擦。
+        capture = getattr(self.plugin, "audio_capture", None)
+        resume = getattr(capture, "resume_listening", None)
+        if self.follow_up and callable(resume):
+            try:
+                self._following_up = bool(resume("progress"))
+            except Exception:  # noqa: BLE001 - 开不起来就退回「要再喊一次唤醒词」
+                self._following_up = False
+        if not self._following_up:
+            self._schedule_hide()
+        return DispatchResult(
+            route="progress",
+            # 和 `_dismiss` 同一个做法：答案走 chunks，因为 `DispatchResult.text` 是从
+            # chunks 派生的属性而不是字段 —— 直接传 `text=` 会是 TypeError。
+            chunks=(AgentChunk(kind="text", text=answer),),
+            reason="local progress report",
+            ok=True,
+        )
 
     def _dismiss(self, text: str) -> DispatchResult:
         """「退下吧」：应一句，然后**真的结束** —— 不派发、不再开窗口、球立刻收。

@@ -1290,3 +1290,76 @@ def test_a_barge_in_is_logged_as_an_interruption_not_a_plain_wake():
     runtime._woken("你好小沃", 0.62)
 
     assert any("打断了正在朗读的回答" in message for message in written), written
+
+
+# ------------------------------------------ 「进度怎么样了」本机答（2026-09-03）
+
+
+def test_a_progress_question_is_answered_locally_without_dispatching():
+    """一次派发是 2–20 秒和一次出网，而这句话的意思正是「我不想再等了」。"""
+    capture = BargeInCapture()
+    runtime = _talking_runtime(capture)
+    runtime.plugin.attach_tts(SimpleNamespace(
+        speak_segments=lambda chunks: None, is_stopped=lambda: False, stop=lambda: None
+    ))
+    dispatcher = runtime.dispatcher
+
+    result = runtime.say("进度怎么样了")
+
+    assert result.route == "progress"
+    assert dispatcher.calls == [], "问进度跑了一次派发"
+    assert result.ok is True
+
+
+def test_the_report_names_the_work_in_flight_with_a_number():
+    """报进度不能只说「在忙」—— 带一个秒数才是可行动的。"""
+    runtime = _talking_runtime(BargeInCapture())
+    runtime.plugin.attach_tts(SimpleNamespace(
+        speak_segments=lambda chunks: None, is_stopped=lambda: False, stop=lambda: None
+    ))
+    runtime._inflight = {"task": "t-1", "text": "把这个仓库的测试跑一遍", "started": 0.0}
+
+    result = runtime.say("进度怎么样了")
+
+    assert "把这个仓库的测试跑一遍" in result.text
+    assert "秒" in result.text
+
+
+def test_after_a_turn_the_report_falls_back_to_the_last_one():
+    """被打断之后问「刚才那个怎么了」是最自然的追问，而那时手上已经没活了。
+    没有这份快照，答案只能是「现在没事在做」—— 一句正确但没用的话。"""
+    runtime = _talking_runtime(BargeInCapture())
+    runtime.plugin.attach_tts(SimpleNamespace(
+        speak_segments=lambda chunks: None, is_stopped=lambda: False, stop=lambda: None
+    ))
+
+    runtime.say("讲个笑话")
+    result = runtime.say("进度怎么样了")
+
+    assert "刚才" in result.text and "讲个笑话" in result.text
+
+
+def test_an_idle_runtime_does_not_invent_work():
+    runtime = _talking_runtime(BargeInCapture())
+    runtime.plugin.attach_tts(SimpleNamespace(
+        speak_segments=lambda chunks: None, is_stopped=lambda: False, stop=lambda: None
+    ))
+
+    result = runtime.say("你在干什么")
+
+    assert result.text == "现在没有在做的事"
+
+
+def test_asking_for_progress_keeps_the_microphone_open():
+    """他问这一句多半是为了决定下一步做什么。让他为了说下一句再喊一次唤醒词，
+    正是这个功能想解决的那种摩擦。"""
+    capture = BargeInCapture()
+    runtime = _talking_runtime(capture)
+    runtime.plugin.attach_tts(SimpleNamespace(
+        speak_segments=lambda chunks: None, is_stopped=lambda: False, stop=lambda: None
+    ))
+
+    runtime.say("进度怎么样了")
+
+    assert capture._listening is True
+    assert runtime._following_up is True
