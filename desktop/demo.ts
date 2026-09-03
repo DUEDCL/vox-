@@ -6,7 +6,7 @@
 
    **没有待机态**：未唤醒 = `hidden` = 不画。所以「收起」之后画布是空的，不是暗着的球。 */
 import {
-  loadSheets, newMotion, setState, stepMotion, drawOrb, lookOf,
+  loadSheets, newMotion, setState, stepMotion, drawOrb, lookOf, thinkingBoostOf,
   type SeqState, type Sheets, type Motion,
 } from './src/sequence';
 import { BotRenderer, type BotState } from './src/bot-render';
@@ -175,7 +175,7 @@ function tick(now: number): void {
       `画布     ${cv.width}×${cv.height}   ${fps.toFixed(0)} FPS`,
     ] : [
       `态       ${m.state}${m.w < 1 ? `  ← ${m.prev} (${(m.w * 100) | 0}%)` : ''}`,
-      `序列     ${lk.sheet}  ×${lk.rate.toFixed(2)}${m.state === 'thinking' ? ` ×加速${(1 + 0.7 * Math.min(1, m.thinkingFor / 6)).toFixed(2)}` : ''}`,
+      `序列     ${lk.sheet}  ×${lk.rate.toFixed(2)}${m.state === 'thinking' ? ` ×加速${thinkingBoostOf(m.thinkingFor).toFixed(2)}` : ''}${lk.span > 0 ? `  窗 ${lk.from}..${lk.from + lk.span - 1}` : '  整段'}`,
       `亮度     ${lk.gain.toFixed(2)}   呼吸 ±${(lk.breath * 100).toFixed(1)}% @ ${lk.breathHz.toFixed(2)} rad/s`,
       `语义色   ${lk.tint ?? '素材原色（六片各自的簇色）'}`,
       `音量     ${amp.toFixed(2)}${autoEl.checked && m.state === 'speaking' ? '（自动）' : ''}`,

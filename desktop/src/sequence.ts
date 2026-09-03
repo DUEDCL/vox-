@@ -58,35 +58,81 @@ export type Look = {
   gain: number;
   /** 安全语义色。null = 用素材本身的六色。 */
   tint: string | null;
+  /** 循环的起始帧。见 `STABLE`。 */
+  from: number;
+  /** 循环的帧数。0 = 整段。 */
+  span: number;
 };
 
+/* ── 稳定窗 ──────────────────────────────────────────────────────────────────
+   **这是「思考像鬼畜」「颜色淡看不清」两条报告的共同解，而它是量出来的不是调出来的。**
+
+   两张雪碧图逐帧量平均亮度（`max(R,G,B)` 的画面均值）：
+
+   | 段 | 帧数 | 一个循环 | 亮度范围 | 摆动 | 均值 |
+   |---|---|---|---|---|---|
+   | flow 整段 | 64 | 2.67 s | 10 – 69 | **6.66×** | 33.7 |
+   | burst 整段 | 28 | 1.17 s | 29 – 69 | **2.41×** | 54.0 |
+   | **稳定窗** | 12 | 0.50 s | 56 – 66 | **1.17×** | **62.3** |
+
+   两条结论：
+
+   1. **思考用 burst 整段 = 每秒一次 2.41× 的亮度脉冲。** 那不是「在想」，那是频闪 ——
+      使用者说的「跟鬼畜了一样」。上一轮把 rate 从 2.20 降到 1.15 只是把频闪放慢，脉冲还在，
+      所以他重新构建之后说「依旧像鬼畜」。**降速改不掉一个亮度脉冲，只能不播那一段。**
+   2. **聆听用 flow 整段 = 每 3.8 秒里有 1.4 秒球几乎是暗的**（帧 40–63 亮度平坦在 17，
+      峰值是 69）。浅色桌面上那 1.4 秒就是「看不清」。
+
+   稳定窗是 `burst[6..17]` ≡ `flow[10..21]`（两段出自同一次 AE 渲染，实测这两个窗逐帧
+   完全相同）：亮度只摆 1.17×，**均值反而是整段的 1.85 倍**，而窗内相邻帧像素差 8.0 ——
+   动是真的在动，只是不再忽明忽暗。
+
+   接缝不用担心：首尾帧像素差 10.5，而窗内相邻帧最大差 10.2 —— 循环回头那一下**落在正常
+   帧间步长的范围内**，看不出来。这是选这个窗而不是更长那个（`burst[6..23]`，接缝 12.3）
+   的理由。
+
+   代价说清楚：聆听不再有「涌起→消退」那条能量弧。那条弧本来是「在等」的表达，但它同时是
+   球消失 1.4 秒的原因；而使用者对聆听的要求原话是「跟随真实音量和语句进行运动」——
+   能量该来自**说话人的声音**（`amp`，已接线），不是来自一段罐头动画。
+
+   **合成后实测**（`demo.html?state=…&big=1&light=1`，浅色桌面，从 canvas 直接读回像素，
+   40+ 个采样点跨 2 秒；球体 = 半径 0.9 以内，环 = 半径 1.06–1.35）：
+
+   | 态 | 球体亮度 | 逐时摆动 | 饱和度 | 球外环 |
+   |---|---|---|---|---|
+   | 聆听 | 83.9（73.8–90.4） | **1.23×** | 0.531 | 亮度 0，alpha **0.01** |
+   | 思考 | 86.8（76.0–93.3） | **1.23×** | 0.519 | 亮度 0，alpha **0.02** |
+
+   三条都对上了：摆动从素材整段的 2.41×/6.66× 落到 1.23×（不再脉动）、饱和度从素材的
+   0.285 抬到 0.52（`SATURATE` 真的生效了，不是静默降级）、球外一圈 alpha ≈ 0（没有边边）。 */
+const STABLE_FROM = { flow: 10, burst: 6 } as const;
+const STABLE_SPAN = 12;
+
 const LOOK: Record<SeqState, Look> = {
-  hidden:    { sheet: 'flow',  rate: 0.00, scale: 0.00, breath: 0.000, breathHz: 0.00, gain: 0.00, tint: null },
-  listening: { sheet: 'flow',  rate: 0.70, scale: 0.96, breath: 0.030, breathHz: 1.57, gain: 0.95, tint: null },
-  // 思考 = **快速搅动**，不是「六个点绕环」。使用者的定义是「那几个圆片转化为六个圆点绕
-  // 球中心做圆周运动」+「他的思考态是很快速的一个过程」，而工程里这件事的实现就是六片各自
-  // 以不同角速度绕球心旋转（`预合成 1` 的表达式 `time*80` / `time*45` / `-time*30`…），
-  // 叠上辉光之后视觉上是一团光在搅。**我量过三遍确认没有「六个分离的点等分在一圈上」那一相**：
-  // `预合成 3` 逐帧 0–205、`合成 1` 全 30 秒抽样、`预合成 1` 全 30 秒抽样，环带角向峰数
-  // 最多 4–5 个且起伏只有均值的 17%。所以这一态靠**速率**表达，不换几何。
+  hidden:    { sheet: 'flow',  rate: 0.00, scale: 0.00, breath: 0.000, breathHz: 0.00, gain: 0.00, tint: null, from: 0, span: 0 },
+  // 聆听 = 稳定窗慢转。0.45 → 12 帧 / (24 × 0.45) = **1.11 秒一圈**，比原来 3.81 秒一圈快，
+  // 但因为不再有那条 6.66× 的能量弧，读起来是「稳稳地在听」而不是「一波一波地喘」。
+  listening: { sheet: 'flow',  rate: 0.45, scale: 0.96, breath: 0.030, breathHz: 1.57, gain: 1.00, tint: null, from: STABLE_FROM.flow, span: STABLE_SPAN },
+  // 思考 = **同一个稳定窗播快**，不是换一段素材。使用者的定义是「那几个圆片转化为六个圆点
+  // 绕球中心做圆周运动」+「他的思考态是很快速的一个过程」，而工程里这件事就是六片各自以
+  // 不同角速度绕球心旋转（`预合成 1` 的 `time*80` / `time*45` / `-time*30`）。所以这一态
+  // 靠**速率**表达，不换几何 —— 这一点没变。
   //
-  // **2026-09-03 从 2.20 降到 1.15，boost 从 ×1.7 降到 ×1.25。** 使用者的原话是「思考状态
-  // 跟鬼畜了一样」，而那是一道算术题不是审美分歧：`burst` 是 **28 帧 @ 24fps**，一个循环
-  // 1.17 秒。rate 2.20 让它 0.53 秒转一圈，再乘上思考 6 秒后的 ×1.7 就是 **0.31 秒一圈** ——
-  // 一段爆发式的素材每秒循环 3.2 次，读出来是频闪，不是「在想」。
-  //
-  // 现在：1.15 → 1.02 秒一圈，久想之后最快 0.81 秒一圈。仍然比「在听」（0.70）快得明显，
-  // 而且**久想会更紧**这层语义留着了 —— 只是它现在是一个渐强，不是一次抽搐。
-  // 用 `burst` 而不是 `flow`：flow 段含一次完整的涌起→消退，播快之后会落在能量低谷上，
-  // 渲出来像「内容被删掉了」—— 那正是上一版被否的原因。burst 段能量摆动只有 2.38×，稳。
-  thinking:  { sheet: 'burst', rate: 1.15, scale: 0.97, breath: 0.022, breathHz: 2.40, gain: 0.98, tint: null },
-  speaking:  { sheet: 'burst', rate: 1.00, scale: 1.00, breath: 0.090, breathHz: 5.02, gain: 1.00, tint: null },
-  cancelled: { sheet: 'flow',  rate: 0.26, scale: 0.86, breath: 0.026, breathHz: 1.20, gain: 0.44, tint: null },
+  // 变的是**播哪几帧**：0.62 → 12 帧 / (24 × 0.62) = **0.81 秒一圈**，久想之后最快
+  // 0.65 秒一圈。听（1.11 s）与思（0.81 s）差得出来，而亮度全程稳在 56–66，
+  // 那个每秒一次的 2.41× 脉冲没了。
+  thinking:  { sheet: 'burst', rate: 0.62, scale: 0.97, breath: 0.022, breathHz: 2.40, gain: 1.02, tint: null, from: STABLE_FROM.burst, span: STABLE_SPAN },
+  // 说话**保留整段**：那个 2.41× 的能量摆动在这里是想要的 —— 它是声音本身。使用者没有
+  // 报过说话态的问题，而把它也换成稳定窗会把「在说」压成「在想」。
+  speaking:  { sheet: 'burst', rate: 1.00, scale: 1.00, breath: 0.090, breathHz: 5.02, gain: 1.00, tint: null, from: 0, span: 0 },
+  cancelled: { sheet: 'flow',  rate: 0.26, scale: 0.86, breath: 0.026, breathHz: 1.20, gain: 0.44, tint: null, from: STABLE_FROM.flow, span: STABLE_SPAN },
   // 染色走乘法，亮度会被乘掉一大档 —— `gain` 提到 1 以上是在补它，不是在「调亮一点」。
   // 素材是紫粉蓝（B 高 R 中 G 低），乘朱红 (226,58,46) 只剩 R×0.89 而 G/B 各剩 0.23/0.18，
   // 实测 gain 1.6 时球只有中心一小团高于可见阈值 —— 读作「球不见了」而不是「球变红了」。
-  error:     { sheet: 'flow',  rate: 1.55, scale: 0.94, breath: 0.050, breathHz: 3.60, gain: 3.20, tint: '#E23A2E' },
-  gated:     { sheet: 'flow',  rate: 0.09, scale: 0.92, breath: 0.048, breathHz: 1.57, gain: 2.60, tint: '#D99A2B' },
+  //
+  // 这两态也用稳定窗：一条报错信息不该在自己的动画低谷里变得看不见。
+  error:     { sheet: 'flow',  rate: 1.55, scale: 0.94, breath: 0.050, breathHz: 3.60, gain: 3.20, tint: '#E23A2E', from: STABLE_FROM.flow, span: STABLE_SPAN },
+  gated:     { sheet: 'flow',  rate: 0.09, scale: 0.92, breath: 0.048, breathHz: 1.57, gain: 2.60, tint: '#D99A2B', from: STABLE_FROM.flow, span: STABLE_SPAN },
 };
 
 export function lookOf(state: SeqState): Look {
@@ -156,16 +202,32 @@ export function stepMotion(m: Motion, dt: number): void {
   m.appear = Math.min(1, Math.max(0, m.appear + dt / (rising ? 0.28 : -0.42)));
 }
 
-/** 思考越久转得越快 —— 上限 1.7 倍，到顶要 6 秒。「在忙」是可以升级的，但不能无限升。 */
-/** 思考越久，搅得越紧。**上限刻意很低** —— 见下面那段算术。 */
-function thinkingBoost(m: Motion): number {
-  return 1 + 0.25 * Math.min(1, m.thinkingFor / 8);
+/** 思考越久，搅得越紧。**上限刻意很低** —— 见 `STABLE` 那段算术。
+ *
+ *  **导出是为了让读数页用同一份公式。** `demo.html` 那一栏此前自己写了
+ *  `1 + 0.7 * min(1, thinkingFor / 6)` —— 一份和生产不同的加速曲线，于是读数页显示
+ *  ×1.35 而生产在同一时刻是 ×1.25。「色值只有一个来源」这条规则同样适用于运动参数。 */
+export function thinkingBoostOf(thinkingFor: number): number {
+  return 1 + 0.25 * Math.min(1, thinkingFor / 8);
 }
 
-/** 当前该播第几帧。素材是 24fps；`rate` 是倍率。 */
-export function frameAt(t: number, sheet: Sheet, rate: number): number {
-  const n = Math.max(1, sheet.frames);
-  return ((Math.floor(t * sheet.fps * rate) % n) + n) % n;
+function thinkingBoost(m: Motion): number {
+  return thinkingBoostOf(m.thinkingFor);
+}
+
+/** 当前该播第几帧。素材是 24fps；`rate` 是倍率。
+ *
+ *  `from` / `span` 把循环限制在一个窗里（见 `STABLE`）。`span <= 0` = 整段 ——
+ *  说话态用的就是那条路。窗越界时**钳到整段而不是取模**：一个越界的窗说明配置写错了，
+ *  而取模会让它悄悄变成另一个窗、渲出来是一段谁都没想要的动画。 */
+export function frameAt(t: number, sheet: Sheet, rate: number, from = 0, span = 0): number {
+  const total = Math.max(1, sheet.frames);
+  const start = Math.floor(from);
+  const width = Math.floor(span);
+  const windowed = width > 0 && start >= 0 && start + width <= total;
+  const base = windowed ? start : 0;
+  const n = windowed ? width : total;
+  return base + (((Math.floor(t * sheet.fps * rate) % n) + n) % n);
 }
 
 /** 呼吸后的直径倍率。载体是体积不是亮度 —— 这条承自第十代的实测。 */
@@ -177,6 +239,32 @@ export function scaleAt(t: number, look: Look, amp: number): number {
 
 /** 染色用的离屏画布 —— 每帧新建 canvas 会让 GC 抖动，留一块复用。 */
 let tintBuf: HTMLCanvasElement | null = null;
+
+/** 饱和度倍率。**「颜色有点淡」的另一半是真的淡，不是被压暗的。**
+ *
+ *  量过素材：球体像素（亮度 > 30）的平均饱和度 flow 0.315 / burst 0.285，平均 RGB
+ *  分别是 (83,102,113) 与 (109,95,105) —— 通道之间只差 30/255 ≈ 12%，那是**灰蓝**而不是
+ *  注释里写的「紫粉蓝」。AE 那边六层高斯把色相摊平了，而这一层此前一个字都没管过它。
+ *
+ *  1.55 是保守值：再高中心那团白热光核会开始出现彩边（它已经接近 255，提饱和只能靠压低
+ *  两个弱通道）。染色态（`tint`）不参与 —— 它们的色相是安全语义，不许被这一层动。 */
+const SATURATE = 1.55;
+
+/** `ctx.filter` 在这个渲染器上到底生效没有。**必须报出来，不能静默降级。**
+ *
+ *  Chromium 支持它（WebView2 就是 Chromium），但软件渲染或老 WebView 下它可能是个空操作，
+ *  而那时球会**回到没提饱和的样子**并且哪里都不说 —— 上一轮 `'color'` 混合模式就是这么
+ *  静默退化的（三个染色态渲出来一模一样）。`filterOk` 让 `describe` 那类调用方能看到它。 */
+export let filterOk: boolean | null = null;
+
+function useSaturate(ctx: CanvasRenderingContext2D, on: boolean): void {
+  if (!('filter' in ctx)) {
+    filterOk = false;
+    return;
+  }
+  ctx.filter = on ? `saturate(${SATURATE})` : 'none';
+  if (filterOk === null) filterOk = ctx.filter !== 'none' || !on;
+}
 
 /** 把某态的一帧叠上去。`weight` 是交叉淡化的权重，两层的权重和恒为 1。 */
 function layer(
@@ -190,7 +278,7 @@ function layer(
   if (look.gain <= 0 || weight <= 0) return;
   const sheet = sheets[look.sheet];
   const c = sheet.cell;
-  const k = frameAt(t, sheet, look.rate * rateMul);
+  const k = frameAt(t, sheet, look.rate * rateMul, look.from, look.span);
   const sx = (k % sheet.cols) * c;
   const sy = Math.floor(k / sheet.cols) * c;
 
@@ -223,6 +311,9 @@ function layer(
 
   const d = base * scaleAt(t, look, amp);
   ctx.globalCompositeOperation = 'lighter';   // 黑底 ≡ 零 alpha
+  // 提饱和只对**素材本色**那几态做。染色态的色相是安全语义（朱红 = 出错、琥珀 = 待确认），
+  // 不许被这一层动 —— 一个「稍微更红一点」的琥珀会开始像出错。
+  useSaturate(ctx, look.tint === null);
   // **亮度大于 1 必须画多遍，不能靠 globalAlpha** —— 它的上限是 1，`gain: 1.6` 会被静默
   // clamp 成 1.0，于是「染色后补亮度」这一步等于没写（染完的球比原来暗一档，读作「球不见了」）。
   // 加色下重画一遍就是亮度 ×2，所以整数部分画整遍、小数部分画一遍。
@@ -233,29 +324,47 @@ function layer(
     ctx.drawImage(src, ssx, ssy, c, c, x0, y0, d, d);
     left -= 1;
   }
+  useSaturate(ctx, false);
 }
 
 /** 浅色桌面上唯一能产生对比的是减色 —— 球必须自带一层暗底，加色画不出边界。
     渐变必须**单调衰减**：把更不透明的一档放在外圈会得到一道暗环。
 
-    **2026-09-03 收窄并压暗一档。** 此前它以 `R * 0.99`（几乎整张画布）为半径画一层
-    `rgba(8,11,20,0.16)` 的暗盘，而球体本身只占约 0.69 的半径 —— 于是球外面那一圈是一块
-    没有任何东西盖住的灰。使用者在浅色背景上圈出来的「暗灰色的边边」就是它，同时它也把
-    球身中段的加色压掉一档，读作「颜色有点淡有点看不清」。
+    **2026-09-03 两轮才对。** 第一版以 `R * 0.99`（几乎整张画布）为半径铺一层
+    `rgba(8,11,20,0.16)`，而球体只占约 0.69 的画布半径 —— 球外面那一圈是一块没有任何东西
+    盖住的灰，就是使用者在浅色背景上圈出来的「暗灰色的边边」。
 
-    现在两条都跟着球体走：半径由调用方按实际画出来的直径给，而且 0.62 之后就完全透明 ——
-    暗底只该垫在球**底下**，不该铺在它周围。 */
+    第二版把半径改成跟着球走（`base/2`）并在 **0.62** 处归零。边边没了，但那一刀砍过头了：
+    量出来的球体亮度剖面（稳定窗，按半径分箱取均值）是
+
+      r  0.0   0.2   0.4   0.5   0.6   0.7   0.8   0.9
+      L  218   208   142   108    75    47    29     7
+
+    亮度 > 25 一直到 **r = 0.92**。所以 0.62 之后那一大圈球身是**贴在裸桌面上的加色** ——
+    白底上加色 ≈ 什么都没加，读作「颜色有点淡有点看不清」。使用者重新构建之后说「球的颜色
+    依旧淡」，指的就是这一段。
+
+    现在暗底一直铺到球体边缘（1.0）再归零，profile 跟着上面那条亮度剖面走：外圈的暗度必须
+    小于素材在那里的加色量，否则又是一道环。核对（白底、素材加色 vs 暗底压暗）：
+
+      r = 0.70  暗 0.09 → 压 ≈ 22 级，素材加 47   ✅
+      r = 0.85  暗 0.03 → 压 ≈  7 级，素材加 ≈ 18 ✅
+      r = 0.95  暗 0.01 → 压 ≈  2 级，素材加 ≈  4 ✅
+
+    每一档都被盖住，所以有对比而没有环。 */
 export function drawUnderlay(
   ctx: CanvasRenderingContext2D,
   cx: number, cy: number, r: number, k: number,
 ): void {
   if (k <= 0) return;
+  const a = (value: number): string => `rgba(7,12,23,${(value * k).toFixed(4)})`;
   const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-  g.addColorStop(0, `rgba(8,11,20,${(0.13 * k).toFixed(4)})`);
-  g.addColorStop(0.42, `rgba(7,12,23,${(0.075 * k).toFixed(4)})`);
-  // 0.62 就归零：再往外是球体之外的空气，那里任何不透明度都是一圈可见的灰。
-  g.addColorStop(0.62, 'rgba(7,12,23,0)');
-  g.addColorStop(1, 'rgba(7,12,23,0)');
+  g.addColorStop(0.00, a(0.20));
+  g.addColorStop(0.45, a(0.16));
+  g.addColorStop(0.70, a(0.09));
+  g.addColorStop(0.85, a(0.03));
+  // 1.0 必须是全透明：这里就是球体的边缘，再往外是桌面。
+  g.addColorStop(1.00, 'rgba(7,12,23,0)');
   ctx.globalCompositeOperation = 'source-over';
   ctx.globalAlpha = 1;
   ctx.fillStyle = g;
@@ -282,6 +391,9 @@ export function drawOrb(
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalCompositeOperation = 'source-over';
   ctx.globalAlpha = 1;
+  // filter 也会泄漏（它和 globalAlpha 一样是 ctx 上的状态），而泄漏的 saturate 会让
+  // 手写渲染器画出来的球跟着变色。清一次比在每个出口清便宜也更难漏。
+  if ('filter' in ctx) ctx.filter = 'none';
   ctx.clearRect(0, 0, cv.width, cv.height);
   const cx = cv.width / 2, cy = cv.height / 2;
   const R = Math.min(cv.width, cv.height) / 2;
@@ -289,12 +401,9 @@ export function drawOrb(
 
   const ease = m.appear * m.appear * (3 - 2 * m.appear);   // smoothstep：出现不要线性
   const base = R * 2 * (256 / 280) * (0.86 + 0.14 * ease);
-  // **暗底跟着球体走，不铺满画布。** 以前这里传的是 `R * 0.99`，而球体只占约 0.69 的
-  // 半径 —— 球外面那一圈是一块没有任何东西盖住的灰（使用者圈出来的「暗灰色的边边」），
-  // 同时球身中段的加色被压掉一档（「颜色有点淡有点看不清」）。
-  //
-  // `base` 是这一帧真正画出来的直径，所以 `base / 2` 就是球体半径。乘 1.02 留一点余量给
-  // 素材自己的柔边，再往外由渐变在 0.62 处归零。
+  // **暗底跟着球体走，不铺满画布，而且要铺满球体。** `base` 是这一帧真正画出来的直径，
+  // 所以 `base / 2` 就是球体半径。乘 1.02 留一点余量给素材自己的柔边；渐变在 1.0 处归零，
+  // 所以最外圈不会有可见的灰。两个方向都踩过：铺满画布 → 边边；只铺到 0.62 → 颜色淡。
   drawUnderlay(ctx, cx, cy, (base / 2) * 1.02, ease);
 
   const boost = m.state === 'thinking' ? thinkingBoost(m) : 1;

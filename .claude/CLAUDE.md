@@ -49,7 +49,7 @@
 | `core/channels/` `config/channels.toml` | `pytest tests/test_channels.py tests/test_channel_crypto.py -q` | **41 passed**（channels 26 + crypto 15；crypto 那 15 条钉在 FIPS-197 官方向量上，因为那份 AES 是我们自己写的） |
 | `core/session_bridge.py` | `pytest tests/test_session_bridge.py tests/test_plugin_tools.py -q` | 全绿 |
 | `desktop/src/` | `cd desktop && npm run build` | tsc + vite 通过 |
-| `desktop/src/sequence.ts` `scripts/build_orb_assets.py` `desktop/public/orb/` | 上面那条 + **六态渲染取证**（Edge headless 打 `demo.html?state=<态>&big=1&t=1.4`，深浅两底各一轮） | 六态互不相同（听/思/说三档能量 + 朱红 + 琥珀 + 暗）· 球外能透出桌面纹理（雪碧图必须带 alpha）· 中心是白热光核不是黑洞 · 生产页 `index.html?state=idle` **画布全空** |
+| `desktop/src/sequence.ts` `scripts/build_orb_assets.py` `desktop/public/orb/` | 上面那条 + **六态渲染取证**（`preview_start desktop-ui` → 打 `demo.html?state=<态>&big=1&light=1` → `preview_eval` 从 canvas 读回像素量三个数，深浅两底各一轮） | 六态互不相同（听/思/说三档能量 + 朱红 + 琥珀 + 暗）· **逐时亮度摆动 < 1.3×**（≥ 2× 就是使用者说的「鬼畜」）· **球体饱和度 > 0.45**（素材本身只有 0.285，低于 0.45 说明 `SATURATE` 没生效）· **球外环 alpha ≈ 0**（不为零就是那圈「暗灰色的边边」）· 中心是白热光核不是黑洞 · 生产页 `index.html?state=idle` **画布全空** |
 | `desktop/src/bot-render.ts` `desktop/src/bot/`（第十二代 bloub） | `cd desktop && npm run build` + **六态渲染取证**（Edge headless 打 `demo.html?renderer=bot&state=<态>&t=1.4&big=1`，深浅两底各一轮） | 六态互不相同（`render_bot_to_text` 的包围盒/眼数/点数逐对不同）· `?state=idle` **画布亮像素 0** · thinking 三点**分开**（挤成两团 = `settle` 的起点错了） · 深浅两底球都可读 |
 | `desktop/src/core.ts`（手写渲染器，现为 fallback） | 上面那条 + 逐帧对照（`replay.html`）+ 12 格并排（`side.html`）+ 八格对照页 | 只需保证退路不炸：雪碧图缺失时球仍然画得出来 |
 | `core/audio/asr.py`（端点静音时长） | `pytest tests/test_sherpa_provider.py -q` | **8 passed**（含「不许在没有新测量前调小 rule2」那条） |
