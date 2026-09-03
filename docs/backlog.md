@@ -118,15 +118,24 @@ VoxCordAdapter().load()
 ## B7. `models.toml` 的 `active` 不能从控制台切换
 
 **发现日期**：2026-08-28
-**状态**：与界面保持一致（界面明写「保存后不会自动切换生效」）
+**状态**：**已了结（2026-09-03）**
 
-`PUT /api/models` 只写 `profiles.*` 下的五个字段，不写顶层 `active`。所以一套新方案能
-从页面上建好、填好、探通，但**切换生效仍然要手动改一行**。页面上如实写了这件事
-（`mp-note`：「你正在看的是另一套，保存后不会自动切换生效」）。
+原来的立场是「先让读侧存在，再让切换有意义；否则那颗按钮改的是一个没人读的字段」。
+两件事让它站不住了：
 
-不做的理由是范围：切 `active` 等于切整个语音栈用哪套模型，而目前**没有任何运行时代码
-读 `models.toml`** —— 语音栈仍然由 `config/voice.toml` + 四个环境变量决定。先让读侧存在，
-再让切换有意义；否则那颗按钮改的是一个没人读的字段。
+1. **ADR 008 之后 LLM 那一栏真的有读侧了** —— `core/agents/` 按 `models.toml` 的 active
+   profile 组装推理端点。
+2. **ADR 009 之后 ASR 也上云了**，于是 `models.toml` 与 `config/voice.toml` 两处各说一句
+   「云端识别用哪个模型」，而只有后者算。「两处必须一致」从 2026-08-29 就写在注释里，
+   靠的是人记得改两个地方 —— 那正是这个项目自己定义的最坏一类缺陷。
 
-**做的时候需要什么**：一个真的按 `models.toml` 组装 ASR/TTS/LLM 的读侧（现在只有
-`load_models_config` 一个 loader），然后 `active` 才值得有一颗按钮。
+做法不是「造一个按 models.toml 组装整套模型的读侧」，而是**写穿**：`POST /api/models/active`
+写顶层 `active`（`core/models_config.py` 的 `write_active`），并把这套方案的 `asr`/`tts` 的
+`provider` / `model` / `voice` 用行级写入器推进 `voice.toml`（`voice_overrides`）。分岔在
+「模型配置」那一栏报出来。
+
+**刻意没做的两件**：
+- `key_env` 不同步，只报。让一次网页点击改「去读哪个环境变量」等于让网页决定把哪个凭据
+  发给百炼 —— 与 `scripts/audit_config_surface.py` 的 WONT 同一条理由。
+- 认不出的 provider（例如 OpenAI 兼容的识别端点）**不猜**，报出来。猜一个 `dashscope`
+  会让人以为配置生效了，而请求形状根本不对。

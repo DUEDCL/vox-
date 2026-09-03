@@ -835,6 +835,16 @@ details[open] > summary::before { content: "▾ "; }
         <button id="mp-del" class="danger" data-od-id="models-delete">删除</button>
       </div>
       <p class="note" id="mp-note"></p>
+      <!-- 「启用」是这一栏此前唯一缺的动作。能配十套方案但不能切换，等于只能配一套 ——
+           在它之前 mp-note 那一行写的是「保存后不会自动切换生效」，而切换只能手改文件。
+           它同时把这套方案的 ASR/TTS 推进 config/voice.toml：运行时读的是那个文件，
+           只改 active 的话语音那两条路一个字都不变。 -->
+      <div class="line">
+        <button id="mp-activate" class="primary" data-od-id="models-activate">启用这一套</button>
+        <span class="note" style="margin:0" id="mp-activate-note"></span>
+      </div>
+      <p class="warn" id="mp-diverged" role="status" hidden></p>
+      <p class="err" id="mp-activate-error" role="alert" hidden></p>
     </div>
 
     <div id="mp-kinds" class="stack"></div>
@@ -2273,8 +2283,37 @@ function renderModels() {
   }
   $("mp-note").textContent =
     `生效的是 active = "${models.active}"。` +
-    (currentProfile === models.active ? "你正在看的就是它。" : "你正在看的是另一套，保存后不会自动切换生效。");
+    (currentProfile === models.active ? "你正在看的就是它。" : "你正在看的是另一套 —— 保存只写文件，要它生效得点「启用这一套」。");
   $("mp-save-note").textContent = modelsLive ? "写回 config/models.toml，重启生效。" : "后端未就绪，这颗按钮会报错。";
+
+  /* 启用按钮：正在看的就是生效那套时没什么可切的，禁掉并说明。 */
+  const isActive = currentProfile === models.active;
+  const activate = $("mp-activate");
+  activate.disabled = isActive || !modelsLive;
+  $("mp-activate-note").textContent = !modelsLive
+    ? "后端未就绪。"
+    : isActive
+      ? "它已经是生效的那一套了。"
+      : `把 active 指到 ${currentProfile}，并把它的 ASR / TTS 写进 config/voice.toml。重启生效。`;
+
+  /* 分岔警告。**运行时读 voice.toml，这一栏改 models.toml** —— 只有前者算，所以两处
+     不一致必须说出来，否则页面显示的模型名和实际在用的不是同一个。 */
+  const voice = models.voice || {};
+  const lines = [];
+  if (voice.error) lines.push(voice.error);
+  for (const row of voice.diff || []) {
+    lines.push(`${row.key}：config/voice.toml 是「${row.voice || "(空)"}」，这套方案写的是「${row.profile}」`);
+  }
+  for (const note of voice.notes || []) lines.push(note);
+  if (lines.length) {
+    /* 用「 · 」而不是换行：show() 写的是 textContent，而这几个 <p> 没有 white-space:pre-line，
+       换行会被折叠成空格 —— 那样读起来像一句跑不通的长句。 */
+    show($("mp-diverged"),
+      "运行时读的是 config/voice.toml，不是这一栏。当前不一致：" + lines.join(" · ") +
+      (isActive ? " · 点一次「启用这一套」就会把能同步的那几项写过去。" : ""), "warn");
+  } else {
+    show($("mp-diverged"), "");
+  }
 
   const host = $("mp-kinds");
   host.textContent = "";
@@ -2877,6 +2916,28 @@ $("mp-save").onclick = async (event) => {
   } catch (err) {
     show($("models-degraded"),
       `保存失败：${err.message}。` + (modelsLive ? "" : "后端的 models_update 还没实现，这是预期结果。"), "bad");
+  } finally {
+    button.disabled = false;
+  }
+};
+
+/* 启用一套方案。**两步一起做才叫切换** —— 后端写 active，并把这套的 ASR/TTS 推进
+   config/voice.toml（运行时读的是那个文件）。key_env 不推：它决定把哪个凭据发出去。 */
+$("mp-activate").onclick = async (event) => {
+  const button = event.currentTarget;
+  const target = currentProfile;
+  button.disabled = true;
+  show($("mp-activate-error"), "");
+  try {
+    const result = await api("/api/models/active", { method: "POST", body: { profile: target } });
+    const wrote = Object.keys(result.voice || {});
+    show($("models-degraded"),
+      `已启用 ${target}。` +
+      (wrote.length ? `同步进 config/voice.toml：${wrote.join("、")}。` : "voice.toml 没有需要改的。") +
+      "重启生效。", "good");
+    await loadModels();
+  } catch (err) {
+    show($("mp-activate-error"), `启用失败：${err.message}`, "bad");
   } finally {
     button.disabled = false;
   }

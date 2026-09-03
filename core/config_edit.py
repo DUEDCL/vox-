@@ -235,9 +235,15 @@ def set_scalars(
 ) -> dict[str, Any]:
     """Change existing keys in place, keeping every comment and blank line.
 
-    ``updates`` is keyed ``"section.key"``. ``validate`` is the config's own loader
+    ``updates`` is keyed ``"section.key"``, or just ``"key"`` for a key that sits
+    above the first ``[section]`` header. ``validate`` is the config's own loader
     -- it is handed the temporary file and may raise; nothing is moved into place
     if it does. Returns what changed, old value and new, for the audit line.
+
+    The top-level form exists for ``config/models.toml`` 的 ``active``：它就写在文件
+    最上面、不属于任何 section，而「切换生效的那一套方案」正是这一个键。此前这个函数在
+    ``not section`` 时直接跳过，所以那一行**改不了** —— 控制台因此只能新建方案不能启用，
+    页面上明写着「保存后不会自动切换生效」。
     """
     target = Path(path)
     if not target.is_file():
@@ -257,9 +263,10 @@ def set_scalars(
             section = header
             continue
         match = _ASSIGN.match(line)
-        if not match or not section:
+        if not match:
             continue
-        key = f"{section}.{_key_name(match.group('key'))}"
+        name = _key_name(match.group("key"))
+        key = f"{section}.{name}" if section else name
         if key not in pending:
             continue
         old_text, comment = _split_comment(match.group("rest"))

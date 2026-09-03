@@ -547,6 +547,160 @@ def test_a_new_profile_can_be_created_from_the_page(api, models_file):
     assert view["active"] == "local", "creating a profile must not switch the active one"
 
 
+def test_models_view_reports_where_the_profile_and_voice_toml_disagree(
+    runtime, config_dir, models_file
+):
+    """**运行时读 voice.toml，这一栏改 models.toml** —— 两处分岔时只有前者算。
+
+    TTS 那一栏的注释从 2026-08-29 就写着「两处必须一致」，而在这之前没有任何一层去保证它。
+    ASR 2026-09-03 上云之后同一个坑多了一个。
+    """
+    api = ConsoleApi(runtime, config_dir=config_dir)
+    voice = config_dir / "voice.toml"
+    voice.write_text(
+        voice.read_text(encoding="utf-8").replace(
+            'model = "qwen-audio-3.0-asr-flash"', 'model = "别的模型"', 1
+        ),
+        encoding="utf-8",
+    )
+    report = api.models_view()["voice"]
+    assert report["error"] == ""
+    diverged = {row["key"]: row for row in report["diff"]}
+    assert diverged["asr.model"]["voice"] == "别的模型"
+    assert diverged["asr.model"]["profile"] == "qwen-audio-3.0-asr-flash"
+    # 出厂配置里两处的 key_env 一致，所以**不该**有那条 note ——
+    # 一个永远亮的警告等于没有警告，使用者会学会忽略它，包括它真该亮那一次。
+    assert not [note for note in report["notes"] if "key_env" in note]
+
+
+def test_a_diverging_key_env_is_reported_but_never_synced(runtime, config_dir, models_file):
+    """两处指着不同的环境变量时必须说出来 —— 运行时读 voice.toml 那一个。
+
+    2026-09-01 的 TTS 401 就是这一类：`voice.toml` 的 `key_env` 指向 `VOX_DASHSCOPE_KEY`，
+    而那个变量里装的是中转站的 key。同步它是危险的（让网页选凭据），不报它是不可诊断的。
+    """
+    api = ConsoleApi(runtime, config_dir=config_dir)
+    voice = config_dir / "voice.toml"
+    voice.write_text(
+        voice.read_text(encoding="utf-8").replace(
+            'key_env = "VOX_ASR_KEY"', 'key_env = "VOX_SOMETHING_ELSE"', 1
+        ),
+        encoding="utf-8",
+    )
+    notes = api.models_view()["voice"]["notes"]
+    said = [note for note in notes if "asr.key_env" in note]
+    assert said, notes
+    assert "VOX_SOMETHING_ELSE" in said[0] and "VOX_ASR_KEY" in said[0]
+    assert "不从页面同步" in said[0]
+
+
+def test_activating_a_profile_pushes_its_asr_and_tts_into_voice_toml(
+    runtime, config_dir, models_file
+):
+    """两步一起做才叫「切换」。
+
+    只改 `active` 的话语音那两条路一个字都不变（运行时读 voice.toml），使用者会看到
+    「方案已切换」而听到的还是上一套的音色。
+    """
+    api = ConsoleApi(runtime, config_dir=config_dir)
+    api.models_update(
+        "allcloud", "asr",
+        {"provider": "custom", "base": "https://dashscope.aliyuncs.com/api/v1",
+         "proto": "dashscope", "model": "qwen-audio-3.0-asr-flash"},
+        "全云端",
+    )
+    api.models_update(
+        "allcloud", "tts",
+        {"provider": "custom", "base": "https://dashscope.aliyuncs.com/api/v1",
+         "proto": "dashscope", "model": "另一个合成模型", "voice": "另一个音色"},
+    )
+    assert api.models_view()["active"] == "local"
+
+    result = api.models_activate("allcloud")
+
+    assert result["restart_required"] is True
+    assert api.models_view()["active"] == "allcloud"
+    text = (config_dir / "voice.toml").read_text(encoding="utf-8")
+    assert 'model = "另一个合成模型"' in text
+    assert 'voice = "另一个音色"' in text
+    assert result["voice"]["tts.model"]["to"] == '"另一个合成模型"'
+    # 注释还在 —— 行级写入器不重排文件
+    assert "这个文件里只有**参数**" in text
+
+
+def test_activating_does_not_move_the_credential_variable(runtime, config_dir, models_file):
+    """``key_env`` 不跟着切。让一次网页点击改「去读哪个环境变量」等于让网页选凭据。"""
+    api = ConsoleApi(runtime, config_dir=config_dir)
+    api.models_update(
+        "sneaky", "tts",
+        {"provider": "custom", "base": "https://dashscope.aliyuncs.com/api/v1",
+         "proto": "dashscope", "model": "m", "key_env": "ANTHROPIC_AUTH_TOKEN"},
+    )
+    before = (config_dir / "voice.toml").read_text(encoding="utf-8")
+    result = api.models_activate("sneaky")
+    after = (config_dir / "voice.toml").read_text(encoding="utf-8")
+    # 只看赋值行 —— 那个变量名在文件的注释里也出现（2026-09-01 那次 401 的记录）
+    assigned = [line.strip() for line in after.splitlines()
+                if line.strip().startswith("key_env")]
+    assert 'key_env = "ANTHROPIC_AUTH_TOKEN"' not in assigned
+    assert 'key_env = "VOX_TTS_KEY"' in assigned
+    assert any("key_env" in note for note in result["notes"])
+    assert before == after or "key_env" not in str(result["voice"])
+
+
+def test_an_unmappable_provider_is_reported_not_guessed(runtime, config_dir, models_file):
+    """猜一个 provider 会让配了 OpenAI 兼容识别端点的人以为它生效了。"""
+    api = ConsoleApi(runtime, config_dir=config_dir)
+    api.models_update(
+        "openaiasr", "asr",
+        {"provider": "custom", "base": "https://api.example.com/v1", "proto": "openai",
+         "model": "whisper-1"},
+    )
+    result = api.models_activate("openaiasr")
+    text = (config_dir / "voice.toml").read_text(encoding="utf-8")
+    assert 'provider = "dashscope"' in text, "认不出来就不动那一行"
+    assert any("不是 voice.toml 认识的两种" in note for note in result["notes"])
+    # 模型名仍然写进去了 —— 它是无歧义的
+    assert 'model = "whisper-1"' in text
+
+
+def test_activating_a_profile_that_is_not_there_is_refused(runtime, config_dir, models_file):
+    api = ConsoleApi(runtime, config_dir=config_dir)
+    before = models_file.read_text(encoding="utf-8")
+    with pytest.raises(ApiError, match="没有叫"):
+        api.models_activate("ghost")
+    assert models_file.read_text(encoding="utf-8") == before
+
+
+def test_editing_the_active_profile_syncs_but_editing_another_does_not(
+    runtime, config_dir, models_file
+):
+    """改别的方案不同步 —— 那些方案本来就不生效，推进 voice.toml 才是错的。"""
+    api = ConsoleApi(runtime, config_dir=config_dir)
+    api.models_update("spare", "tts",
+                      {"provider": "custom", "base": "https://dashscope.aliyuncs.com/api/v1",
+                       "proto": "dashscope", "model": "不该生效的模型"})
+    assert "不该生效的模型" not in (config_dir / "voice.toml").read_text(encoding="utf-8")
+    result = api.models_update("local", "tts", {"provider": "custom", "model": "该生效的模型"})
+    assert result["voice"]["tts.model"]["to"] == '"该生效的模型"'
+    assert "该生效的模型" in (config_dir / "voice.toml").read_text(encoding="utf-8")
+
+
+def test_the_asr_key_env_is_settable_from_the_secrets_page():
+    """``asr.key_env`` 指到哪个变量，那个变量的**值**就要能从页面存进去。
+
+    ``tts.key_env`` 2026-09-01 踩过这个坑：名字写死在 `EXTRA_SECRET_NAMES` 里，改了配置之后
+    页面上存不进新变量的值，而界面只说「不允许设这个名字」。ASR 此前能用纯属侥幸 ——
+    models.toml 里正好有一条 `key_env = "VOX_ASR_KEY"`。
+    """
+    from core.audio.config import load_voice_config as loader
+    from core.console.routes import allowed_secret_names
+
+    env = str(loader().get("asr.key_env") or "")
+    assert env
+    assert env in allowed_secret_names()
+
+
 @pytest.mark.parametrize(
     "fields, message",
     [

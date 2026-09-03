@@ -25,12 +25,13 @@
 
 active = "local"
 
-# ------------------------------------------------- 当前这一套（语音本机、算力上云）
-# **名字是历史遗留，内容不是「全本机」** —— ADR 008 之后红线 1 由「本地优先」改成
-# 「音频本地，算力上云」：唤醒/VAD/ASR/声纹仍然全部本机，合成与推理走云端。
-# 改 `active` 那一行就能切到别的方案。
+# ------------------------------------------------- 当前这一套（唤醒本机，其余上云）
+# **名字 `local` 是历史遗留，内容不是「全本机」。** ADR 008 把红线 1 从「本地优先」改成
+# 「音频本地，算力上云」；ADR 009（2026-09-03）又把识别也搬上云 —— 使用者的指令是「不要再
+# 考虑本地模型了，现在全云端模型」。现在本机只剩**唤醒与声纹**，识别 / 合成 / 推理都在云上。
+# 改 `active` 那一行就能切到别的方案，或者在控制台点「启用这一套」（它会连 voice.toml 一起改）。
 [profiles.local]
-label = "语音本机 + 云端合成与推理"
+label = "唤醒本机 + 云端识别 / 合成 / 推理"
 
 [profiles.local.asr]
 provider = "custom"
@@ -44,13 +45,19 @@ proto = "dashscope"
 key_env = "VOX_ASR_KEY"
 
 # **运行时读的是 config/voice.toml 的 [tts]，不是这里。** 这一栏是控制台上的显示与编辑
-# 面；两处必须一致，不一致时以 voice.toml 为准（见下面 key_env 那条的教训）。
+# 面；两处必须一致 —— 而 2026-09-03 起「必须一致」不再靠人记得：控制台点「启用这一套」会把
+# 这里的 model / voice / provider 推进 voice.toml，分岔也会在页面上报出来（key_env 除外，
+# 它决定把哪个凭据发出去，只能改文件）。
 [profiles.local.tts]
 provider = "custom"
 model = "qwen-audio-3.0-tts-plus"
 voice = "longanhuan_v3.6"
-base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-proto = "openai"
+# **原生端点，proto 也是原生的。** 此前这两行写的是 `compatible-mode/v1` + `proto = "openai"`,
+# 而 `core/audio/tts_cloud.py` 打的是 `api/v1/services/audio/tts/SpeechSynthesizer` ——
+# 一个说谎的配置面。ASR 那一栏因为同一个谎回过 400（见上），TTS 这边没炸只是因为运行时
+# 根本不读这两行。
+base = "https://dashscope.aliyuncs.com/api/v1/services/audio/tts"
+proto = "dashscope"
 key_env = "VOX_TTS_KEY"
 
 # 云端推理。**key_env 2026-09-01 从 VOX_DASHSCOPE_KEY 改成 VOX_LLM_KEY。**

@@ -387,6 +387,11 @@ class ConsoleServer:
                     dict(payload.get("fields") or {}),
                     str(payload.get("label", "")),
                 )
+            # 「启用这一套」是切换在文件层的唯一动作，单独一条路径而不是 /api/models 的一个
+            # 字段：它写的是**顶层的 active**，和写某个角色的字段是两件事，混在一个端点里会
+            # 让「保存这一栏」和「切过去」共用一次校验。
+            if path == "/api/models/active":
+                return api.models_activate(str(payload.get("profile", "")))
             if path == "/api/wake":
                 return api.wake_update(list(payload.get("words") or ()))
         raise ApiError(f"no such endpoint: {method} {path}", status=404)

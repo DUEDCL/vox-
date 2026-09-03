@@ -38,7 +38,7 @@ from typing import Any, Mapping
 from urllib.parse import urlparse
 
 from core.audio.config import repo_root
-from core.config_edit import ConfigEditError, set_section
+from core.config_edit import ConfigEditError, set_scalars, set_section
 
 DEFAULT_CONFIG_NAME = "models.toml"
 
@@ -330,6 +330,103 @@ def write_profile_kind(
     return changed
 
 
+def write_active(name: str, *, path: str | Path | None = None) -> dict[str, Any]:
+    """把 ``active`` 指到某一套方案上。
+
+    **这是「切换」在文件层的唯一动作**，而在 2026-09-03 之前它只能靠手改文件：控制台的
+    「模型配置」那一栏能新建方案、能改每个角色，却唯独不能**启用**一套 —— 页面上写的是
+    「保存后不会自动切换生效」。一个能配置十套方案但不能切换的界面，等于只能配置一套。
+
+    名字必须是已经存在的方案：指向一个不存在的方案会让 ``load_models_config`` 在下一次
+    读取时直接报错，而那时报错的地方离改动已经很远了。
+    """
+    config_path = models_config_path(path)
+    if not config_path.is_file():
+        raise ModelsConfigError(f"config file not found: {config_path}")
+    existing = load_models_config(config_path)
+    if name not in existing["profiles"]:
+        known = ", ".join(sorted(existing["profiles"])) or "（一套都没有）"
+        raise ModelsConfigError(f"没有叫 {name!r} 的方案。现有的：{known}")
+    if name == existing["active"]:
+        return {}
+    return set_scalars(config_path, {"active": name}, validate=_validate)
+
+
+#: 一个 profile 的角色 -> `config/voice.toml` 里对应的键。**只有 ASR 与 TTS 有对应**：
+#: LLM 那一栏由 `core/agents/` 读 models.toml 自己（见 ADR 008），不经过 voice.toml。
+#:
+#: `key_env` **刻意不在这张表里**，理由和 `scripts/audit_config_surface.py` 的 WONT 一样：
+#: 它是「去读哪个环境变量」，让网页改它等于让它决定把哪个凭据发给百炼。所以 key_env 的
+#: 分岔只被**报告**，不被同步 —— 报告是必需的（分岔时运行时读的是 voice.toml 那个），
+#: 同步是危险的。
+_VOICE_KEYS: Mapping[str, Mapping[str, str]] = {
+    "asr": {"model": "asr.model"},
+    "tts": {"model": "tts.model", "voice": "tts.voice"},
+}
+
+#: 一个角色的 `proto` / `provider` -> `voice.toml` 的 `provider` 值。
+#:
+#: 只认得出这两种，因为 `voice.toml` 的运行时只有这两条路（`vox_plugin/voice_stack.py` 的
+#: `_open_asr` / `_open_tts`）。认不出来的组合**报出来而不是猜一个** —— 猜 "dashscope"
+#: 会让一个配了 OpenAI 兼容识别端点的人以为它生效了，而实际上请求形状根本不对。
+_VOICE_PROVIDER: Mapping[str, str] = {
+    "dashscope": "dashscope",
+    "sherpa-local": "sherpa",
+    "sherpa": "sherpa",
+    "local": "sherpa",
+}
+
+
+def voice_overrides(
+    profile: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, str], list[str]]:
+    """一套方案的 ASR/TTS 换算成 ``config/voice.toml`` 的键。
+
+    存在的理由是一次**双份真相**。`config/models.toml` 是控制台上的编辑面，而运行时读的是
+    `config/voice.toml` —— 两个文件各说一句「云端识别用哪个模型」，只有后者算。TTS 那一栏
+    的注释从 2026-08-29 就写着「两处必须一致」，而「必须一致」这件事此前没有任何一层去保证，
+    靠的是人记得改两个地方。ASR 2026-09-03 上云之后同样的坑多了一个。
+
+    返回三样：
+
+    * ``updates`` —— 可以直接写进 voice.toml 的键；
+    * ``held`` —— **刻意不写**的键（只有 ``key_env``）与这套方案里的值。调用方拿它和
+      voice.toml 比，**只在真的不一样时**才报 —— 无条件报的话这条警告永远挂着，
+      而一个永远亮的警告等于没有警告；
+    * ``notes`` —— 换算不出来的（provider 不是 voice.toml 认识的两种）。
+
+    ``key_env`` 进 ``held`` 而不是 ``updates``，理由和 `scripts/audit_config_surface.py` 的
+    WONT 一样：它是「去读哪个环境变量」，让网页改它等于让它决定把哪个凭据发给百炼。
+    """
+    updates: dict[str, Any] = {}
+    held: dict[str, str] = {}
+    notes: list[str] = []
+    for kind, mapping in _VOICE_KEYS.items():
+        section = profile.get(kind)
+        if not isinstance(section, Mapping):
+            continue
+        slug = str(section.get("provider", "") or "").strip().lower()
+        proto = str(section.get("proto", "") or "").strip().lower()
+        # proto 优先：`provider = "custom"` 时 slug 什么都不说明，形状写在 proto 上。
+        resolved = _VOICE_PROVIDER.get(proto) or _VOICE_PROVIDER.get(slug)
+        if resolved is None:
+            notes.append(
+                f"{kind}：provider={slug or '(空)'} proto={proto or '(空)'} 不是 voice.toml "
+                f"认识的两种（dashscope / sherpa），所以 {kind}.provider 没有跟着改 —— "
+                "运行时用的仍然是 voice.toml 里那一行"
+            )
+        else:
+            updates[f"{kind}.provider"] = resolved
+        for field, key in mapping.items():
+            value = str(section.get(field, "") or "").strip()
+            if value:
+                updates[key] = value
+        env = str(section.get("key_env", "") or "").strip()
+        if env:
+            held[f"{kind}.key_env"] = env
+    return updates, held, notes
+
+
 def _validate(candidate: Path) -> None:
     """The loader, as ``config_edit`` wants it: raises on a bad candidate file."""
     try:
@@ -351,5 +448,7 @@ __all__ = [
     "looks_like_secret",
     "models_config_path",
     "url_problem",
+    "voice_overrides",
+    "write_active",
     "write_profile_kind",
 ]

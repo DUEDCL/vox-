@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1788 passed, 3 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1796 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -32,8 +32,8 @@
 | `core/tools/search_backends.py` | `pytest tests/test_search_backends.py -q` | **35 passed**（不打真网络） |
 | `core/tools/mcp.py` `config/mcp.toml` `contracts/mcp.schema.json` | `pytest tests/test_mcp.py -q` | **51 passed**（假 server，SIM） |
 | `core/config_edit.py` | `pytest tests/test_config_edit.py -q` | **33 passed** |
-| `core/models_config.py` `config/models.toml` `core/console/providers.py` | `pytest tests/test_models_config.py -q` | **60 passed**（不打真网络） |
-| `core/console/` `core/console/static/index.html` | `pytest tests/test_console.py -q` + **控制台渲染取证**（`preview_start console` → 点一遍导航 → `preview_eval` 查 hidden 与控件类型） | **189 passed** + 页面无 console 错误 |
+| `core/models_config.py` `config/models.toml` `core/console/providers.py` | `pytest tests/test_models_config.py tests/test_config_edit.py -q` | **93 passed**（不打真网络；`write_active` 与 `voice_overrides` 的验收在 `test_console.py`） |
+| `core/console/` `core/console/static/index.html` | `pytest tests/test_console.py -q` + **控制台渲染取证**（`preview_start console` → 点一遍导航 → `preview_eval` 查 hidden 与控件类型） | **197 passed** + 页面无 console 错误 |
 | `core/audio/winlevel.py`（OS 输入音量） | `pytest tests/test_console.py -k calibrat -q` + 真机读一次 `endpoints()` | **5 passed** + 三个端点的音量读得到（REAL-WIN） |
 | `core/audio/gain.py` `vad.py` | `pytest tests/test_auto_gain.py -q` | **16 passed** |
 | 唤醒链路本身（喂真录音过生产回调） | `PYTHONUTF8=1 .venv\Scripts\python.exe .vox-ref\wake_path_check.py` | 「你好小沃」念三遍 **3/3 命中**（SIM；改增益/VAD/KWS 参数后必跑） |
@@ -77,7 +77,7 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 
 
 **未实现，不要假设存在**：
-- **`config/models.toml` 没有读侧** —— 控制台能读能写能探端点（`core/models_config.py` + 三个 API），但**没有任何运行时代码按它组装模型**：语音栈仍然由 `config/voice.toml` + 四个环境变量（`VOX_*_MODEL_DIR`）决定，LLM 仍然由 `config/agents.toml` 的 agent 决定。所以 `active` 现在只是一个被记录的意图，改它不改变任何行为 —— 也正因为如此控制台不提供切换 `active` 的按钮（`docs/backlog.md` B7）
+- **`config/models.toml` 仍然不是运行时读的那份** —— 但它 2026-09-03 起**能推**：控制台的「启用这一套」（`POST /api/models/active`）写顶层 `active`，并把这套方案的 `asr`/`tts` 的 `provider`/`model`/`voice` 同步进 `config/voice.toml`（运行时读的是后者）；分岔在页面上报出来。`key_env` **刻意不同步**（让网页决定去读哪个环境变量等于让它决定把哪个凭据发出去），只报不改。LLM 那一栏由 `core/agents/` 自己读 models.toml（ADR 008）。所以 backlog B7 已了结，但「读侧」这件事只做到了 ASR/TTS 两个角色的**写穿**，不是一个按 models.toml 组装整套模型的读侧
 - **云端 ASR 没接过**（TTS 与 LLM 已接通，见下面「已完成」那一节）—— `providers.py` 那 19 条预设的端点抄自各家文档，除了百炼 TTS 与 relay 那两条**其余一次都没打通过**。「探一下」按钮打本机 Ollama 时确实发出了请求（拿到连接被拒）
 - **第三方 MCP server 真实调用** —— `core/tools/mcp.py` 已实现（stdio JSON-RPC，三层默认关），但测试用的是进程内假 server，只算 **SIM**。没有任何真实 MCP server 通过它完成过一次调用
 - 真机说话打断是 REAL，需麦克风+扬声器在场（打断链路本身已通：`wake_detected` 在 SPEAKING/THINKING 先 `cancel()` 停 TTS + transport 再进 LISTENING）
@@ -94,7 +94,7 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
 - **控制台的「试一句」必须 `throttle=False`，否则它会把真实唤醒门锁死** —— 它走同一个 `verify()`，于是每次失败都算一次「连续拒绝」，第 5 次就是 30 秒冷却。2026-08-31 实机日志：`声纹拒绝「你好小沃」：verification cooling down for 25.4s`，而唤醒漏斗里只有 1 次拒绝（其余来自试一句，不在漏斗里）—— 使用者看到的是「说了唤醒词但根本没检测到」。`throttle=False` 同时意味着：不看冷却（冷却期内诊断照样出分，那正是最需要它的时候）、不累计、不进 `gate_stats`
 - **控制台取样期间要 `hold_wake_for()` 按住唤醒判定** —— 页面提示让人说的就是唤醒词，真命中的话 `_authorise` 的 `finally` 会 `_ring.clear()` 把刚录的清掉、`_start_listening()` 再把模式切成聆听（之后的块不再入环形缓冲），于是那一段固定是空的、质量门判「太轻」、**分数固定 0**。这不放宽任何边界：它让唤醒更难发生，且只在本机已鉴权的取样窗口内。聆听期间直接拒绝取样（那时一个样本都不入缓冲），拒绝比给一个假读数好
 - **控制台第二版是侧栏 + 九个视图，不是一页十一块** —— `core/console/static/index.html`（2668 行，仍然单文件内联）。六个模块（模型配置 / 声纹 / 本机 Agent / 本人档案 / 技能与 MCP / 唤醒球）+ 运行态总览 + 只读的安全边界 + 调试。**页面上没有开麦克风的入口了**（`mic_start`/`mic_stop` 端点保留，因为 `run_console.py --voice` 还在调）—— 要开麦克风用 `--voice` 启动。刊头那块 WebGL2 极光是**读数的第三种编码**（能量随 `state`），不是装饰；拿不到 WebGL2 退静态渐变，减少动效/后台/非总览页时不跑
-- **模型配置的三个端点已实现，但预设端点未经复验** —— `GET/PUT /api/models` + `POST /api/models/probe`，loader 与写入器在 `core/models_config.py`，预设表在 `core/console/providers.py`（11 LLM + 4 ASR + 4 TTS）。**「探一下」按钮才是判据**（401/403 = 主机在路径对只是没 key，404 = 路径拼错），这句话在 `providers.py` 注释和页面上各写了一次，别删
+- **模型配置的端点已实现，但预设端点未经复验** —— `GET/PUT /api/models` + `POST /api/models/probe` + **`POST /api/models/active`（启用一套，2026-09-03）**，loader 与写入器在 `core/models_config.py`，预设表在 `core/console/providers.py`（11 LLM + 4 ASR + 4 TTS）。**「探一下」按钮才是判据**（401/403 = 主机在路径对只是没 key，404 = 路径拼错），这句话在 `providers.py` 注释和页面上各写了一次，别删。**「探一下」对 `proto = "dashscope"` 那两条没有意义** —— 原生端点没有 `GET {base}/models`，判据是真发一次合成/识别
 - **预设值不许落盘** —— 页面为了显示会把预设的 `base`/`proto`/`key_env` 填进输入框，写回时这三项被丢掉（除非文件里本来就有那个键、或服务商是 `custom`）。这是**实测过的回归**：不这么做的话，打开页面点一次「保存方案」会凭空长出四行 `providers.py` 里已有的值 —— 一份将来改预设表改不到的副本
 - **`models.toml` 不在 `EDITABLE` 里，这是刻意的** —— 它由自己的端点写，带自己的白名单（`FIELDS` 五个字段名）。放进 `EDITABLE` 等于给同一个文件开第二道门而且校验更弱。它也是唯一允许**加键**的配置（它的表就是数据），走 `config_edit.set_section`，必须点名表名才够得到
 - **`config_edit` 现在保留行尾，这修的是一个真缺陷** —— `read_text` 把 `\r\n` 归一成 `\n`、`write_text` 在 Windows 上又翻译回去，所以控制台保存**任何**配置都会把整个文件的行尾重写一遍。**在 git 里看不见** —— 本仓库 `core.autocrlf=true`，提交时会归一化掉，所以代价不是 diff 噪音：它让一次「什么都没改的保存」也把文件的 SHA-256 换掉，而「零字节差异」正是配置写入唯一可自动化的取证判据（`docs/routines.md` 的写入取证一节）。行尾现在从字节里探、写入用 `newline=""`

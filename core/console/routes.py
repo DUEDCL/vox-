@@ -58,9 +58,12 @@ from core.console.logbook import Logbook
 from core.models_config import (
     KINDS,
     ModelsConfigError,
+    active_profile,
     load_models_config,
     models_config_path,
     url_problem,
+    voice_overrides,
+    write_active,
     write_profile_kind,
 )
 from core.outbound import API_USER_AGENT
@@ -165,6 +168,10 @@ def allowed_secret_names() -> frozenset[str]:
     ``tts.key_env`` 改到另一个变量之后，**页面上存不进那个变量的值**，而界面只会说
     「不允许设这个名字」，不会说为什么。配置改了、白名单没跟上，就是一次「看起来配好了
     其实存不进去」。
+
+    ``asr.key_env`` 2026-09-03 跟着识别上云一起补进来 —— 同一个坑，只是换了个角色。
+    它此前能用纯属侥幸：``config/models.toml`` 里正好有一条 ``key_env = "VOX_ASR_KEY"``，
+    所以名字是从第四处进来的。把 voice.toml 里那一行改到别的变量就会立刻踩中。
     """
     names = set(EXTRA_SECRET_NAMES)
     for kind in KINDS:
@@ -173,11 +180,13 @@ def allowed_secret_names() -> frozenset[str]:
             if env:
                 names.add(env)
     try:
-        env = str(load_voice_config().get("tts.key_env") or "").strip()
+        voice = load_voice_config()
     except Exception:  # noqa: BLE001 - 配置坏了不该让密钥页整页打不开
-        env = ""
-    if env:
-        names.add(env)
+        voice = {}
+    for key in ("tts.key_env", "asr.key_env"):
+        env = str(voice.get(key) or "").strip()
+        if env:
+            names.add(env)
     try:
         config = load_models_config(models_config_path())
     except ModelsConfigError:
@@ -822,6 +831,11 @@ class ConsoleApi:
         ``core/console/providers.py`` so the page does not carry a second copy of
         the endpoint table -- it has a fallback for when this endpoint is missing,
         and ``Object.assign`` lets this one win.
+
+        另外报一份 ``voice``：生效方案的 ASR/TTS 与 ``config/voice.toml`` 分岔在哪。
+        **这不是装饰。** 运行时读的是 voice.toml，而这一栏改的是 models.toml —— 两个文件
+        各说一句「云端识别用哪个模型」，只有后者算。TTS 那一栏的注释从 2026-08-29 就写着
+        「两处必须一致」，而在这之前没有任何一层去保证它，靠人记得改两个地方。
         """
         path = models_config_path()
         try:
@@ -836,7 +850,95 @@ class ConsoleApi:
             "active": config["active"],
             "profiles": config["profiles"],
             "presets": {kind: providers.as_json(kind) for kind in KINDS},
+            "voice": self._voice_divergence(config),
         }
+
+    def _voice_divergence(self, config: Mapping[str, Any]) -> dict[str, Any]:
+        """生效方案的 ASR/TTS 与 ``config/voice.toml`` 差在哪。读不出来就说读不出来。"""
+        try:
+            wanted, held, notes = voice_overrides(active_profile(config))
+        except Exception as exc:  # noqa: BLE001 - 这一栏坏了不该让整页打不开
+            return {"error": f"{type(exc).__name__}: {exc}", "diff": [], "notes": []}
+        try:
+            current = self._voice_config()
+        except Exception as exc:  # noqa: BLE001 - 同上
+            return {"error": f"config/voice.toml 读不出来：{exc}", "diff": [], "notes": notes}
+        diff = [
+            {"key": key, "voice": str(current.get(key, "")), "profile": str(value)}
+            for key, value in sorted(wanted.items())
+            if str(current.get(key, "")) != str(value)
+        ]
+        # ``key_env`` 只在**真的不一样**时才说。无条件说的话这条警告永远挂着，
+        # 而一个永远亮的警告等于没有警告 —— 使用者会学会忽略它，包括它真的该亮那一次。
+        notes = [*notes, *self._key_env_notes(held, current)]
+        return {"error": "", "diff": diff, "notes": notes}
+
+    @staticmethod
+    def _key_env_notes(held: Mapping[str, str], current: Mapping[str, Any]) -> list[str]:
+        return [
+            f"{key}：config/voice.toml 读的是 {str(current.get(key, '')) or '(空)'}，"
+            f"这套方案写的是 {value} —— **凭据变量名不从页面同步**"
+            "（让网页决定去读哪个变量等于让它决定把哪个凭据发出去），要改只能改文件"
+            for key, value in sorted(held.items())
+            if str(current.get(key, "")) != str(value)
+        ]
+
+    def _voice_config(self) -> dict[str, Any]:
+        """按 ``config_dir`` 读 voice.toml。
+
+        **必须和写的是同一个文件。** 分岔检查读全局那份、同步写 ``config_dir`` 那份的话，
+        写完之后检查仍然报分岔 —— 一个永远修不好的警告，而它其实什么都没坏。
+        """
+        path = self.config_dir / "voice.toml"
+        return load_voice_config(path) if path.is_file() else load_voice_config()
+
+    def models_activate(self, profile: str) -> dict[str, Any]:
+        """把 ``active`` 指到某一套方案上，**并把它的 ASR/TTS 推进 voice.toml**。
+
+        两步一起做才叫「切换」：只改 ``active`` 的话语音那两条路一个字都不变（运行时读
+        voice.toml），使用者会看到「方案已切换」而听到的还是上一套的音色。
+
+        ``key_env`` 不推 —— 它决定把哪个凭据发出去，让一次网页点击改它等于让网页选凭据。
+        分岔在 ``models_view`` 的 ``voice.notes`` 里报出来，人自己去改文件。
+        """
+        name = str(profile or "").strip()
+        try:
+            changed = write_active(name, path=models_config_path())
+        except (ModelsConfigError, ConfigEditError) as exc:
+            raise ApiError(str(exc)) from exc
+        applied, notes = self._apply_voice_overrides(name)
+        return {
+            "changed": changed,
+            "voice": applied,
+            "notes": notes,
+            "restart_required": True,
+        }
+
+    def _apply_voice_overrides(self, profile: str) -> tuple[dict[str, Any], list[str]]:
+        """把一套方案的 ASR/TTS 写进 ``config/voice.toml``。写不动的算 note，不算失败。
+
+        失败不抛：``active`` 已经改了，为了同步失败而把整个请求变成 500 会让文件停在
+        「切了一半」的状态而界面说「没成功」—— 那比一条说明糟得多。
+        """
+        try:
+            config = load_models_config(models_config_path())
+            wanted, held, notes = voice_overrides(config["profiles"].get(profile, {}))
+        except Exception as exc:  # noqa: BLE001
+            return {}, [f"读不出这套方案：{type(exc).__name__}: {exc}"]
+        try:
+            notes = [*notes, *self._key_env_notes(held, self._voice_config())]
+        except Exception:  # noqa: BLE001 - 读不到就少一条说明，不算失败
+            pass
+        if not wanted:
+            return {}, notes
+        path = self.config_dir / "voice.toml"
+        if not path.is_file():
+            return {}, [*notes, f"{path.name} 不在，没什么可同步的"]
+        try:
+            applied = set_scalars(path, wanted, validate=_validator("voice"))
+        except (ConfigEditError, OSError) as exc:
+            return {}, [*notes, f"voice.toml 没写进去：{exc}"]
+        return applied, notes
 
     def models_update(
         self, profile: str, kind: str, fields: Mapping[str, Any], label: str = ""
@@ -870,7 +972,18 @@ class ConsoleApi:
             )
         except (ModelsConfigError, ConfigEditError) as exc:
             raise ApiError(str(exc)) from exc
-        return {"changed": changed, "restart_required": True}
+        # **改的是生效那一套就同步进 voice.toml。** 不同步的话这一栏是个「能改、能存、
+        # 不生效」的界面：运行时读 voice.toml，页面写 models.toml。改别的方案不同步 ——
+        # 那些方案本来就不生效，把它们推进 voice.toml 才是错的。
+        voice: dict[str, Any] = {}
+        notes: list[str] = []
+        try:
+            active = load_models_config(models_config_path())["active"]
+        except ModelsConfigError:
+            active = ""
+        if str(profile) == active and str(kind) in ("asr", "tts"):
+            voice, notes = self._apply_voice_overrides(str(profile))
+        return {"changed": changed, "voice": voice, "notes": notes, "restart_required": True}
 
     def models_probe(self, kind: str, provider: str = "", base: str = "") -> dict[str, Any]:
         """Ask an endpoint whether it is there: one ``GET {base}/models``.
