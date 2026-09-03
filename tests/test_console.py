@@ -364,6 +364,34 @@ def test_config_view_lists_the_editable_keys(runtime, config_dir):
     assert "input.sample_rate" not in keys, "16 kHz is an agreement between three models"
 
 
+def test_enum_keys_carry_their_choices(runtime, config_dir):
+    """`asr.provider` 这种只有两个合法值的键要带上清单，前端才能渲染成下拉框。
+
+    存在的理由是一次静默降级：写错的 provider **不报错** —— `_open_asr` 按本机 sherpa
+    处理，于是「保存成功、页面显示你写的那个值、识别悄悄退回本机模型」。而本机模型正是
+    使用者三轮报「转写不准」的根因。打不出来的错才算修好。
+    """
+    api = ConsoleApi(runtime, config_dir=config_dir)
+    files = {entry["file"]: entry for entry in api.config_view()["files"]}
+    keys = {key["key"]: key for key in files["voice.toml"]["keys"]}
+    assert keys["asr.provider"]["choices"] == ["dashscope", "sherpa"]
+    assert keys["orb.renderer"]["choices"] == ["seq", "bot"]
+    # 没有枚举的键**不带** choices，否则前端会把每个数字框都变成下拉框
+    assert "choices" not in keys["wake.keywords_threshold"]
+
+
+def test_every_choice_is_a_value_its_parser_accepts():
+    """清单里的值必须真的被对应解析器认。一个下拉框选了之后不生效比自由文本更糟 ——
+    它看起来是被批准过的。
+    """
+    from core.audio.config import ORB_RENDERERS
+    from core.console.routes import CHOICES
+
+    assert set(CHOICES["voice.toml:orb.renderer"]) <= set(ORB_RENDERERS)
+    for key in ("voice.toml:asr.provider", "voice.toml:tts.provider"):
+        assert set(CHOICES[key]) == {"dashscope", "sherpa"}
+
+
 def test_a_security_boundary_cannot_be_changed_from_the_console(runtime, config_dir):
     """The four layers between "a voice said something" and "a command ran" are
     not toggles. Refused before validation: the reason has nothing to do with

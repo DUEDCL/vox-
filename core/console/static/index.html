@@ -2119,11 +2119,19 @@ function kvRow(entry, scope) {
   if (!editable) {
     row.appendChild(el("div", { class: "val" },
       Array.isArray(entry.value) ? JSON.stringify(entry.value) : String(entry.value)));
-  } else if (entry.type === "bool") {
+  } else if (entry.type === "bool" || (Array.isArray(entry.choices) && entry.choices.length)) {
+    /* 固定几个值的键渲染成下拉框，不是文本框。`asr.provider` 是这条的由来：写错的 provider
+       不会报错，`_open_asr` 会按本机 sherpa 处理 —— 保存成功、页面显示你写的那个值、识别
+       悄悄退回本机模型（而本机模型正是「转写不准」的根因）。打不出来的错才是修好了。 */
+    const options = entry.type === "bool" ? ["true", "false"] : entry.choices.map(String);
+    const now = entry.type === "bool" ? String(entry.value === true) : String(entry.value);
     const select = el("select", { "aria-label": label });
-    for (const value of ["true", "false"]) {
+    /* 文件里的值不在清单里时把它也放进去并选中 —— 否则下拉框会显示第一项，
+       而那是在**撒谎**：页面说 dashscope，文件里写的是别的东西。 */
+    if (!options.includes(now)) options.unshift(now);
+    for (const value of options) {
       const option = el("option", { value }, value);
-      option.selected = (entry.value === true) === (value === "true");
+      option.selected = value === now;
       select.appendChild(option);
     }
     select.onchange = () => mark(row, key, scope, select, entry.type);

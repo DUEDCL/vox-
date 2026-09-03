@@ -311,6 +311,23 @@ def _model_names(payload: Any) -> list[str]:
 #: read-only from here -- see the module docstring for why these specific
 #: omissions. ``input.sample_rate`` is left out for a different reason: 16 kHz is
 #: an agreement between three models, and changing it means changing models.
+#: 只有固定几个合法值的键 -> 那几个值。`"文件名:section.key"`。
+#:
+#: **存在的理由是一次静默降级。** `asr.provider` 是个自由文本框，而写错的值不会报错 ——
+#: `_open_asr` 把未知 provider 按本机 sherpa 处理并往就绪清单里塞一条警告。于是把
+#: `dashscope` 打成 `dashcope` 的后果是「保存成功、页面显示你写的那个值、识别悄悄退回本机
+#: 模型」，而本机模型正是三轮「转写不准」的根因。有了这张表，前端渲染成下拉框，那个错就
+#: 打不出来了。
+#:
+#: 值必须和各自的解析器对齐：`asr.provider` 见 `vox_plugin/voice_stack.py` 的 `_open_asr`，
+#: `tts.provider` 见 `_open_tts`，`orb.renderer` 见 `core/audio/config.py` 的 `ORB_RENDERERS`。
+#: 只列**推荐拼法**（每个解析器还认几个别名，但下拉框不该教人用别名）。
+CHOICES: dict[str, tuple[str, ...]] = {
+    "voice.toml:asr.provider": ("dashscope", "sherpa"),
+    "voice.toml:tts.provider": ("dashscope", "sherpa"),
+    "voice.toml:orb.renderer": ("seq", "bot"),
+}
+
 EDITABLE: dict[str, tuple[str, ...]] = {
     "voice.toml": (
         "wake.keywords_threshold",
@@ -757,6 +774,11 @@ class ConsoleApi:
                             "value": entry["value"],
                             "type": type(entry["value"]).__name__,
                             "editable": entry["editable"],
+                            **(
+                                {"choices": list(CHOICES[f"{name}:{entry['key']}"])}
+                                if f"{name}:{entry['key']}" in CHOICES
+                                else {}
+                            ),
                         }
                         for entry in keys
                     ],

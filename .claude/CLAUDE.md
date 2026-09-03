@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1784 passed, 3 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1786 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -33,7 +33,7 @@
 | `core/tools/mcp.py` `config/mcp.toml` `contracts/mcp.schema.json` | `pytest tests/test_mcp.py -q` | **51 passed**（假 server，SIM） |
 | `core/config_edit.py` | `pytest tests/test_config_edit.py -q` | **33 passed** |
 | `core/models_config.py` `config/models.toml` `core/console/providers.py` | `pytest tests/test_models_config.py -q` | **60 passed**（不打真网络） |
-| `core/console/` `core/console/static/index.html` | `pytest tests/test_console.py -q` + **控制台渲染取证**（`preview_start console` → snapshot → 截图；宽版走 Edge headless） | **164 passed** + 页面无 console 错误 |
+| `core/console/` `core/console/static/index.html` | `pytest tests/test_console.py -q` + **控制台渲染取证**（`preview_start console` → 点一遍导航 → `preview_eval` 查 hidden 与控件类型） | **189 passed** + 页面无 console 错误 |
 | `core/audio/winlevel.py`（OS 输入音量） | `pytest tests/test_console.py -k calibrat -q` + 真机读一次 `endpoints()` | **5 passed** + 三个端点的音量读得到（REAL-WIN） |
 | `core/audio/gain.py` `vad.py` | `pytest tests/test_auto_gain.py -q` | **16 passed** |
 | 唤醒链路本身（喂真录音过生产回调） | `PYTHONUTF8=1 .venv\Scripts\python.exe .vox-ref\wake_path_check.py` | 「你好小沃」念三遍 **3/3 命中**（SIM；改增益/VAD/KWS 参数后必跑） |
