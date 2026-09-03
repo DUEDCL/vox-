@@ -22,7 +22,13 @@ from core.audio.acks import ACK_MUTE_CAP_S, ACK_MUTE_TAIL_S
 from core.audio.capture import SounddeviceWakeCapture
 from core.dispatch.dispatcher import DispatchResult
 from core.state import VoiceState
-from vox_plugin.runtime import WAKE_LOG_MAX, VoiceRuntime
+from vox_plugin.runtime import (
+    DUCK_CEILING_S,
+    DUCK_FLOOR_S,
+    WAKE_LOG_MAX,
+    VoiceRuntime,
+    _duck_seconds,
+)
 
 
 class FakeDispatcher:
@@ -1019,10 +1025,45 @@ def test_the_reply_is_muted_so_it_is_not_transcribed_as_the_next_request():
 
     runtime.say("讲个笑话")
 
-    # 播放前开上限窗、播放（阻塞）返回之后收窗再压短尾巴。
-    assert capture.ducked[0] == ACK_MUTE_CAP_S
+    # 播放前开窗、播放（阻塞）返回之后收窗再压短尾巴。窗长按**回答的字数**估，
+    # 不是 ACK_MUTE_CAP_S —— 那个 5 秒是给一句 1.5 秒的确认音定的。
+    assert capture.ducked[0] >= DUCK_FLOOR_S
     assert capture.unducks >= 1
     assert capture.muted[-1] == ACK_MUTE_TAIL_S
+
+
+def test_the_half_duplex_window_is_sized_from_the_reply_not_from_the_ack():
+    """**长回答的窗必须比 5 秒长。**
+
+    此前这里用的是 `ACK_MUTE_CAP_S`，而 `core/audio/acks.py` 把那个 5 秒定义为「足够盖住
+    最长那句确认音（实测 1.56 s）」。项目自己的验收标准是「回答 40 字以内」，40 字按 4 字/秒
+    是 10 秒 —— 窗在第 5 秒到期，之后自适应增益开始跟着**助手自己的声音**适应，等人开口时
+    增益已经偏了。症状是「说完一段长回答之后唤醒变差」，而每一层都报告自己健康。
+    """
+    long_reply = "这是一段四十个字左右的回答" * 4
+    assert len(long_reply) >= 40
+    assert _duck_seconds(long_reply) > ACK_MUTE_CAP_S
+    # 短回答仍然拿下限，不会开出一个比确认音还短的窗
+    assert _duck_seconds("好") == DUCK_FLOOR_S
+    # 上限是保险丝：再长的文本也不会让麦克风「不适应增益」超过它
+    assert _duck_seconds("字" * 10_000) == DUCK_CEILING_S
+
+
+def test_a_long_reply_really_gets_the_longer_window():
+    """不只是那个纯函数对 —— 走一遍 `say()`，窗长必须真的跟着回答走。"""
+    capture = BargeInCapture()
+    runtime = _talking_runtime(capture)
+    long_reply = "把这句话说得足够长以便撑开半双工窗" * 3
+    runtime.dispatcher = FakeDispatcher(
+        [AgentChunk(kind="text", text=long_reply), AgentChunk(kind="done")]
+    )
+    runtime.plugin.attach_tts(SimpleNamespace(
+        speak_segments=lambda chunks: None, is_stopped=lambda: False, stop=lambda: None
+    ))
+
+    runtime.say("讲个长笑话")
+
+    assert capture.ducked[0] > ACK_MUTE_CAP_S
 
 
 def test_follow_up_can_be_turned_off():

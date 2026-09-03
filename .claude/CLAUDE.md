@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1786 passed, 3 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1788 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -24,7 +24,7 @@
 | `vox_plugin/voice_stack.py` | `pytest tests/test_voice_assembly.py -q` | **17 passed** |
 | `core/audio/speaker.py` `ring.py` `capture.py` | `pytest tests/test_speaker.py tests/test_speaker_privacy.py tests/test_speaker_hardening.py -q` | **66 passed**（**不需要声纹模型**） |
 | 声纹身份接线（capture→plugin→runtime） | `pytest tests/test_speaker_identity.py -q` | **15 passed** |
-| 唤醒后的聆听 / 确认音静音窗 / 托盘 | `pytest tests/test_capture_listening.py tests/test_acks.py tests/test_runtime.py -q` | **93 passed** |
+| 唤醒后的聆听 / 确认音静音窗 / 托盘 | `pytest tests/test_capture_listening.py tests/test_acks.py tests/test_runtime.py -q` | **132 passed** |
 | 云端 TTS（音色、语气、段间预取） | `pytest tests/test_tts_cloud.py -q` | **21 passed**（不打网络） |
 | 声纹阈值或判别力 | `pytest tests/integration/test_speaker_model.py -q` | 5 passed（缺模型时 5 skipped） |
 | TTS 合成（需模型） | `pytest tests/integration/test_tts_model.py -q` | 4 passed（缺模型时 2 skipped） |

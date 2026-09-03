@@ -71,6 +71,39 @@ FAREWELL = "好，随时叫我"
 #: 3.0 让普通音量说话大致占满行程，喊起来会被上限截住（那是对的：再大的声音也只是满）。
 LEVEL_GAIN = 3.0
 
+#: 中文合成的语速（字/秒）。用来估「这段回答要播多久」。
+#:
+#: 实测锚点：一句约 15 字的话在 `qwen-audio-3.0-tts-plus` + `speed 1.0` 下不带 instruction
+#: 2.69 s、带「语速稍慢」那行 3.25 s —— 约 4.6–5.6 字/秒。取 4.0 是**故意偏慢**：估短了
+#: 会让半双工窗在播完之前就到期，而那正是下面 `_duck_seconds` 要修的那个缺陷。
+SPEAK_CHARS_PER_S = 4.0
+
+#: 半双工窗的下限与上限（秒）。
+#:
+#: **上限存在的理由是保险丝，不是窗口长度** —— 播放返回那一下才是真正收窗的地方
+#: （`_speak_and_follow_up` 的 `finally`）。万一播放线程死掉，麦克风最多「不适应增益」
+#: 这么久，而不是永远。
+DUCK_FLOOR_S = 5.0
+DUCK_CEILING_S = 90.0
+
+
+def _duck_seconds(text: str) -> float:
+    """这段回答大概要播多久 —— 半双工窗至少要挂这么久。
+
+    **2026-09-03 修的一个尺寸错误。** 此前这里直接用 `ACK_MUTE_CAP_S`（5 秒），而那个常数
+    是给**确认音**定的：`core/audio/acks.py` 的注释原话是「5 秒足够盖住最长那句（实测
+    1.56 s）」—— 一句 1–2 秒的应答音。回答不是应答音：项目自己的验收标准是「回答 40 字
+    以内」，而 40 字按 4 字/秒是 **10 秒**，再加上分段合成的 HTTP 往返（0.7–1.5 s/段）。
+
+    于是一段长回答播到第 5 秒时半双工窗到期，而窗里关着的三样有一样是**自适应增益不适应**。
+    窗一开，增益就开始跟着扬声器的包络走（那是助手自己的声音），等人开口时增益已经偏了 ——
+    表现是「说完一段长回答之后唤醒变差」，而每一层都报告自己健康。
+
+    1.6 倍余量给分段往返与语速指令；上下限见 `DUCK_FLOOR_S` / `DUCK_CEILING_S`。
+    """
+    seconds = len(str(text)) / SPEAK_CHARS_PER_S * 1.6 + 2.0
+    return max(DUCK_FLOOR_S, min(DUCK_CEILING_S, seconds))
+
 
 @dataclass
 class RuntimeReport:
@@ -591,8 +624,10 @@ class VoiceRuntime:
 
         1. **播放前开半双工窗。** ``complete_turn`` 里的 ``speak_segments`` 是阻塞的，播放
            期间麦克风照常在录 —— 而连续对话把识别器留着开，于是不压窗的后果不是「多录一点
-           环境声」，是**助手把自己的回答转写成下一句请求**。上限只是保险丝，真正决定窗口
-           长度的是播放返回之后那一下（和确认音同一个做法，见 ``core/audio/acks.py``）。
+           环境声」，是**助手把自己的回答转写成下一句请求**。窗长按这段回答的字数估
+           （``_duck_seconds``），不是照搬确认音那个 5 秒 —— 那个数字是给一句 1.5 秒的
+           应答音定的，用在一段 40 字的回答上会在播完之前就到期。上限只是保险丝，真正决定
+           窗口长度的是播放返回之后那一下（和确认音同一个做法，见 ``core/audio/acks.py``）。
         2. **播放返回之后立刻收窗**，再压一个短尾巴收余响与房间反射。
         3. **再开聆听。** 顺序反过来（先开聆听再播放）就等于把回答喂给识别器。
 
@@ -612,7 +647,8 @@ class VoiceRuntime:
         capture = getattr(self.plugin, "audio_capture", None)
         self._barged_in = False
         if speak and (self.acks is not None or self.plugin.tts is not None):
-            self._duck_input(ACK_MUTE_CAP_S)
+            # 窗长按**这段回答的长度**估，不是照搬确认音那个 5 秒（见 `_duck_seconds`）。
+            self._duck_input(_duck_seconds(reply))
         try:
             self._complete_and_watch_tts(reply, speak=speak)
         finally:
