@@ -64,6 +64,13 @@ WAKE_LOG_MAX = 30
 #: 的球说话。
 FAREWELL = "好，随时叫我"
 
+#: 麦克风峰值 -> 球的振幅的放大倍数。
+#:
+#: 正常说话时一块 100 ms 的峰值大约落在 0.05–0.4（这台机器实测），而球的振幅是 0–1。
+#: 不放大的话球几乎不动 —— 那和没接这条线看起来一模一样，是最难查的那种「功能不生效」。
+#: 3.0 让普通音量说话大致占满行程，喊起来会被上限截住（那是对的：再大的声音也只是满）。
+LEVEL_GAIN = 3.0
+
 
 @dataclass
 class RuntimeReport:
@@ -538,6 +545,10 @@ class VoiceRuntime:
         # 「唤醒之后一直没人说话」。不接它的后果不是少一条日志：状态机会停在 LISTENING，
         # 唤醒球一直显示「在听」，而采集早就回到唤醒模式了 —— 一个说谎的状态。
         capture.on_listen_expired = self._listen_expired
+        # 真实电平 -> 唤醒球的振幅。在这之前球只在换状态时收到一个固定值，所以「在听」
+        # 那一态是个匀速的呼吸 —— 球一直在动，但它动的不是你说的话。限流在桥接那一层
+        # （`set_level`），这里只是把回调接上。
+        capture.on_level = self._level_seen
         report = self.plugin.attach_capture(
             capture,
             on_recognized=self.utterances.put,
@@ -1026,6 +1037,20 @@ class VoiceRuntime:
                 channel=candidate.channel,
                 about=candidate.key,
             )
+
+    def _level_seen(self, peak: float) -> None:
+        """一块音频的峰值 -> 唤醒球的振幅。**跑在音频回调线程上，所以它必须便宜。**
+
+        限流与「球看不见就不发」都在 ``DesktopBridge.set_level`` 里，这一层只做一次转发和
+        一次异常吞。放大到 0–1：麦克风的峰值在正常说话时大约落在 0.05–0.4，直接送过去的球
+        几乎不动 —— 那和不接这条线看起来一样。
+        """
+        if self.bridge is None:
+            return
+        try:
+            self.bridge.set_level(min(1.0, float(peak) * LEVEL_GAIN))
+        except Exception:  # noqa: BLE001 - 可视化失败绝不能带走音频线程
+            pass
 
     def _mute_input(self, seconds: float) -> None:
         """让采集在这段时间里丢弃输入。没接麦克风时什么也不做。"""

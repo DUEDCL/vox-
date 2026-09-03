@@ -109,6 +109,13 @@ class SounddeviceWakeCapture:
         #: 判据是 peak 而不是 RMS：一段正常的静音房间 RMS 也很低，但 peak 会有噪声底。
         #: 全零的设备两个都没有。1e-4（-80 dBFS）把上面那两个实测值分在两侧，余量很宽。
         self.on_input_silent = on_input_silent
+        #: 每一块音频的峰值往哪送。``None`` = 不送。
+        #:
+        #: 唤醒球的振幅靠它 —— 在这之前球只在换状态时收到一个固定振幅，所以「在听」那一态
+        #: 是个匀速的呼吸：球一直在动，但它动的不是你说的话。限流**不在这里**（在
+        #: `core/desktop_bridge.py` 的 `set_level`）：音频回调要尽可能短，而「多久发一次」
+        #: 是消费者的事。
+        self.on_level: Any = None
         self.silent_peak = silent_peak
         self.silent_grace_s = silent_grace_s
         #: KWS 命中的出口，在声纹门**之前**。见 ``_authorise`` 里那段注释：一次被声纹
@@ -719,6 +726,12 @@ class SounddeviceWakeCapture:
         peak = self._block_peak(samples)
         if peak > self.input_peak:
             self.input_peak = peak
+        # 电平送出去（球的振幅）。**吞掉异常**：一个坏掉的可视化不能带走音频线程。
+        if self.on_level is not None:
+            try:
+                self.on_level(peak)
+            except Exception:  # noqa: BLE001
+                pass
         if self._silent_reported or self.input_peak > self.silent_peak:
             return
         elapsed = self.input_blocks * self.blocksize / max(1, self.sample_rate)

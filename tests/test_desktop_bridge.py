@@ -475,3 +475,93 @@ class TestPluginSink:
         plugin.start()
         assert plugin.events
         assert plugin.sink_failures == 0
+
+
+# ------------------------------------------- 真实电平 -> 球的振幅（2026-09-03）
+
+
+def test_a_level_is_not_sent_while_the_orb_is_hidden():
+    """待机时桌面上没有球（`orb.visible = false`）。给一个不存在的窗口发 10 行/秒是纯浪费。"""
+    bridge = DesktopBridge(command=["x"], visible=False)
+
+    assert bridge.set_level(0.5) is False
+
+
+def test_levels_are_rate_limited_and_deduplicated():
+    """音频回调 10 次/秒，而管道写入是同步的。安静时读数在 0.001 上下抖 ——
+    那些行发过去只会让球在原地颤。"""
+    written: list[dict] = []
+    bridge = DesktopBridge(command=["x"], visible=True)
+    bridge._write = lambda payload: written.append(payload) or True
+
+    assert bridge.set_level(0.40) is True
+    # 同一瞬间的第二条被最小间隔挡掉。
+    assert bridge.set_level(0.95) is False
+    bridge._level_at = 0.0
+    # 间隔够了，但变化太小（< LEVEL_MIN_DELTA）—— 还是不发。
+    assert bridge.set_level(0.41) is False
+    bridge._level_at = 0.0
+    assert bridge.set_level(0.80) is True
+
+    assert [row["level"] for row in written] == [0.4, 0.8]
+    assert all(row["kind"] == "level" for row in written)
+
+
+def test_a_level_is_clamped_and_rounded():
+    written: list[dict] = []
+    bridge = DesktopBridge(command=["x"], visible=True)
+    bridge._write = lambda payload: written.append(payload) or True
+
+    bridge.set_level(9.9)
+
+    assert written[0]["level"] == 1.0
+
+
+def test_a_non_numeric_level_is_refused_not_raised():
+    """电平来自音频回调线程 —— 那条路上任何异常都会带走设备。"""
+    bridge = DesktopBridge(command=["x"], visible=True)
+
+    assert bridge.set_level("loud") is False  # type: ignore[arg-type]
+
+
+def test_hiding_forgets_the_last_level():
+    """收球之后再弹出来时，第一帧要按真实电平画，而不是按十分钟前那一下。"""
+    bridge = DesktopBridge(command=["x"], visible=True)
+    bridge._write = lambda payload: True
+    bridge.set_level(0.7)
+
+    bridge.set_visible(False)
+
+    assert bridge._level == -1.0
+    assert bridge._visible is False
+
+
+def test_the_runtime_forwards_microphone_peaks_with_gain():
+    """接线 + 放大。峰值在正常说话时是 0.05–0.4，不放大的球几乎不动 ——
+    那和没接这条线看起来一模一样。"""
+    from types import SimpleNamespace
+
+    from vox_plugin.runtime import LEVEL_GAIN, VoiceRuntime
+
+    sent: list[float] = []
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+    runtime.bridge = SimpleNamespace(set_level=lambda value: sent.append(value) or True)
+
+    runtime._level_seen(0.2)
+
+    assert sent == [pytest.approx(0.2 * LEVEL_GAIN)]
+
+
+def test_a_broken_bridge_never_takes_the_audio_thread_down():
+    from types import SimpleNamespace
+
+    from vox_plugin.runtime import VoiceRuntime
+
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False)
+
+    def explode(_value):
+        raise RuntimeError("pipe is gone")
+
+    runtime.bridge = SimpleNamespace(set_level=explode)
+
+    runtime._level_seen(0.2)  # 不抛就是通过

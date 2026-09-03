@@ -37,6 +37,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -50,6 +51,12 @@ DEFAULT_CONFIRM_TIMEOUT_S = 60.0
 #: Set to make the child window visible from the start; the orb's own default is
 #: hidden so that a launch nobody asked for does not paint on the desktop.
 VISIBLE_ENV = "VOX_WAKE_VISIBLE"
+
+#: 电平最快多久发一次。音频回调 10 次/秒，球不需要比这更快 —— 而管道写入是同步的。
+LEVEL_MIN_GAP_S = 0.08
+
+#: 电平变化小于这个数就不发。安静时读数在 0.001 上下抖，那些行只会让球在原地颤。
+LEVEL_MIN_DELTA = 0.03
 
 #: Where a built desktop binary is looked for, relative to the workspace root.
 #: Order is deliberate: a release build wins over a debug one, because a stale
@@ -130,6 +137,11 @@ class DesktopBridge:
         # 每次子进程会话都有独立代数，避免旧 reader 在重启后污染新会话。
         self._generation = 0
         self._closed = False
+        #: 球现在看不看得见。``set_level`` 读它 —— 给一个不存在的窗口发电平是纯浪费。
+        self._visible = bool(visible)
+        #: 上一次发出去的电平和时刻，限流用。
+        self._level = -1.0
+        self._level_at = 0.0
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -348,9 +360,48 @@ class DesktopBridge:
         The frontend already refuses on its side when the card goes away; doing
         it here too means the caller is released even if the orb never answers.
         """
+        self._visible = bool(visible)
         if not visible:
             self._settle_all(False)
+            # 收球时把电平的记忆清掉：下一次弹出来时第一帧要按真实电平画，
+            # 而不是按十分钟前那一下。
+            self._level = -1.0
         return self._write({"kind": "visible", "visible": bool(visible)})
+
+    def set_level(self, level: float) -> bool:
+        """把**真实麦克风电平**发给球。限流在这一层，不在音频回调里。
+
+        为什么需要它：在这之前球的振幅只在换状态时被设一次，所以「在听」那一态是个匀速的
+        呼吸 —— 球一直在动，但它动的不是你说的话。使用者的原话是「在听阶段并没有跟随真实
+        音量和语句进行运动」。
+
+        三条限流，都在这里而不是在调用方：
+
+        1. **静音窗式的最小间隔**（``LEVEL_MIN_GAP_S``）—— 音频回调 10 次/秒，而球最多需要
+           这个频率；管道写入是同步的，一条 60 字节的 JSON 行乘 10 不值得省，但乘 100 就要了。
+        2. **最小变化量**（``LEVEL_MIN_DELTA``）—— 安静时电平在 0.001 上下抖，那些行发过去
+           只会让球在原地颤。
+        3. **球看不见就不发** —— 待机时桌面上没有球（`orb.visible = false`），给一个不存在的
+           窗口发 100 行/10 秒是纯浪费。
+
+        返回是否真的写出去了，所以「为什么球不动」有一个可读的答案：调用方能数它。
+        """
+        try:
+            value = max(0.0, min(1.0, float(level)))
+        except (TypeError, ValueError):
+            return False
+        if not self._visible:
+            return False
+        now = time.monotonic()
+        if now - self._level_at < LEVEL_MIN_GAP_S:
+            return False
+        if abs(value - self._level) < LEVEL_MIN_DELTA and value not in (0.0, 1.0):
+            return False
+        self._level = value
+        self._level_at = now
+        # 只保留三位小数：管道里那两位之后的数字对一个 148px 的球没有任何可见影响，
+        # 而它们让每一行长出十几个字节。
+        return self._write({"kind": "level", "level": round(value, 3)})
 
     def set_tray(self, *, state: str, paused: bool) -> bool:
         """把当前状态与暂停开关同步给托盘菜单。

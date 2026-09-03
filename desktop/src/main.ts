@@ -228,6 +228,22 @@ function setGated(next: boolean): void {
 }
 
 /* ============ 状态切换 ============ */
+/* **真实麦克风电平的落点。** 只写振幅，不碰状态 —— 一个电平读数不该改变状态机。
+
+   在这之前 `amplitude` 只在换状态时被设一次（`setState` 的默认值 0.35），所以「在听」
+   那一态是个匀速的呼吸。使用者说的「在听阶段并没有跟随真实音量和语句进行运动」就是这件事：
+   球一直在动，但它动的不是你说的话。
+
+   跟一条一阶低通（**attack 快、release 慢**）而不是直接赋值：一块 100 ms 的峰值本身是抖的，
+   直接写上去的球会像在发抖而不是在呼吸。快上是因为「开口」要立刻看得见；慢下是因为如果
+   同样快，球会在字与字之间的停顿里塌下去 —— 那看起来像它断了。 */
+function setAmplitude(raw: number): void {
+  const want = Math.max(0.12, Math.min(1, Number.isFinite(raw) ? raw : 0.12));
+  const rate = want > amplitude ? 0.55 : 0.12;
+  amplitude = amplitude + (want - amplitude) * rate;
+  app.style.setProperty('--amplitude', String(amplitude));
+}
+
 function setState(next: string, amp = 0.35) {
   if (!STATES.includes(next as CoreState)) {
     console.warn(`[wake] invalid state: ${next}`);
@@ -793,6 +809,15 @@ window.addEventListener('vox-bridge', (ev) => {
     applyEnvelope(msg.event as Envelope);
   } else if (msg.kind === 'visible') {
     setVisible(msg.visible !== false);
+  } else if (msg.kind === 'level' && typeof msg.level === 'number') {
+    /* **真实麦克风电平。** 在这之前 `amplitude` 只在换状态时被设一次（`state.changed`
+       的 payload 里带一个固定值），所以「在听」那一态是个匀速的呼吸 —— 使用者说的
+       「在听阶段并没有跟随真实音量和语句进行运动」就是这件事。
+
+       这里只写 `amplitude`，不碰状态：一个电平读数不该改变状态机。Python 侧已经限流并
+       只在球看得见时才发（见 core/desktop_bridge.py 的 set_level），所以这里不再节流 ——
+       两处都节流会让「为什么它不动」有两个地方要查。 */
+    setAmplitude(msg.level as number);
   }
 });
 
