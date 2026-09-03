@@ -202,24 +202,29 @@ def open_agents(
     config: Mapping[str, Any] | None = None,
     *,
     transport: Any = None,
+    tools: Sequence[str] = (),
 ) -> tuple[AgentAdapter, ...]:
     """Adapters for every enabled entry. Nothing is spawned or contacted here.
 
     ``transport`` overrides what an ``evox`` entry would build for itself, which
     is how a test -- or a host that already holds a session -- injects one.
+
+    ``tools`` 是这台机器上**真的装了**的工具名。传下去只影响 `http` 那一种：它的 system
+    prompt 会带上工具清单，于是 agent 能让 Vox 去开应用 / 开网页 / 读文件
+    （见 `core/agents/skills.py`）。CLI 后端不需要 —— 它们自己就有终端。
     """
     resolved = dict(config) if config is not None else load_agents_config()
     if config is not None:
         validate_agents_config(resolved)
         _check_entries(resolved.get("agents", []))
     return tuple(
-        build_adapter(entry, transport=transport)
+        build_adapter(entry, transport=transport, tools=tools)
         for entry in enabled_entries(resolved)
     )
 
 
 def build_adapter(
-    entry: Mapping[str, Any], *, transport: Any = None
+    entry: Mapping[str, Any], *, transport: Any = None, tools: Sequence[str] = ()
 ) -> AgentAdapter:
     """One entry -> one adapter. The entry is assumed already checked."""
     kind = entry.get("kind")
@@ -263,7 +268,10 @@ def build_adapter(
         # 在 `ANTHROPIC_AUTH_TOKEN` 里，而适配器只读 `VOX_AGENT_HTTP_TOKEN`，于是每一轮都
         # 401（流式路径上服务端直接断连，报出来是 `SSL: UNEXPECTED_EOF_WHILE_READING`）。
         extra = {key: entry[key] for key in ("model", "key_env") if key in entry}
-        return HttpAgentAdapter(url=entry["url"], **common, **extra)
+        # 工具清单进 system prompt。**由这一层注入而不是让 adapter 去读 tools.toml**：
+        # 一个自己去读配置的 adapter 就等于它知道了这台机器装了什么，而那是运行时的事实，
+        # 不是这条 HTTP 连接的属性。
+        return HttpAgentAdapter(url=entry["url"], tools=tuple(tools), **common, **extra)
     raise AgentsConfigError(f"kind {kind!r} has no adapter")
 
 

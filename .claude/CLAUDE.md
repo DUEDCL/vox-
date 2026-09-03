@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1706 passed, 3 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1736 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -245,6 +245,7 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
   - **AES-128-ECB 是我们自己写的**（`core/channels/crypto.py`，纯 Python，因为这台机器没有 `cryptography`）。S-box 是算的不是抄的，钉在 FIPS-197 官方向量上。ECB 不是密码学选择是协议要求 —— 密钥每个文件一把、随机生成、随消息交给对端
   - **上传用 POST 不用 PUT**（上游踩过：PUT 在微信 CDN 上回 404），媒体只从 `*.weixin.qq.com` 下载（一个能指向任意主机的字段就是一次 SSRF，有测试钉着）
 - **微信这条路上 `speaker` 永远是 `None`** —— 一个微信 id 证明不了对面是谁，所以 `shell.run` 天然进不来（它要 `require_verified_speaker`）。这不是限制，是这条链路唯一正确的答案
+- **agent 会用工具了（`core/agents/skills.py`）** —— 修的是「说『好，正在打开网易云音乐』然后什么都没发生」。那不是模型撒谎：请求能到它那里而能力不在它手上，说得像做过了是它最容易的出路。四条容易记错的：调用是**一行纯文本** `⟦vox:tool app.open {"name":"网易云"}⟧`（U+27E6/U+27E7 挑的就是「不可能从语音转写里冒出来」，四种后端一视同仁，不用 provider 的 function calling —— 那三种形状各不相同而红线 2 只许标量）· `REGISTERED` 是**白名单**，`shell.run` 连名字都不给它看（确认卡是给**使用者说的那句话**准备的界面，一个模型发起、使用者确认的命令执行混淆了「谁想跑它」）· 执行走**同一个 ToolRunner**，`origin="agent"` 且**不传 speaker**，所以这个功能扩大的是「谁能发起」不是「什么能被执行」· 一轮最多一次调用（延迟预算：每轮 2–20 秒），第二轮失败时**拿工具结果当回答**（应用已经开起来了，这时说「agent 失败了」最没用）
 - **三条本机快路径，都不派发** —— `is_dismissal`（「退下吧」→ 收窗收球）· `is_progress_query`（「进度怎么样了」→ 报手上那件活跑了多久，`_inflight` / `_last_done` 两份状态）· 工具快路径。前两条都是**整句锚定**的纯函数：「这个项目进度怎么样」带宾语，仍然派给 agent；漏掉这道边界的症状是一句明显的误答而不是报错。`DispatchResult` 没有 `text` 字段（它是从 chunks 派生的属性），本机答案要走 `chunks=(AgentChunk(kind="text", text=...),)`
 - **`shell.run` 2026-09-03 在出厂配置里打开了**（使用者点名要「能直接执行终端命令」），但 `policy.py` 的**代码默认仍然是 False** —— 删掉配置文件不会获得代码执行。那个 `true` 的可接受性由三条断言共同担保：白名单只读（20 条，`git status`/`dir`/`tasklist` 这类，测试逐条检查没有 `pip`/`python`/`rm`/`git commit`）· `require_confirmation` · `require_verified_speaker`。危险模式仍在代码里。就绪清单里那条 `shell.run is enabled: a misrecognised utterance can reach a command` 警告有测试看着，**不要去消除它**
 - **发现已装应用走枚举，不是拿话当路径**（`core/tools/app_index.py`）—— 开始菜单 `.lnk` + 注册表 App Paths，实测本机 188 项。三个坑：`.lnk` **不解析**、交给 `os.startfile`（`Popen(["x.lnk"])` 报 `%1 is not a valid Win32 application`，所以发现出来的项走 `launch` 不走 `spawn`）· 噪声词**只从候选那一侧剥**（两侧都剥会让「QQ音乐」精确匹配到本机的「QQ」，开出来是聊天软件）· 歧义不猜（「音乐」同时对上两个播放器时报候选）

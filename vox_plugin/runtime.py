@@ -328,7 +328,11 @@ class VoiceRuntime:
         try:
             config = load_agents_config()
             config, notes = apply_llm_profile(config, active_llm(load_models_config()))
-            adapters = open_agents(config)
+            # 工具清单交给 http 后端（它的 system prompt 会带上）。**只报注册过的那些**，
+            # 而且只报**真的装了**的 —— 印一个不存在的工具，模型会去调它然后拿回「没装」，
+            # 那一轮就白花了 2–20 秒。`open_tools` 在这之前跑（见 `start`），所以这里拿得到。
+            installed = tuple(sorted(getattr(self.tool_runner, "tools", ()) or ()))
+            adapters = open_agents(config, tools=installed)
         except Exception as exc:  # noqa: BLE001 - reported, not fatal
             return (), {}, [f"agents are off: {type(exc).__name__}: {exc}"]
         opened: dict[str, Any] = {}

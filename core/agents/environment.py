@@ -26,6 +26,7 @@ system prompt 是**端点自己注入的那份**。实测（2026-08-29，走生�
 from __future__ import annotations
 
 import platform
+from typing import Sequence
 
 
 def describe_host() -> str:
@@ -56,10 +57,10 @@ SPEECH_SYSTEM_PROMPT = """\
 
 1. 你运行的机器是 {host}。不是 Linux，没有容器，没有 X11 或 PulseAudio。提到路径时用
    Windows 形式。
-2. 你**没有**文件系统、终端和网络。打开应用、读文件、查时间、开网页这些事由 Vox 自己的
-   本地工具完成，不由你完成。所以不要写「运行以下命令」然后给一段 shell —— 用户是在用
-   耳朵听，他没法执行它，而且那件事本来该由 Vox 直接做。真需要动这台机器时，直接说
-   「这个我做不到」或者说清要用哪个功能，别给操作步骤。
+2. 你**自己**没有文件系统、终端和网络。但 Vox 有 —— 需要动这台机器时**让 Vox 去做**
+   （下面那张工具清单，没有清单就说明这一轮没有可用工具）。**绝不要假装做过了**：
+   说「好，正在打开网易云」而其实什么都没发生，比直接说「这个我做不到」糟得多。
+   也不要写「运行以下命令」然后给一段 shell —— 用户是在用耳朵听，他没法执行它。
 3. **回答要短到能被念完。默认 40 字以内、最多两句话。** 合成的语速约每秒 4 个字，所以
    120 字要念半分钟 —— 那半分钟里用户只能干等。不要空行分段、不要「补充一点」、不要把
    问题复述一遍再回答、不要在结尾加「有什么想问的」。要澄清就只问一个问题，问完就停。
@@ -71,9 +72,22 @@ SPEECH_SYSTEM_PROMPT = """\
 需要写代码或者做长任务时，一句话说明这件事交给子代理，不要自己把代码念出来。"""
 
 
-def speech_system_prompt() -> str:
-    """当前这台机器的 system message。"""
-    return SPEECH_SYSTEM_PROMPT.format(host=describe_host())
+def speech_system_prompt(tools: Sequence[str] = ()) -> str:
+    """当前这台机器的 system message。
+
+    ``tools`` 是运行时**真的装了**的工具名。给了就把清单拼在后面，agent 于是能让 Vox 去
+    开应用、开网页、读文件（见 ``core/agents/skills.py``）。不给就是老行为：它只能说话。
+
+    清单拼在**后面**而不是嵌进第 2 条：那一段讲的是「你的处境」，而清单是一份会随机器变化
+    的数据。混在一起的话，换一台机器就要重读整段散文才知道哪句还成立。
+    """
+    base = SPEECH_SYSTEM_PROMPT.format(host=describe_host())
+    if not tools:
+        return base
+    from core.agents.skills import manifest  # noqa: PLC0415 - 避免与 skills 互相 import
+
+    block = manifest(tools)
+    return f"{base}\n\n{block}" if block else base
 
 
 #: 给 CLI 后端的**开头一行**，不是上面那一整段。

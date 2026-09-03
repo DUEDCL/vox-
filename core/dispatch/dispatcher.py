@@ -31,6 +31,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterator, Mapping
 
 from core.agents.contract import AgentChunk, Task
+from core.agents.skills import parse_calls, render_result, strip_calls
 from core.dispatch.contract import (
     Aggregator,
     DispatchPlan,
@@ -416,6 +417,10 @@ class Dispatcher:
         collected = tuple(self._stream_agents(task, plan, available, started))
         terminal = collected[-1] if collected else None
         ok = terminal is not None and terminal.kind == "done" and not terminal.error
+        # agent 要求跑一个工具？跑掉，把结果回给它，再收一次回答。
+        if ok:
+            collected, ok = self._settle_tool_calls(task, plan, available, started, collected, ok)
+            terminal = collected[-1] if collected else terminal
         backends = self._backends(available)
         self._detail(
             "agent",
@@ -445,6 +450,94 @@ class Dispatcher:
             reason=plan.reason,
             ok=ok,
         )
+
+    def _settle_tool_calls(
+        self,
+        task: Task,
+        plan: Any,
+        available: tuple[tuple[str, Any], ...],
+        started: float,
+        collected: tuple[AgentChunk, ...],
+        ok: bool,
+    ) -> tuple[tuple[AgentChunk, ...], bool]:
+        """agent 说要跑一个工具 —— 跑掉，把结果回给它，再收一次回答。
+
+        ## 为什么需要这一整段
+
+        使用者实测：他说「帮我打开网易云音乐」（ASR 听成「试了给我打开…」），正则没命中，
+        落到 agent，agent 回 **「好，正在打开网易云音乐。」然后什么都没发生。** 那不是模型在
+        撒谎 —— 请求能到它那里，而能力不在它手上，说得像做过了是它最容易的出路。这一段把
+        能力交给它。
+
+        ## 三条边界
+
+        1. **只解析，不放行。** 执行走 `self.tool_runner`，也就是和语音快路径**同一套闸门**
+           （沙箱、白名单、危险模式、`shell.run` 的确认与声纹）。所以这个功能扩大的是
+           「谁能发起」，不是「什么能被执行」—— 而 `shell.run` 根本不在 agent 看得到的清单里。
+        2. **一轮一次**（`MAX_CALLS`）。延迟预算：每一轮 agent 是 2–20 秒。
+        3. **失败要回给它。** 拿不到「失败」这一位，它会把「拒绝了」当成「做完了」然后向用户
+           汇报成功 —— 那正是这一段要修的毛病，不能在这里重新引入。
+
+        没有工具调用（绝大多数轮）时原样返回，一次多余的对象构造都不做。
+        """
+        if self.tool_runner is None:
+            return collected, ok
+        text = "".join(chunk.text or "" for chunk in collected if chunk.kind == "text")
+        calls = parse_calls(text)
+        if not calls:
+            return collected, ok
+
+        name, arguments = calls[0]
+        request = ToolRequest(
+            tool=name,
+            arguments=arguments,
+            # **来源是 agent，说话人不传。** 一个由模型发起的请求不该继承使用者的声纹身份 ——
+            # 那正是 `shell.run` 的 `require_verified_speaker` 要挡住的东西。
+            origin="agent",
+        )
+        try:
+            outcome = self.tool_runner.run(request)
+        except Exception as exc:  # noqa: BLE001 - 工具炸了也要把话说完
+            outcome = None
+            detail, tool_ok = f"{type(exc).__name__}: {exc}", False
+        else:
+            tool_ok = bool(outcome.ok)
+            detail = (outcome.output or outcome.error or "").strip()
+        self._detail(
+            "agent",
+            f"agent 要求 {name} → {'成功' if tool_ok else '失败'}",
+            level="info" if tool_ok else "warn",
+            tool=name,
+            arguments=dict(arguments),
+            ok=tool_ok,
+            detail=detail[:200],
+        )
+
+        # 第二轮：把原话、它的调用、以及结果一起给它，让它用一句话汇报。
+        followup = replace(
+            task,
+            id=f"{task.id}-tool",
+            context=tuple(task.context or ())
+            + (f"你刚才要求 {name}，结果如下。用一句话把结果告诉用户。",
+               render_result(name, tool_ok, detail)),
+        )
+        second = tuple(self._stream_agents(followup, plan, available, started))
+        last = second[-1] if second else None
+        second_ok = last is not None and last.kind == "done" and not last.error
+        if not second_ok:
+            # 第二轮失败时**不要丢掉工具已经做了这件事**：拿工具的结果直接当回答，
+            # 比一句「agent 失败了」有用得多 —— 应用其实已经开起来了。
+            spoken = detail or ("做好了" if tool_ok else "没做成")
+            return (
+                AgentChunk(kind="text", text=spoken[:200]),
+                AgentChunk(kind="done"),
+            ), tool_ok
+        # 把调用标记从最终文本里去掉：模型有时会在汇报里把它重复一遍。
+        cleaned = tuple(
+            replace(chunk, text=strip_calls(chunk.text or "")) if chunk.kind == "text" else chunk
+            for chunk in second
+        )
+        return cleaned, second_ok
 
     def _collect(
         self, plan: DispatchPlan, adapters: Mapping[str, Any]

@@ -81,6 +81,13 @@ class HttpAgentAdapter:
     #: empty string means none -- the correct value for an unauthenticated local
     #: gateway.
     token: str | None = None
+    #: 这台机器上装了哪些工具（名字）。给了就把工具清单拼进 system prompt，agent 于是能
+    #: 让 Vox 去开应用 / 开网页 / 读文件（见 `core/agents/skills.py`）。
+    #:
+    #: **由派发器注入而不是在这里读配置**：一个 adapter 去读 `tools.toml` 就等于它知道了
+    #: 这台机器装了什么，而「装了什么」是运行时的事实，不是这条 HTTP 连接的属性。空 = 老
+    #: 行为（它只能说话）。
+    tools: tuple[str, ...] = ()
     _live: dict[str, Any] = field(default_factory=dict, repr=False)
     _cancelled: set[str] = field(default_factory=set, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -196,7 +203,7 @@ class HttpAgentAdapter:
             {
                 "model": self.model,
                 "messages": [
-                    {"role": "system", "content": speech_system_prompt()},
+                    {"role": "system", "content": speech_system_prompt(self.tools)},
                     {"role": "user", "content": prompt},
                 ],
                 "stream": True,
