@@ -128,6 +128,40 @@ Windows 上把 LF 翻成 CRLF）。第二种在 `git diff` 里**看不见** —�
 本机实测（2026-08-28）：MeloTTS 合成「控制台测试完成」→ 44100 Hz / 6041 采样点 /
 243 ms。等级 AUTO+真实模型；**听见声音**才是 REAL。
 
+## 云端识别验收（ADR 009）
+
+**先跑不打网络的那一档**，它覆盖请求形状、隐私（不落盘）、端点判定、续说拼接：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_asr_cloud.py -q   # 42 passed，一次网络都不打
+```
+
+真机（会真的发音频出网、会计费）两个探针，都在 `.vox-ref/`（不在版本库，换机器按下面重建）：
+
+```powershell
+# 1. 形状探针：同一段音频用五种请求形状各发一次，看哪种回 200
+$env:PYTHONUTF8=1; .\.venv\Scripts\python.exe .vox-ref\asr_cloud_probe.py
+
+# 2. 契约探针：按 100 ms 真实节奏喂进 provider，走 create_stream/feed/finalize
+$env:PYTHONUTF8=1; .\.venv\Scripts\python.exe .vox-ref\asr_cloud_stream_probe.py
+```
+
+期望（2026-09-03 本机实测，样本是 `.vox-ref/rec/` 里的真录音）：
+
+| 探针 | 期望 |
+|---|---|
+| 形状 | **只有**「原生端点 + `data:audio/wav;base64,…` + `parameters.format`」回 200。裸 base64 回 500（服务端拿 wget 去下载），缺 `parameters` 与 `compatible-mode/v1` 都回 400 `format is empty` |
+| 契约 | 「你好小沃」→ `你好，小沃。`；带 1.9 s 停顿的长句被切成两段又拼回来（`continuations = 1`），文本完整 |
+| 延迟 | 端点判出 ≈ 说完 + 0.8 s，往返 3–5 s ⇒ **说完之后 4–5 秒拿到文本** |
+
+**重建这两个探针**：形状探针就是把同一段 wav 按上表五种形状各 POST 一次并打印状态码；
+契约探针是 `DashScopeAsrProvider().create_stream()` + 每 100 ms `feed()` 一块（真实音频喂完
+接一段静音），直到 `is_endpoint` 为真再 `finalize()`。**必须按真实节奏 sleep** —— 一口气灌完
+只能证明请求发出去了，证明不了延迟（HTTP 在工作线程上，`_poll` 只在下一次 `feed` 里被看一眼）。
+
+「探一下能不能连」那颗按钮**对这条路没有意义**：百炼原生接口没有 `GET {base}/models`，
+探它必然 404 而页面把 404 解释成「路径拼错了」。所以它现在直接拒绝并指向上面两个探针。
+
 ## MCP 回归
 
 适用时机：修改 `core/tools/mcp.py`、`config/mcp.toml`、`contracts/mcp.schema.json`

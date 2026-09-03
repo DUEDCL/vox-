@@ -701,6 +701,35 @@ def test_the_asr_key_env_is_settable_from_the_secrets_page():
     assert env in allowed_secret_names()
 
 
+def test_the_probe_refuses_the_dashscope_native_protocol(api):
+    """百炼原生接口没有 ``GET {base}/models``，探它必然 404 —— 而这一栏把 404 解释成
+    「路径拼错了」。一个必然给出错误结论的探针比没有探针糟：人会照着那句话去改一个本来
+    正确的 base。
+    """
+    with pytest.raises(ApiError, match="没有 /models 可探"):
+        api.models_probe(
+            "asr",
+            "custom",
+            "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation",
+            "dashscope",
+        )
+
+
+def test_the_probe_still_works_for_openai_shaped_endpoints(api, monkeypatch):
+    """拦的是协议，不是端点 —— OpenAI 兼容那条路照旧探。"""
+    calls: list[str] = []
+
+    class Opener:
+        def open(self, request, timeout=0):  # noqa: ANN001, ARG002
+            calls.append(request.full_url)
+            raise urllib.error.HTTPError(request.full_url, 401, "no key", {}, None)
+
+    monkeypatch.setattr("core.console.routes._probe_opener", lambda: Opener())
+    result = api.models_probe("llm", "custom", "https://api.example.com/v1", "openai")
+    assert result["status"] == 401
+    assert calls == ["https://api.example.com/v1/models"]
+
+
 @pytest.mark.parametrize(
     "fields, message",
     [

@@ -985,7 +985,9 @@ class ConsoleApi:
             voice, notes = self._apply_voice_overrides(str(profile))
         return {"changed": changed, "voice": voice, "notes": notes, "restart_required": True}
 
-    def models_probe(self, kind: str, provider: str = "", base: str = "") -> dict[str, Any]:
+    def models_probe(
+        self, kind: str, provider: str = "", base: str = "", proto: str = ""
+    ) -> dict[str, Any]:
         """Ask an endpoint whether it is there: one ``GET {base}/models``.
 
         This is the only outbound request the console makes, and it is the only
@@ -997,7 +999,22 @@ class ConsoleApi:
 
         The status code is the whole result. The body is never read: it can be
         large, and nothing here needs it.
+
+        **``proto = "dashscope"`` 不探。** 百炼的原生接口没有 ``GET {base}/models``，
+        所以探它必然回 404 —— 而这一栏把 404 解释成「路径拼错了」。一个必然给出错误结论的
+        探针比没有探针糟：使用者会照着那句话去改一个本来正确的 base。真正的判据是发一次
+        合成 / 识别（页面上「试一句」那颗按钮，以及 `.vox-ref/asr_cloud_probe.py`）。
         """
+        shape = str(proto or "").strip().lower()
+        if not shape:
+            preset = providers.find(str(kind), str(provider))
+            shape = (preset.proto if preset else "") or ""
+        if shape == "dashscope":
+            raise ApiError(
+                "这条协议没有 /models 可探 —— 百炼原生接口只有各自的业务路径，"
+                "探它一定回 404，而 404 在这一栏的含义是「路径拼错了」。"
+                "判据是真发一次：合成用下面「试一句」，识别用 .vox-ref/asr_cloud_probe.py"
+            )
         endpoint_base = str(base or "").strip()
         if not endpoint_base:
             preset = providers.find(str(kind), str(provider))

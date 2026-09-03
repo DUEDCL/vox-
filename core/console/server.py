@@ -308,6 +308,7 @@ class ConsoleServer:
                     str(payload.get("kind", "")),
                     str(payload.get("provider", "")),
                     str(payload.get("base", "")),
+                    str(payload.get("proto", "")),
                 )
             if path == "/api/models/fetch":
                 return api.models_fetch(

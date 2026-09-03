@@ -109,12 +109,36 @@ MAX_PARTS = 4
 #: `app.open` 的动词锚定会当场对不上。
 _TAIL_PUNCT = "。，、；：！？.,;:!?…~ "
 
+#: 一段音频最多重发几次。**只对暂时性失败重发**（超时、连不上、429、5xx），
+#: 配置类失败（400/401/403/404）一次都不重发 —— 那只是把真正的原因推迟两秒说出来。
+#:
+#: 为什么值得重发（而 `tts_cloud` 刻意不重发）：合成失败有退路（降级到本机 VITS，见
+#: `tts_fallback.py`），而识别**在一句话中途没有退路** —— 一次 500 的后果是使用者说了一句、
+#: 得到一片安静、只能再说一遍。音频已经在手上，重发一次只多花一个往返（实测 3–4 s）。
+MAX_ATTEMPTS = 2
+
+#: 两次之间等多久。0.6 s 不是随手取的：这个端点上实测过一次 500（裸 base64 那次）是**立刻**
+#: 回的，所以等待的意义不是「让服务器缓一缓」而是「不要在同一毫秒里再撞一次」。
+#: 更长的等待直接加在使用者的沉默里，而这一层已经在 3–5 s 的往返上了。
+RETRY_WAIT_S = 0.6
+
+#: 值得重发的 HTTP 状态码。429 是限流（免费额度上真实存在），5xx 是服务端。
+_RETRYABLE = frozenset({429, 500, 502, 503, 504})
+
 #: 采样率。三个模型共同的输入约定，改它等于换模型。
 SAMPLE_RATE = 16000
 
 
 class DashScopeAsrError(RuntimeError):
-    """一次转写没成。带端点主机名与状态码分类，**绝不带 key、绝不带音频**。"""
+    """一次转写没成。带端点主机名与状态码分类，**绝不带 key、绝不带音频**。
+
+    ``retryable`` 让上层分得清「重发一次可能就好了」和「配置错了，重发一百次也一样」。
+    没有这个区分的重试会把一个 401 变成两次 401 加两秒沉默。
+    """
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = bool(retryable)
 
 
 #: 状态码 → 这台机器上该动哪里。和 tts_cloud 同一个立场：一句正确而不可操作的
@@ -266,6 +290,11 @@ class DashScopeAsrProvider:
         #: 被停顿切开又拼回去的次数。**这是判断 `silence_s` 调对了没有的唯一读数** ——
         #: 它一直涨说明那个阈值对这个人说话的节奏太短了。
         self.continuations = 0
+        #: 暂时性失败之后重发的次数，以及最后一次重发的原因。**必须分开计** ——
+        #: `failures` 是「最终没成」，`retries` 是「第一次没成但救回来了」，把两者混在一个
+        #: 数字里会让「网络在抖」和「配置是错的」看起来一样。
+        self.retries = 0
+        self.last_retry = ""
         self.last_error = ""
         self.last_latency_ms = 0
         self.last_seconds = 0.0
@@ -486,7 +515,27 @@ class DashScopeAsrProvider:
         }
         if self.language:
             payload["parameters"]["language"] = self.language
-        return _text_of(self._post(payload))
+        return _text_of(self._post_with_retry(payload))
+
+    def _post_with_retry(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """发一次，暂时性失败再发一次。**跑在工作线程上**，所以这里可以睡。
+
+        只重发暂时性的那几类（见 ``_RETRYABLE``）。配置类失败一次都不重发 —— 重发一个 401
+        只是把「你的变量装错了」这句话推迟两秒说出来，而这两秒落在使用者的沉默里。
+        """
+        last: DashScopeAsrError | None = None
+        for attempt in range(1, max(1, MAX_ATTEMPTS) + 1):
+            try:
+                return self._post(payload)
+            except DashScopeAsrError as exc:
+                if not exc.retryable or attempt >= MAX_ATTEMPTS:
+                    raise
+                last = exc
+                self.retries += 1
+                self.last_retry = str(exc)
+                time.sleep(RETRY_WAIT_S)
+        # 只有 MAX_ATTEMPTS <= 0 时才可能走到这里（配置写错），把最后一条原样抛出去。
+        raise last or DashScopeAsrError(f"{self._safe_endpoint()} 一次都没发出去")
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self.transport is not None:
@@ -511,21 +560,28 @@ class DashScopeAsrProvider:
                 return dict(json.loads(response.read().decode("utf-8", "replace")))
         except HTTPError as exc:
             # **不回显请求体**：它带 key，也带整段音频的 base64。只报状态码分类。
+            code = int(exc.code)
             raise DashScopeAsrError(
-                f"{self._safe_endpoint()} {_classify(int(exc.code), self.key_env)}"
+                f"{self._safe_endpoint()} {_classify(code, self.key_env)}",
+                retryable=code in _RETRYABLE,
             ) from exc
         except TimeoutError as exc:
             raise DashScopeAsrError(
                 f"{self._safe_endpoint()} 超时（{self.timeout_s:.0f}s）—— "
-                "整段音频一次传完才开始识别，长句子上调大 asr.timeout_s"
+                "整段音频一次传完才开始识别，长句子上调大 asr.timeout_s",
+                retryable=True,
             ) from exc
         except URLError as exc:
             raise DashScopeAsrError(
                 f"{self._safe_endpoint()} 连不上：{exc.reason} —— 请求还没发出，"
-                "检查网络或代理，不是密钥问题"
+                "检查网络或代理，不是密钥问题",
+                retryable=True,
             ) from exc
         except json.JSONDecodeError as exc:
-            raise DashScopeAsrError(f"{self._safe_endpoint()} 回的不是 JSON：{exc}") from exc
+            # 半个 JSON 通常是连接被截断，重发一次值得试 —— 但只试一次。
+            raise DashScopeAsrError(
+                f"{self._safe_endpoint()} 回的不是 JSON：{exc}", retryable=True
+            ) from exc
 
     def take_error(self) -> str:
         """把「上一次失败的原因」取走（取完清空）。
@@ -548,6 +604,8 @@ class DashScopeAsrProvider:
             "failures": int(self.failures),
             "empty": int(self.empty_results),
             "continuations": int(self.continuations),
+            "retries": int(self.retries),
+            "last_retry": self.last_retry,
             "last_latency_ms": int(self.last_latency_ms),
             "last_seconds": round(float(self.last_seconds), 2),
             "total_seconds": round(float(self.total_seconds), 1),

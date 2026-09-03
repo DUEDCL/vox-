@@ -2427,7 +2427,7 @@ function kindBlock(kind, section) {
   block.appendChild(grid);
 
   const probe = el("button", null, "探一下能不能连");
-  probe.onclick = () => probeEndpoint(kind, select.value, base.value, probe);
+  probe.onclick = () => probeEndpoint(kind, select.value, base.value, proto.value, probe);
   const pull = el("button", null, "拉取可用模型");
   pull.onclick = () => pullModelNames(kind, select.value, base.value, proto.value, keyEnv.value, options, pull);
   /* 第三颗按钮而不是把它折进「探一下」：探测不发凭据、不读 body，只看状态码；这一颗发
@@ -2525,14 +2525,24 @@ async function tryOneShot(kind, slug, base, proto, keyEnv, model, button) {
   }
 }
 
-async function probeEndpoint(kind, slug, base, button) {
+async function probeEndpoint(kind, slug, base, proto, button) {
   if (!base) {
     overlay("这一条不需要探测", `${KIND_LABEL[kind]} 选的是本机服务，没有 HTTP 端点可打。`, null);
     return;
   }
+  /* 百炼原生协议没有 /models —— 探它一定回 404，而下面把 404 解释成「路径拼错了」。
+     一个必然给出错误结论的探针比没有探针糟：人会照着那句话去改一个本来正确的 base。
+     所以在前端就拦住，连请求都不发。 */
+  if (String(proto || "").toLowerCase() === "dashscope") {
+    overlay("这条协议探不了",
+      `百炼原生接口只有各自的业务路径，没有 GET ${base}/models —— 探它一定回 404，` +
+      `而 404 在这一栏的含义是「路径拼错了」。\n\n判据是真发一次：合成用右边那颗「试一句」，` +
+      `识别用 .vox-ref/asr_cloud_probe.py（它会真的发一段音频并把转写打出来）。`, null);
+    return;
+  }
   button.disabled = true;
   try {
-    const result = await api("/api/models/probe", { method: "POST", body: { kind, provider: slug, base } });
+    const result = await api("/api/models/probe", { method: "POST", body: { kind, provider: slug, base, proto } });
     const verdict = result.status === 404
       ? "404 —— 路径拼错了，主机在但这个路径不对。"
       : (result.status === 401 || result.status === 403)

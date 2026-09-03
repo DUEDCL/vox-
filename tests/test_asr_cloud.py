@@ -19,12 +19,14 @@ import json
 import threading
 import time
 import wave
+from urllib.error import HTTPError, URLError
 
 import numpy as np
 import pytest
 
 from core.audio.asr_cloud import (
     DEFAULT_ENDPOINT,
+    MAX_ATTEMPTS,
     MAX_PARTS,
     DashScopeAsrError,
     DashScopeAsrProvider,
@@ -470,6 +472,111 @@ def test_failure_drops_pending_parts():
         if result.is_endpoint:
             break
     assert stream.parts == []
+
+
+# -- 暂时性失败的重发 --------------------------------------------------------
+
+
+class Flaky:
+    """前 ``fail`` 次抛给定的异常，之后成功。"""
+
+    def __init__(self, error: Exception, *, fail: int = 1, text: str = "救回来了") -> None:
+        self.error = error
+        self.fail = fail
+        self.text = text
+        self.calls = 0
+
+    def post(self, url: str, payload: dict) -> dict:
+        self.calls += 1
+        if self.calls <= self.fail:
+            raise self.error
+        return {"output": {"output": {"sentence": {"text": self.text}}}}
+
+
+def test_a_transient_failure_is_retried_once(monkeypatch):
+    """一次 500 的后果本来是「说了一句，得到一片安静，只能再说一遍」。
+
+    音频已经在手上，重发一次只多花一个往返。合成那一层刻意不重发是因为它有退路
+    （降级到本机 VITS），而识别在一句话中途没有退路。
+    """
+    monkeypatch.setattr("core.audio.asr_cloud.RETRY_WAIT_S", 0.0)
+    transport = Flaky(DashScopeAsrError("500 服务端出错", retryable=True))
+    provider = DashScopeAsrProvider(transport=transport)
+    assert provider._transcribe(speech(0.4)) == "救回来了"
+    assert transport.calls == 2
+    assert provider.retries == 1
+    assert "500" in provider.last_retry
+
+
+@pytest.mark.parametrize("code", [400, 401, 403, 404])
+def test_a_configuration_failure_is_not_retried(code, monkeypatch):
+    """重发一个 401 只是把「你的变量装错了」推迟两秒说出来，而那两秒落在使用者的沉默里。"""
+    monkeypatch.setattr("core.audio.asr_cloud.RETRY_WAIT_S", 0.0)
+    transport = Flaky(DashScopeAsrError(f"{code} 配置错了", retryable=False), fail=99)
+    provider = DashScopeAsrProvider(transport=transport)
+    with pytest.raises(DashScopeAsrError):
+        provider._transcribe(speech(0.4))
+    assert transport.calls == 1
+    assert provider.retries == 0
+
+
+def test_retries_are_capped(monkeypatch):
+    monkeypatch.setattr("core.audio.asr_cloud.RETRY_WAIT_S", 0.0)
+    transport = Flaky(DashScopeAsrError("503", retryable=True), fail=99)
+    provider = DashScopeAsrProvider(transport=transport)
+    with pytest.raises(DashScopeAsrError):
+        provider._transcribe(speech(0.4))
+    assert transport.calls == MAX_ATTEMPTS
+
+
+def test_retryable_is_set_from_the_status_code(monkeypatch):
+    """哪些码值得重发是这一层的判断，不是调用方的。"""
+    monkeypatch.setenv("VOX_ASR_KEY", "sk-fake")
+    provider = DashScopeAsrProvider()
+
+    def raise_http(code):
+        def opener(*_args, **_kwargs):
+            raise HTTPError("https://example.invalid", code, "no", {}, None)  # type: ignore[arg-type]
+        return opener
+
+    for code, expected in ((429, True), (500, True), (503, True), (401, False), (400, False)):
+        monkeypatch.setattr("core.audio.asr_cloud.urlopen", raise_http(code))
+        with pytest.raises(DashScopeAsrError) as caught:
+            provider._post({"model": "m"})
+        assert caught.value.retryable is expected, code
+
+
+def test_a_timeout_and_a_dead_network_are_retryable(monkeypatch):
+    monkeypatch.setenv("VOX_ASR_KEY", "sk-fake")
+    provider = DashScopeAsrProvider()
+    for error in (TimeoutError("slow"), URLError("no route")):
+        def opener(*_args, _error=error, **_kwargs):
+            raise _error
+        monkeypatch.setattr("core.audio.asr_cloud.urlopen", opener)
+        with pytest.raises(DashScopeAsrError) as caught:
+            provider._post({"model": "m"})
+        assert caught.value.retryable is True
+
+
+def test_retries_and_failures_are_counted_separately(monkeypatch):
+    """`failures` 是「最终没成」，`retries` 是「第一次没成但救回来了」。
+
+    混在一个数字里会让「网络在抖」和「配置是错的」看起来一样。
+    """
+    monkeypatch.setattr("core.audio.asr_cloud.RETRY_WAIT_S", 0.0)
+    transport = Flaky(DashScopeAsrError("502", retryable=True))
+    provider = DashScopeAsrProvider(transport=transport, silence_s=0.3, min_utterance_s=0.2)
+    stream = provider.create_stream()
+    stream.gate = FakeGate("SSSS......")
+    drive(provider, stream, "SSSS...")
+    for _ in range(40):
+        result = provider.feed(stream, speech(0.1), SAMPLE_RATE)
+        if result.is_endpoint:
+            assert result.text == "救回来了"
+            break
+    assert provider.retries == 1
+    assert provider.failures == 0
+    assert provider.take_error() == ""
 
 
 # -- 生命周期 ---------------------------------------------------------------
