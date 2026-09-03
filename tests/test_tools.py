@@ -88,9 +88,19 @@ def fake_search(query, limit):
 # -- configuration -----------------------------------------------------------
 
 
-def test_shipped_config_keeps_the_shell_shut():
+def test_the_shipped_config_opens_the_shell_behind_three_gates():
+    """**2026-09-03 出厂配置把 shell 打开了** —— 使用者点名要「能直接执行终端命令」。
+
+    所以这里断言的不再是「关着」，而是**开着的那三个条件**：白名单非空且只读、白名单内
+    仍要确认、未验证的说话人进不来。少任何一条，这个 true 就不可接受。
+    危险模式在代码里（不可配置），那一条由 tests/test_tool_security.py 管。
+    """
     config = load_tools_config()
-    assert config["shell"]["enabled"] is False
+
+    assert config["shell"]["enabled"] is True
+    assert config["shell"]["allow"], "开着但白名单是空的"
+    assert config["shell"]["require_confirmation"] is True
+    assert config["shell"]["require_verified_speaker"] is True
     assert config["fs"]["enabled"] is True
 
 
@@ -497,9 +507,14 @@ def test_open_tools_registers_the_shell_once_it_is_on(config):
 
 def test_the_shipped_wiring_reports_what_the_gate_enforces():
     report = open_tools().describe()
-    assert report["policy"]["shell_enabled"] is False
+    # 2026-09-03：出厂配置打开了 shell（见上面那条）。这里要看的是**报告如实**——
+    # 一个说「关着」而其实开着的就绪清单比没有清单更糟。
+    assert report["policy"]["shell_enabled"] is True
+    assert report["policy"]["shell_allow_count"] > 0
     assert report["policy"]["dangerous_patterns"] >= 13
-    assert report["policy"]["warnings"] == []
+    # **开着就要有一条警告。** 这句话读起来像在自责，但它是对的：白名单再窄，
+    # 语音转写听错一句仍然可能落在一条能跑的命令上。就绪清单要印它。
+    assert any("shell.run is enabled" in line for line in report["policy"]["warnings"])
 
 
 def test_importing_the_package_starts_nothing(config):

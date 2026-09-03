@@ -232,12 +232,20 @@ def test_the_tool_re_checks_the_sandbox_itself(config, tmp_path):
 # -- shell.run: four layers, none optional -------------------------------------
 
 
-def test_the_shipped_config_has_the_shell_off():
-    """Layer 1. Off in the file *and* in the code defaults, so deleting the file
-    cannot turn it on."""
-    shipped = load_tools_config()["shell"]
-    assert shipped["enabled"] is False
-    assert DefaultToolPolicy().check(
+def test_the_code_default_keeps_the_shell_off_even_though_the_file_turns_it_on():
+    """**层次没变，值变了。**
+
+    `config/tools.toml` 2026-09-03 把 `enabled` 打开了（使用者点名要「能直接执行终端
+    命令」），但**代码默认仍然是关的** —— 删掉配置文件不能把它打开，而那正是这一层存在的
+    理由：一个「文件丢了就获得代码执行」的默认值是错的默认值。
+
+    出厂文件里那个 true 的可接受性由另外三条断言承担（白名单只读 + 确认卡 + 声纹门），
+    见本文件末尾那一组。
+    """
+    from core.tools.policy import DEFAULTS
+
+    assert DEFAULTS["shell"]["enabled"] is False, "代码默认必须是关的"
+    assert DefaultToolPolicy({"shell": {"enabled": False}}).check(
         ToolRequest(tool="shell.run", arguments={"command": "git status"})
     ).error == "shell tools are disabled"
 
@@ -550,6 +558,90 @@ def test_switching_off_a_shell_layer_is_reported(config):
     assert any("verified speaker" in w for w in report["warnings"])
 
 
-def test_the_shipped_wiring_registers_no_shell():
-    """``registered`` answers "can this machine run commands at all"."""
-    assert "shell.run" not in open_tools().describe()["registered"]
+def test_the_shell_tool_is_registered_now_that_the_file_turns_it_on():
+    """``registered`` 回答的是「这台机器到底能不能跑命令」。
+
+    2026-09-03 之前这里断言的是**不能**。现在能了 —— 但能跑什么由白名单决定，而白名单
+    是只读命令，且每一条仍要过确认卡与声纹门。改这一条断言时要连带看文件末尾那一组。
+    """
+    assert "shell.run" in open_tools().describe()["registered"]
+
+
+# ------------------------------------------ 出厂白名单本身（2026-09-03 打开了 shell）
+
+
+def test_the_shipped_shell_allowlist_is_read_only():
+    """`shell.run` 现在默认开着（使用者点名要「能直接执行终端命令」），所以**出厂白名单
+    本身**成了一道边界，得有断言看着它。
+
+    判据是「只读、可复述、错了也不留痕」。一条能写文件 / 装东西 / 联网的命令混进来，
+    症状不会是报错 —— 而是某天一句听错的话真的改了什么。
+    """
+    from core.tools.policy import load_tools_config
+
+    allow = load_tools_config()["shell"]["allow"]
+
+    assert allow, "开着 shell 但白名单是空的 —— 那等于开了个什么都跑不了的开关"
+    forbidden = (
+        "pip", "npm", "python", "node", "cargo", "git commit", "git checkout",
+        "git push", "git reset", "del", "rm", "mv", "copy", "curl", "wget",
+        "reg", "sc ", "shutdown", "taskkill", "powershell", "cmd",
+    )
+    for entry in allow:
+        head = entry.casefold()
+        for banned in forbidden:
+            assert not head.startswith(banned), f"白名单里有会改东西的命令：{entry}"
+
+
+def test_the_three_gates_are_all_still_on_in_the_shipped_config():
+    """打开 `enabled` **不等于**松掉闸门。这三条一起构成「一句话能跑命令」可接受的条件。"""
+    from core.tools.policy import load_tools_config
+
+    shell = load_tools_config()["shell"]
+
+    assert shell["enabled"] is True
+    assert shell["require_confirmation"] is True, "白名单内也要在球上确认一次"
+    assert shell["require_verified_speaker"] is True, "没过声纹的来源不许跑命令"
+
+
+def test_a_whitelisted_command_still_needs_confirmation_end_to_end():
+    """走真的 runner，不是构造一个 policy 对象 —— 要钉的是**接线**。"""
+    from core.tools import open_tools
+    from core.tools.contract import ToolRequest
+
+    runner = open_tools()
+
+    asked = runner.run(
+        ToolRequest(tool="shell.run", arguments={"command": "git status"}, speaker="tester")
+    )
+    assert asked.needs_confirmation is True
+    assert asked.ok is False, "没确认就跑了"
+
+    done = runner.run(
+        ToolRequest(
+            tool="shell.run",
+            arguments={"command": "git status", "confirmed": True},
+            speaker="tester",
+        )
+    )
+    assert done.ok is True and done.output
+
+
+@pytest.mark.parametrize(
+    "command,why",
+    [
+        ("pip install requests", "不在白名单"),
+        ("git status && rm -rf x", "shell 元字符"),
+        ("rm -rf /", "危险模式"),
+        ("git log > out.txt", "重定向"),
+    ],
+)
+def test_the_shipped_config_still_refuses_the_obvious_ones(command, why):
+    from core.tools import open_tools
+    from core.tools.contract import ToolRequest
+
+    result = open_tools().run(
+        ToolRequest(tool="shell.run", arguments={"command": command}, speaker="tester")
+    )
+
+    assert result.ok is False and result.needs_confirmation is False, why
