@@ -979,6 +979,51 @@ $env:PYTHONUTF8=1; .\.venv\Scripts\python.exe scripts/acceptance/real_mic_e2e.py
 应当落在「需要确认」或被拒，**不能**因为「已验证」而直接执行 —— 那一刻没有音频可比对，
 `begin_listening()` 把说话人清成 `None` 就是为了这个。
 
+## 微信通道验收（REAL-WEIXIN，代码级已过）
+
+适用时机：改 `core/channels/` 之后，或者第一次把微信接上。
+
+代码级（AUTO，不打网络）：
+
+```powershell
+python -m pytest tests/test_channels.py tests/test_channel_crypto.py tests/test_weixin_login.py -q
+```
+
+期望 **63 passed**（channels 31 + crypto 15 + login 17）。
+
+控制台那一侧另有几条，**`-k weixin` 抓不全**（`-k` 匹配的是测试名，而那几条里只有一个名字
+带 weixin，其余叫 `..._renders_the_qr_...` / `..._unbinding_...` / `..._cursor_...`）：
+
+```powershell
+python -m pytest tests/test_console.py -q -k "weixin or qr or unbind or cursor or channel"
+```
+
+期望 **7 passed**。其中最该看的两条：「token 的值不出现在返回给页面的任何地方」（这一页会被
+截图）和「游标只返回新条目」（重复给会让同一条消息在界面上出现好几遍）。
+
+真机那一步按顺序做，**每一步都有它自己会失败的方式**：
+
+1. **绑定。** 控制台「微信」栏 → 「扫码登录」→ 手机微信扫 → 微信里点确认。
+   - 页面一直停在「请用手机微信扫码」而手机说已确认 → 看 `scaned_but_redirect` 有没有生效
+     （凭据里的 `base_url` 应该变成了另一个域名）。
+   - 二维码框空白 → 缺 `segno`：`.venv\Scripts\python.exe -m pip install segno`。
+2. **打开通道。** `config/channels.toml` 的 `enabled = true`，然后在控制台点「重启」。
+   启动日志里应该有 `weixin: 在听（语音回复 开，出站语音走 文件附件）`。
+3. **文字往返。** 从另一个微信号给它发一句「现在几点」。控制台「微信」栏的实时收发里
+   应该出现一条 `in` 和一条 `out`。
+   - 有 `in` 没有 `out` → 看运行日志里 `weixin` 那一源，多半是 `context_token` 没回带
+     （出站必须回带该 peer 最新的那个）。
+4. **语音进。** 发一条**语音消息**。日志里 `source` 应该是 `local`（本机 ASR 转的）。
+   - `source=provider` 说明用的是腾讯自带的转写 —— 那是退路，通常意味着原始音频是 SILK
+     而我们解不了（日志里会说「SILK 我们解不了」）。这不是缺陷，是已知边界。
+5. **语音出。** 回复应该同时有文字和一个能播的音频附件。
+   - **原生语音气泡未验证**：Hermes 上游自己都没跑通（`send_voice` 的注释写着
+     `not proven-working`），所以默认走文件附件。想试原生就把 `voice_native = true`，
+     试完请把结果记进 `docs/research/prototype-results.md` —— 不管成没成。
+
+安全边界照旧，不需要验但要知道：这条路上 `speaker` 永远是 `None`，所以 `shell.run` 进不来；
+Vox 麦克风录到的音频永不出网（`core/channels/` 不 import 采集侧）。
+
 ## EvoX 会话桥接回归
 
 适用时机：修改 `core/session_bridge.py`、认证头、桥接 URL、turn 取消路径或响应格式后。
