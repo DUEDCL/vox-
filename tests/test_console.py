@@ -12,7 +12,9 @@ from __future__ import annotations
 import base64
 import io
 import json
+import shutil
 import struct
+import tomllib
 import urllib.error
 import urllib.request
 import wave
@@ -2242,3 +2244,97 @@ def test_the_route_passes_the_filters_through():
     assert len(api.log_view(level="error")["entries"]) == 1
     assert len(api.log_view(source="turn")["entries"]) == 1
     assert len(api.log_view(query="C:/x")["entries"]) == 1
+
+
+# ------------------------------ 网站与放歌模板可从页面改（2026-09-03）
+
+
+#: 出厂的 tools.toml。测试拷一份到 tmp 再改 —— 直接改它等于跑一次测试就动了使用者的配置。
+SHIPPED_TOOLS = Path(__file__).resolve().parents[1] / "config" / "tools.toml"
+
+
+@pytest.fixture
+def sites_api(tmp_path):
+    """拷一份 tools.toml 到 tmp —— 不隔离的话跑一次测试就会改使用者真的配置。"""
+    shutil.copy(SHIPPED_TOOLS, tmp_path / "tools.toml")
+    return ConsoleApi(runtime=None, stack=None, config_dir=tmp_path)
+
+
+def test_a_site_can_be_added_from_the_page(sites_api):
+    """使用者的标准：「web 界面应该可以对 vox 进行全范围的配置修改」。
+    `apps.sites` 此前是审计脚本里的一条**已知缺口** —— 它是表不是标量，`set_scalars` 写不了。"""
+    result = sites_api.sites_save("sites", "小红书", "https://www.xiaohongshu.com/")
+
+    assert result["sites"]["小红书"] == "https://www.xiaohongshu.com/"
+    # 别的条目不能被碰掉。
+    assert result["sites"]["B站"] == "https://www.bilibili.com/"
+
+
+def test_an_existing_chinese_key_is_updated_in_place_not_duplicated(sites_api):
+    """`[apps.sites]` 的键是中文，在 TOML 里是**引号键**。只认裸键的写入器会以为它不存在，
+    然后在下面插一条重复的 —— 而 TOML 里重复键是解析错误，所以症状是「保存失败」。"""
+    sites_api.sites_save("sites", "抖音", "https://www.douyin.com/discover")
+
+    text = (sites_api.config_dir / "tools.toml").read_text(encoding="utf-8")
+    assert text.count('"抖音"') == 1
+    parsed = tomllib.loads(text)
+    assert parsed["apps"]["sites"]["抖音"] == "https://www.douyin.com/discover"
+
+
+def test_the_comments_survive_a_site_edit(sites_api):
+    """这个文件里的注释是它一半的价值。"""
+    sites_api.sites_save("sites", "抖音", "https://www.douyin.com/")
+
+    text = (sites_api.config_dir / "tools.toml").read_text(encoding="utf-8")
+    assert "我习惯使用网页版刷视频" in text
+
+
+def test_a_non_http_target_is_refused(sites_api):
+    """这两张表放开的前提是它们**只产出一个浏览器要打开的地址**。一个 `file://` 或者
+    自定义协议就不是那件事了。"""
+    for bad in ("file:///C:/Windows/System32", "orpheus://search/x", "javascript:alert(1)"):
+        with pytest.raises(ApiError):
+            sites_api.sites_save("sites", "坏的", bad)
+
+
+def test_a_play_template_must_have_a_query_placeholder(sites_api):
+    with pytest.raises(ApiError, match=r"\{q\}"):
+        sites_api.sites_save("play", "网易云音乐", "https://music.163.com/")
+
+
+def test_a_play_template_is_accepted_with_the_placeholder(sites_api):
+    result = sites_api.sites_save(
+        "play", "洛雪音乐", "https://example.com/search?k={q}"
+    )
+
+    assert result["play"]["洛雪音乐"] == "https://example.com/search?k={q}"
+
+
+def test_only_these_two_tables_are_reachable(sites_api):
+    """**`apps.entries` 不在这个入口的射程内。** 它是「名字 → 可执行文件绝对路径」，
+    让网页往里加一条等于给它代码执行。"""
+    with pytest.raises(ApiError, match="kind"):
+        sites_api.sites_save("entries", "后门", "https://example.com/")
+
+
+def test_a_site_can_be_deleted(sites_api):
+    sites_api.sites_save("sites", "小红书", "https://www.xiaohongshu.com/")
+
+    result = sites_api.sites_delete("sites", "小红书")
+
+    assert "小红书" not in result["sites"]
+    assert result["sites"]["B站"], "删一条把别的删掉了"
+
+
+def test_deleting_something_that_is_not_there_says_so(sites_api):
+    with pytest.raises(ApiError, match="没有"):
+        sites_api.sites_delete("sites", "从来没有过的")
+
+
+def test_the_view_reports_what_this_machine_can_actually_open(sites_api):
+    """放歌模板的键必须对上一个**真的能开的**应用 —— 配一个不存在的名字，
+    那条模板永远不会被用到，而页面上看不出来。"""
+    view = sites_api.sites_view()
+
+    assert isinstance(view["discovered"], list)
+    assert view["entries"], "白名单里那几个也要报出来"

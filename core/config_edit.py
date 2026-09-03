@@ -37,7 +37,16 @@ from typing import Any, Callable, Mapping, Sequence
 #: ``key = value`` at the start of a line, capturing indent, name, separator and
 #: the rest. Deliberately anchored: a ``key =`` inside a multi-line array is
 #: indented content, not an assignment, and must not match.
-_ASSIGN = re.compile(r"^(?P<indent>[ \t]*)(?P<key>[A-Za-z0-9_-]+)(?P<sep>[ \t]*=[ \t]*)(?P<rest>.*)$")
+#: 一行赋值。``key`` 收**裸键和带引号的键**两种。
+#:
+#: 带引号那一种不是补全性 —— `config/tools.toml` 的 `[apps.sites]` 键是中文（`"抖音"`、
+#: `"B站"`），而 TOML 里那必须加引号。只认裸键的后果是这一整张表**改不了**，而使用者点名
+#: 要求「web 界面能进行全范围的配置修改」。捕获组把引号留在 ``key`` 里，
+#: ``_key_name`` 负责脱掉它 —— 重写那一行时要原样写回去，所以两个形态都得留着。
+_ASSIGN = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<key>[A-Za-z0-9_-]+|\"[^\"\n]*\"|'[^'\n]*')"
+    r"(?P<sep>[ \t]*=[ \t]*)(?P<rest>.*)$"
+)
 _TABLE = re.compile(r"^[ \t]*\[(?P<name>[^\[\]]+)\][ \t]*(?:#.*)?$")
 #: ``[[agents]]`` -- an array of tables. Each occurrence is a new element, so the
 #: section name gets an index (``agents[0]``) and two entries with the same key
@@ -49,6 +58,38 @@ _INDEXED = re.compile(r"^(?P<table>[^\[\]]+)\[(?P<index>\d+)\]$")
 #: scope on purpose: this project's config files do not use them, and accepting
 #: them here would mean quoting rules in the writer too.
 _BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _key_name(raw: str) -> str:
+    """一行赋值里捕获到的键 -> 它真正的名字。带引号的脱引号。
+
+    ``_ASSIGN`` 刻意把引号留在捕获组里（重写那一行要原样写回去），所以每个**比较**键名的
+    地方都得先过这一层。漏一处的症状是「`"抖音"` 那一行明明在，却被当成不存在而在下面插了
+    一条重复的」—— 而 TOML 里重复键是解析错误，所以那一步会被 validate 挡住，
+    表现是「保存失败」而不是「写坏了」。
+    """
+    text = str(raw)
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        inner = text[1:-1]
+        if text[0] == '"':
+            return inner.replace('\\"', '"').replace("\\\\", "\\")
+        return inner
+    return text
+
+
+def _write_key(name: str) -> str:
+    """一个键名 -> 写进文件的形式。裸键原样，其余加双引号并转义。
+
+    非法的（含换行或控制字符）**直接拒**：那样的键会把文件写成一个解析不了的东西，
+    而那比拒绝一次保存糟得多。
+    """
+    text = str(name)
+    if _BARE_KEY.match(text):
+        return text
+    if any(char in text for char in "\n\r") or any(ord(char) < 0x20 for char in text):
+        raise ConfigEditError(f"键里有换行或控制字符，写不进 TOML：{text!r}")
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 _SECTION_NAME = re.compile(r"^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$")
 
 
@@ -170,7 +211,7 @@ def scan(path: str | Path) -> dict[str, dict[str, Any]]:
         if not match or not section:
             continue
         value, _comment = _split_comment(match.group("rest"))
-        name = match.group("key")
+        name = _key_name(match.group("key"))
         key = f"{section}.{name}"
         entry = {
             "key": key,
@@ -218,7 +259,7 @@ def set_scalars(
         match = _ASSIGN.match(line)
         if not match or not section:
             continue
-        key = f"{section}.{match.group('key')}"
+        key = f"{section}.{_key_name(match.group('key'))}"
         if key not in pending:
             continue
         old_text, comment = _split_comment(match.group("rest"))
@@ -320,8 +361,9 @@ def set_section(
     if not _SECTION_NAME.match(section):
         raise ConfigEditError(f"not a plain table name: {section!r}")
     for name in values:
-        if not _BARE_KEY.match(name):
-            raise ConfigEditError(f"not a bare TOML key: {name!r}")
+        # 不再要求裸键：`[apps.sites]` 的键是中文，而那在 TOML 里是合法的引号键。
+        # 非法的（换行 / 控制字符）由 `_write_key` 拒。
+        _write_key(name)
     if not values:
         return {}
 
@@ -350,7 +392,7 @@ def set_section(
         block = [] if (not lines or not lines[-1].strip()) else [""]
         block.append(f"[{section}]")
         for name, value in pending.items():
-            block.append(f"{name} = {render(value)}")
+            block.append(f"{_write_key(name)} = {render(value)}")
             changed[f"{section}.{name}"] = {"from": None, "to": render(value)}
         lines.extend(block)
     else:
@@ -362,7 +404,7 @@ def set_section(
             if not match:
                 continue
             after = index
-            key = match.group("key")
+            key = _key_name(match.group("key"))
             if key not in pending:
                 continue
             old_text, comment = _split_comment(match.group("rest"))
@@ -373,18 +415,59 @@ def set_section(
             new_text = render(pending.pop(key))
             spacer = "  " if comment else ""
             lines[index] = (
-                f"{match.group('indent')}{key}{match.group('sep')}"
+                f"{match.group('indent')}{match.group('key')}{match.group('sep')}"
                 f"{new_text}{spacer}{comment}".rstrip()
             )
             changed[f"{section}.{key}"] = {"from": old_text, "to": new_text}
         additions = []
         for name, value in pending.items():
-            additions.append(f"{name} = {render(value)}")
+            additions.append(f"{_write_key(name)} = {render(value)}")
             changed[f"{section}.{name}"] = {"from": None, "to": render(value)}
         if additions:
             lines[after + 1 : after + 1] = additions
 
     return _commit(target, eol.join(lines) + newline, validate=validate, changed=changed)
+
+
+def drop_key(
+    path: str | Path,
+    section: str,
+    name: str,
+    *,
+    validate: Callable[[Path], Any] | None = None,
+) -> bool:
+    """删掉一张表里的一个键。返回是否真的删掉了。
+
+    只删**一行**，而且只在指定的表里找 —— 一个能删任意行的编辑器在这个项目里没有用途，
+    而它能造成的破坏（删掉一条安全边界的赋值）比它省下的事大得多。
+
+    注释跟着走：删的是那一行，它上面的注释块**留下**。那通常是对的（一段介绍整张表的注释
+    不该因为删掉表里一条而消失），代价是删干净一整条带说明的条目要手动收尾。
+    """
+    target = Path(path)
+    if not target.is_file():
+        raise ConfigEditError(f"config file not found: {target}")
+    original, eol, newline = _read_lines(target)
+    lines = list(original)
+    counters: dict[str, int] = {}
+    current: str | None = None
+    hit: int | None = None
+    for index, line in enumerate(lines):
+        header = _section_of(line, counters)
+        if header is not None:
+            current = header
+            continue
+        if current != section:
+            continue
+        match = _ASSIGN.match(line)
+        if match and _key_name(match.group("key")) == name:
+            hit = index
+            break
+    if hit is None:
+        return False
+    del lines[hit]
+    _commit(target, eol.join(lines) + newline, validate=validate, changed={f"{section}.{name}": None})
+    return True
 
 
 def editable_keys(path: str | Path, allow: Sequence[str] | None = None) -> list[dict[str, Any]]:
@@ -394,4 +477,12 @@ def editable_keys(path: str | Path, allow: Sequence[str] | None = None) -> list[
     return [found[key] for key in keys]
 
 
-__all__ = ["ConfigEditError", "editable_keys", "render", "scan", "set_scalars", "set_section"]
+__all__ = [
+    "ConfigEditError",
+    "drop_key",
+    "editable_keys",
+    "render",
+    "scan",
+    "set_scalars",
+    "set_section",
+]

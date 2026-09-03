@@ -54,13 +54,26 @@ WONT: dict[str, str] = {
     "web.enabled": "出网总开关",
     "web.blocked_domains": "域名黑名单，只能收紧",
     "apps.entries": "「说出来的名字 → 可执行文件绝对路径」。让一个网页往里加一条"
-    "等于给它代码执行 —— 这一条不打算放开",
+    "等于给它代码执行 —— 这一条不打算放开。装了的应用现在靠 apps.discover 自动发现，所以这张表只剩「装在怪地方、发现不到」那种情况",
 }
 
 #: 已知缺口 -> 为什么还没做。**这一类是欠的账，不是立场**，所以它带的是计划不是理由。
-KNOWN_GAPS: dict[str, str] = {
-    "apps.sites": "是表不是标量，set_scalars 写不了 —— 要一个和 agents / mcp 同款的表编辑器",
-    "apps.play": "同上（每个应用一个「带词打开」模板）",
+#:
+#: **2026-09-03 清空了。** `apps.sites` 与 `apps.play` 走 `/api/sites`（`set_section` +
+#: `drop_key`，两者现在都认引号键 —— `[apps.sites]` 的键是中文）。它们能放开是因为两张表
+#: 都只产出一个**浏览器要打开的地址**，而 `web.open` 已经允许任何请求打开一个地址，
+#: 所以放开不增加任何能力。`apps.play` 只收 `http(s)` 模板：把 URI 当 argv 传给已装的 exe
+#: 是给一个白名单里的程序加参数（想想 `--load-extension`），那一种留在文件里。
+KNOWN_GAPS: dict[str, str] = {}
+
+#: 有**专用编辑入口**的键 -> 那个入口。第三类，既不是标量白名单也不是缺口。
+#:
+#: 存在的理由：`EDITABLE` 是给 `set_scalars` 用的白名单，而表（`[apps.sites]` 这种）写不进
+#: 标量白名单里。只看 `EDITABLE` 的审计会把「已经有专门界面能改」误报成缺口，
+#: 而一个会误报的审计脚本很快就没人看了。
+VIA_ENDPOINT: dict[str, str] = {
+    "apps.sites": "/api/sites（表编辑器；只收 http(s)，因为它只产出一个要打开的地址）",
+    "apps.play": "/api/sites（同上，模板必须带 {q}）",
 }
 
 
@@ -105,17 +118,25 @@ def audit() -> int:
     gaps: list[str] = []
     for file, keys in surfaces.items():
         editable = set(EDITABLE.get(file, ()))
+        covered = editable | set(VIA_ENDPOINT)
         print(f"\n=== {file} ===")
-        print(f"  可改        {len(editable & set(keys))} / {len(keys)}")
-        deliberate = [key for key in keys if key not in editable and key in WONT]
-        known = [key for key in keys if key not in editable and key in KNOWN_GAPS]
+        print(f"  可改        {len(covered & set(keys))} / {len(keys)}")
+        deliberate = [key for key in keys if key not in covered and key in WONT]
+        known = [key for key in keys if key not in covered and key in KNOWN_GAPS]
+        endpoints = [key for key in keys if key not in editable and key in VIA_ENDPOINT]
         missing = [
-            key for key in keys if key not in editable and key not in WONT and key not in KNOWN_GAPS
+            key
+            for key in keys
+            if key not in covered and key not in WONT and key not in KNOWN_GAPS
         ]
         if deliberate:
             print("  刻意不可改：")
             for key in sorted(deliberate):
                 print(f"    - {key}：{WONT[key]}")
+        if endpoints:
+            print("  有专用编辑入口：")
+            for key in sorted(endpoints):
+                print(f"    - {key}：{VIA_ENDPOINT[key]}")
         if known:
             print("  已知缺口（欠的账）：")
             for key in sorted(known):

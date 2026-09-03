@@ -44,7 +44,14 @@ from core.audio.keywords import (
     read_keywords,
     write_keywords,
 )
-from core.config_edit import ConfigEditError, editable_keys, scan, set_scalars
+from core.config_edit import (
+    ConfigEditError,
+    drop_key,
+    editable_keys,
+    scan,
+    set_scalars,
+    set_section,
+)
 from core.console import providers
 from core.console.audio import AudioDecodeError, decode_wav_base64, quality
 from core.console.logbook import Logbook
@@ -1097,6 +1104,99 @@ class ConsoleApi:
     def log_clear(self) -> dict[str, Any]:
         self.logbook.clear()
         return {"cleared": True}
+
+    # ------------------------------------------------------------ 网站与放歌模板
+
+    def sites_view(self) -> dict[str, Any]:
+        """`apps.sites` 与 `apps.play` 两张表，加上这台机器上发现到的应用名。
+
+        发现到的那份一起报，是因为「放歌模板」的键必须对上一个**真的能开的**应用 ——
+        配一个不存在的名字，那条模板永远不会被用到，而页面上看不出来。
+        """
+        from core.tools.app_index import AppIndex
+        from core.tools.policy import load_tools_config
+
+        # **按 `config_dir` 读，不读全局那份。** 不然写进 tmp 的那份改动在这里看不见 ——
+        # 而「保存成功了但页面没变」是这一类里最让人不信任的失败。
+        path = self.config_dir / "tools.toml"
+        config = load_tools_config(path) if path.is_file() else load_tools_config()
+        apps = dict(config.get("apps", {}))
+        try:
+            discovered = AppIndex().labels()
+        except Exception:  # noqa: BLE001 - 扫描失败不该让这一页打不开
+            discovered = []
+        return {
+            "sites": dict(apps.get("sites", {}) or {}),
+            "play": dict(apps.get("play", {}) or {}),
+            "entries": sorted(apps.get("entries", {}) or {}),
+            "discovered": discovered,
+            "discover": bool(apps.get("discover", True)),
+        }
+
+    def sites_save(self, kind: str, name: str, url: str) -> dict[str, Any]:
+        """往 `apps.sites` 或 `apps.play` 里写一条。
+
+        ## 为什么这两张表可以从网页改，而 `apps.entries` 不行
+
+        `entries` 是「名字 → 可执行文件绝对路径」，让网页往里加一条等于给它代码执行。
+        这两张表都只产出一个**浏览器要打开的地址**，而 `web.open` 已经允许任何请求打开一个
+        地址 —— 所以放开它们不增加任何能力，只是把「每次都得改文件」这件事去掉。
+
+        `play` **只收 `http(s)` 模板**。配置文件里那条 `orpheus://search/{q}` 形态是把 URI
+        当一个 argv 传给已装的 exe —— 那是给一个已经在白名单里的程序加参数，比开一个网页多
+        一档权限（想想 `--load-extension`）。那一种留在文件里。
+        """
+        table = str(kind or "").strip().lower()
+        if table not in ("sites", "play"):
+            raise ApiError("kind 只能是 sites 或 play")
+        label = str(name or "").strip()
+        target = str(url or "").strip()
+        if not label:
+            raise ApiError("name is required")
+        if "\n" in label or "\r" in label:
+            raise ApiError("名字里不能有换行")
+        problem = url_problem(target.replace("{q}", "x"))
+        if problem is not None:
+            raise ApiError(f"这个地址不能用：{problem}")
+        if table == "play" and "{q}" not in target:
+            raise ApiError("放歌模板里必须有 {q} —— 那是要搜的那个词的位置")
+        from core.tools.policy import load_tools_config  # noqa: PLC0415
+
+        path = self.config_dir / "tools.toml"
+        try:
+            changed = set_section(
+                path,
+                f"apps.{table}",
+                {label: target},
+                validate=lambda candidate: load_tools_config(candidate),
+            )
+        except (ConfigEditError, OSError) as exc:
+            raise ApiError(f"写不进去：{exc}", status=409) from exc
+        return {"changed": changed, **self.sites_view()}
+
+    def sites_delete(self, kind: str, name: str) -> dict[str, Any]:
+        """删一条。**只删这两张表里的** —— 别的段落这个入口够不到。"""
+        table = str(kind or "").strip().lower()
+        if table not in ("sites", "play"):
+            raise ApiError("kind 只能是 sites 或 play")
+        label = str(name or "").strip()
+        if not label:
+            raise ApiError("name is required")
+        from core.tools.policy import load_tools_config  # noqa: PLC0415
+
+        path = self.config_dir / "tools.toml"
+        try:
+            removed = drop_key(
+                path,
+                f"apps.{table}",
+                label,
+                validate=lambda candidate: load_tools_config(candidate),
+            )
+        except (ConfigEditError, OSError) as exc:
+            raise ApiError(f"删不掉：{exc}", status=409) from exc
+        if not removed:
+            raise ApiError(f"apps.{table} 里没有「{label}」", status=404)
+        return {"removed": label, **self.sites_view()}
 
     # ---------------------------------------------------------------- 微信通道
 

@@ -173,7 +173,7 @@ def test_every_config_key_is_either_editable_or_has_a_stated_reason():
         "voice.toml": audit.voice_keys(),
         "tools.toml": audit.tools_keys(),
     }.items():
-        editable = set(EDITABLE.get(file, ()))
+        editable = set(EDITABLE.get(file, ())) | set(audit.VIA_ENDPOINT)
         for key in keys:
             if key in editable or key in audit.WONT or key in audit.KNOWN_GAPS:
                 continue

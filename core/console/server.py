@@ -230,6 +230,8 @@ class ConsoleServer:
                     source=(query.get("source") or [""])[0],
                     query=(query.get("q") or [""])[0],
                 )
+            if path == "/api/sites":
+                return api.sites_view()
             if path == "/api/weixin":
                 return api.weixin_view()
             if path == "/api/weixin/messages":
@@ -323,6 +325,18 @@ class ConsoleServer:
                     str(payload.get("key_env", "")),
                     str(payload.get("proto", "")),
                     str(payload.get("model", "")),
+                )
+            # 网站与放歌模板。两张表都只产出一个「浏览器要打开的地址」，所以放开它们
+            # 不增加任何能力 —— `apps.entries`（名字 → exe 绝对路径）仍然只能改文件。
+            if path == "/api/sites":
+                return api.sites_save(
+                    str(payload.get("kind", "")),
+                    str(payload.get("name", "")),
+                    str(payload.get("url", "")),
+                )
+            if path == "/api/sites/delete":
+                return api.sites_delete(
+                    str(payload.get("kind", "")), str(payload.get("name", ""))
                 )
             # 微信：扫码绑定与那一栏的实时收发。四个都是 POST —— 它们都有副作用
             # （开一次登录会话、写凭据、删凭据、发一条消息）。
