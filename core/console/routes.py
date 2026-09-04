@@ -34,7 +34,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from core.audio import winlevel
-from core.audio.config import load_voice_config, repo_root, resolve_device
+from core.audio.config import load_voice_config, repo_root, resolve_device, usable_input
 from core.audio.enroll_prompts import DEFAULT_ROUNDS, as_json as enroll_prompts_json
 from core.audio.keywords import (
     MAX_KEYWORDS,
@@ -695,7 +695,7 @@ class ConsoleApi:
         rate = int(getattr(capture, "sample_rate", 16000) or 16000)
         size = int(getattr(capture, "blocksize", 1600) or 1600)
         gain = getattr(capture, "auto_gain", None)
-        selector, device_name = self._device_in_use()
+        selector, device_name, wanted = self._device_in_use()
         os_side: dict[str, Any] | None = None
         os_reason = ""
         if device_name:
@@ -710,6 +710,10 @@ class ConsoleApi:
             # **在用哪只设备，报名字。** 索引会漂（实测 `device = "2"` 从「耳机」变成了
             # 「麦克风阵列」），而一个只报索引的界面让这件事永远不可见。
             "device": device_name or (None if selector is None else str(selector)),
+            # **配置想要但没拿到的那只。** 耳机拔了之后配置里那句 `device = "耳机"` 匹配不到
+            # 任何设备，栈会退到系统默认 —— 而在这一行存在之前界面照旧印「设备：耳机」，
+            # 那是在撒谎，也是使用者报「用内置麦克风时读不到设备」的原因。
+            "device_wanted": wanted or None,
             # **Windows 那一侧的输入音量。** 同一时刻实测「耳机」0.01、「麦克风阵列」0.82
             # —— 「设备坏了」和「音量是 1%」此前在界面上长得一模一样。
             "os": os_side,
@@ -1978,23 +1982,99 @@ class ConsoleApi:
 
     # -- 输入设备与 OS 那一侧的输入音量 ------------------------------------------
 
-    def _device_in_use(self) -> tuple[int | str | None, str]:
-        """当前在用的输入设备：`sounddevice` 的选择子，和它的**名字**。
+    def _device_in_use(self) -> tuple[int | str | None, str, str]:
+        """当前在用的输入设备：`sounddevice` 的选择子、它的**名字**、以及配置想要但没拿到的那个。
 
         名字才是能对上 Windows 那一侧的东西 —— 而索引会漂：`input.device = "2"` 在
         2026-08-29 是「耳机 (沉麟的耳机)」，2026-09-01 实测已经变成「麦克风阵列
         (Realtek(R) Audio)」，因为中间插拔过设备。一个只报索引的界面会让这件事永远不可见。
+
+        **2026-09-04 修了一个「用笔记本内置麦克风时读不到设备」。** 使用者报的症状是校准那一行
+        写着「设备：耳机 · 音量读不到: 不支持」并红字「认不出在用哪只输入设备（拿不到设备名）」。
+        链条是这样的（都实测过）：
+
+        1. 耳机没插，`input.device = "耳机"` 匹配不到任何设备，`resolve_device` 原样退回
+           字符串 `"耳机"`；
+        2. `open_voice_stack` 认出这件事，**改用系统默认设备**并把 `capture.device` 设成
+           `None`（那条警告一直都在）；
+        3. 而这里看到 `selector is None` 就**回头再解析一次配置** —— 于是把第 1 步刚被拒掉的
+           那个 `"耳机"` 捡了回来；
+        4. `winlevel.device_name("耳机")` 抛 `No input device matching '耳机'`，名字变成空串，
+           界面于是既报了一个错的设备名，又说读不到音量。
+
+        实测 `device_name(None)` 直接给出 `麦克风阵列 (Realtek(R) Audio)`，而
+        `read_level()` 对那个名字工作正常（当时音量 0.9776、没静音）—— **能力一直都在，
+        只是被问错了名字。**
+
+        所以现在两条规矩：
+
+        * **采集在的时候，`capture.device` 就是真相**，包括 `None` = 系统默认。不回头解析配置。
+        * **选择子问不出名字时退到系统默认**，因为那正是 `open_voice_stack` 做的事 ——
+          两层必须对同一只麦克风说同一句话。退了就把原来那个选择子当「想要但没拿到」报出去。
         """
         capture = self.stack.capture if self.stack is not None else None
         selector = getattr(capture, "device", None)
+        config = getattr(self.stack, "config", None)
+        asked: int | str | None = None
+        if isinstance(config, Mapping):
+            try:
+                asked = resolve_device(dict(config))
+            except Exception:  # noqa: BLE001 - 解析失败就当没写
+                asked = None
+        if capture is None:
+            # 没有采集（栈没建起来 / 还没开麦就来问）时只能按配置猜，这是唯一该解析它的场合。
+            selector = asked
+        # **配置点名了一只，而采集用的是系统默认** = 栈退过一次。这是「设备：耳机」那句谎话
+        # 的来源：退回去这件事在 `open_voice_stack` 的警告里有，但界面读的是这里。
+        wanted = "" if selector is not None or asked is None else str(asked)
+        try:
+            return selector, winlevel.device_name(selector), wanted
+        except Exception:  # noqa: BLE001 - 名字取不到不该让整个 /api/state 挂掉
+            pass
         if selector is None:
+            return None, "", wanted
+        try:
+            return None, winlevel.device_name(None), str(selector)
+        except Exception:  # noqa: BLE001 - 连默认设备都问不出来：如实报空
+            return selector, "", str(selector)
+
+    def _no_device_reason(self) -> str:
+        """「拿不到设备名」这句话本身不可行动 —— 带上试过什么、机器上有什么。
+
+        使用者报的那次红字就是这一句的旧版本：它没有说**哪个名字没匹配上**，也没有说
+        机器上有哪些输入设备，于是唯一的下一步是猜。
+        """
+        wanted = ""
+        try:
             config = getattr(self.stack, "config", None)
             if isinstance(config, Mapping):
-                selector = resolve_device(dict(config))
+                wanted = str(config.get("input.device", "") or "")
+        except Exception:  # noqa: BLE001
+            wanted = ""
+        names: list[str] = []
         try:
-            return selector, winlevel.device_name(selector)
-        except Exception:  # noqa: BLE001 - 名字取不到不该让整个 /api/state 挂掉
-            return selector, ""
+            import sounddevice as sd  # type: ignore
+
+            names = [
+                str(device["name"])
+                for device in sd.query_devices()
+                if device["max_input_channels"] > 0
+            ]
+        except Exception:  # noqa: BLE001 - 连枚举都失败：那本身就是答案
+            return (
+                "认不出在用哪只输入设备，而且**连设备清单都枚举不出来** —— "
+                "sounddevice / PortAudio 起不来，或者 Windows 的麦克风隐私设置拒绝了本进程"
+            )
+        listed = "、".join(dict.fromkeys(names)) or "（一只输入设备都没有）"
+        head = (
+            f"认不出在用哪只输入设备。配置里 `input.device = {wanted!r}` 没匹配到任何设备，"
+            if wanted
+            else "认不出在用哪只输入设备（连系统默认输入设备都问不出名字）。"
+        )
+        return (
+            f"{head}系统默认输入设备也问不出名字。这台机器上的输入设备："
+            f"{listed}。把 input.device 改成其中一个名字的片段，或者留空用系统默认"
+        )
 
     def input_devices(self) -> dict[str, Any]:
         """输入设备清单，**带上 Windows 那一侧的输入音量和静音状态**。
@@ -2005,21 +2085,50 @@ class ConsoleApi:
         是 0.82。这两个数字此前在界面上完全不存在，于是「设备坏了」和「音量是 1%」长得
         一模一样。
         """
-        selector, in_use = self._device_in_use()
+        selector, in_use, wanted = self._device_in_use()
         rows: list[dict[str, Any]] = []
+        default_index: int | None = None
+        rate = 16000
+        config = getattr(self.stack, "config", None)
+        if isinstance(config, Mapping):
+            try:
+                rate = int(config.get("input.sample_rate", 16000) or 16000)
+            except (TypeError, ValueError):
+                rate = 16000
         try:
             import sounddevice as sd  # type: ignore
 
             apis = sd.query_hostapis()
+            # 系统默认输入设备的索引。**用它来标 in_use，而不是只比名字** ——
+            # 同一只物理麦克风在 MME / DirectSound / WASAPI 下各出现一次，只比名字会把三条
+            # 都标成「在用」，而实际打开的只有一条。
+            #
+            # 取自 `query_devices(kind="input")["index"]`，**不是 `sd.default.device[0]`** ——
+            # 后者是 `_InputOutputPair`，既不是 list 也不是 tuple，`isinstance` 判它会失败
+            # （这一行的第一版就栽在这上面，表现是一条都没标「在用」）。
+            try:
+                default_index = int(sd.query_devices(kind="input")["index"])
+            except Exception:  # noqa: BLE001 - 拿不到就退回只比名字
+                default_index = None
             for index, device in enumerate(sd.query_devices()):
                 if device["max_input_channels"] <= 0:
                     continue
+                if selector is None:
+                    used = default_index is not None and index == default_index
+                else:
+                    used = str(index) == str(selector) or str(device["name"]) == in_use
+                api_name = str(apis[device["hostapi"]]["name"])
                 rows.append({
                     "index": index,
                     "name": str(device["name"]),
-                    "api": str(apis[device["hostapi"]]["name"]),
+                    "api": api_name,
                     "channels": int(device["max_input_channels"]),
-                    "in_use": str(index) == str(selector) or str(device["name"]) == in_use,
+                    "in_use": used,
+                    # **能不能真的当 input.device 用**，和 `_match_device` 同一套判据。
+                    # 列出解析器会拒掉的条目 = 让人点一个不生效的选项，而那正好是这次报告
+                    # 的形状（栈静默退回系统默认）。「电脑扬声器」「立体声混音」这些在
+                    # 清单里长得像麦克风，选中它们只会得到一只听不见的设备。
+                    "unusable": usable_input(index, api_name, rate),
                 })
         except Exception as exc:  # noqa: BLE001
             return {"available": False, "reason": f"{type(exc).__name__}: {exc}", "devices": []}
@@ -2036,6 +2145,8 @@ class ConsoleApi:
             "available": True,
             "reason": reason,
             "in_use": in_use,
+            # 配置点名要哪只、但一只都没匹配上。空 = 配置和现实一致。
+            "wanted": wanted,
             "selector": selector if selector is None else str(selector),
             "devices": rows,
         }
@@ -2048,7 +2159,7 @@ class ConsoleApi:
         """
         name = (device or "").strip() or self._device_in_use()[1]
         if not name:
-            raise ApiError("认不出在用哪只输入设备（拿不到设备名）", status=409)
+            raise ApiError(self._no_device_reason(), status=409)
         try:
             end = winlevel.set_level(name, float(level))
         except winlevel.LevelUnavailable as exc:
@@ -2079,7 +2190,7 @@ class ConsoleApi:
         """
         name = self._device_in_use()[1]
         if not name:
-            raise ApiError("认不出在用哪只输入设备（拿不到设备名）", status=409)
+            raise ApiError(self._no_device_reason(), status=409)
         # 麦克风没开就**立刻**拒绝，而不是走满 8 轮然后报「没听到说话」：那个提示会让人以为
         # 自己说得不够大声，而真正的原因是设备根本没开。
         if not self.mic_running:

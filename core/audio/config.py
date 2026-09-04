@@ -429,6 +429,31 @@ _HOST_API_PREFERENCE = ("wasapi", "mme", "directsound", "wdm-ks")
 _EXCLUDED_HOST_APIS = ("wdm-ks",)
 
 
+def usable_input(index: int, api_name: str, sample_rate: int = 16000) -> str:
+    """这条设备条目能不能当 ``input.device`` 用。返回空串 = 能用，否则是不能用的原因。
+
+    **和 ``_match_device`` 用同一套判据**，这是它存在的全部理由：控制台的设备选择器如果
+    列出一条 `_match_device` 会拒掉的条目，人点了它就等于回到「配了一个不生效的设备名」——
+    而那正是「用笔记本内置麦克风时读不到设备」那条报告的形状（栈静默退回系统默认）。
+    一个选择器只该给出解析器认得的选项。
+    """
+    api = str(api_name).casefold().replace(" ", "")
+    for excluded in _EXCLUDED_HOST_APIS:
+        if excluded in api:
+            return f"{api_name} 这条路开不起来（PortAudio 内核流，实测 start() 抛 host error）"
+    try:
+        import sounddevice  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - 装不上就别替它下结论
+        return ""
+    try:
+        sounddevice.check_input_settings(
+            device=int(index), channels=1, samplerate=int(sample_rate), dtype="float32"
+        )
+    except Exception as exc:  # noqa: BLE001 - 打不开就不是候选
+        return f"按 {sample_rate} Hz 单声道打不开：{exc}"
+    return ""
+
+
 def _match_device(fragment: str, sample_rate: int = 16000) -> int | str:
     """名字片段 -> 设备索引。
 

@@ -1874,6 +1874,97 @@ def test_the_input_level_view_names_the_device_and_reads_the_os_volume(runtime, 
     assert level["os_reason"] == ""
 
 
+def test_a_configured_device_that_is_not_there_reports_the_one_actually_in_use(
+    runtime, monkeypatch
+):
+    """**「用笔记本内置麦克风时读不到设备」那条报告的回归测试。**
+
+    真机链条（2026-09-04 实测，四步都验过）：
+
+    1. 耳机没插，`input.device = "耳机"` 匹配不到任何设备，`resolve_device` 原样退回字符串；
+    2. `open_voice_stack` 认出这件事，改用系统默认并把 `capture.device` 设成 `None`；
+    3. 而 `_device_in_use` 看到 `None` 就**回头再解析一次配置**，把刚被拒掉的「耳机」捡回来；
+    4. `winlevel.device_name("耳机")` 抛 `No input device matching '耳机'` → 名字变空串 →
+       界面既报了错的设备名，又说「音量读不到：不支持」。
+
+    实测 `device_name(None)` 直接给出内置麦克风的名字，而 `read_level()` 对它工作正常
+    —— **能力一直都在，只是被问错了名字。**
+    """
+    mixer = FakeMixer(level=0.55)
+    api = _mixer_api(runtime, monkeypatch, mixer)
+    # 栈的样子：采集已经退到系统默认（device=None），而配置里点名的是一只不在的设备
+    api.stack.config = {"input.device": "耳机", "input.sample_rate": 16000}
+    api.stack.capture.device = None
+
+    selector, name, wanted = api._device_in_use()
+
+    assert selector is None, "退回系统默认之后不许再把配置里那个名字捡回来"
+    assert name == mixer.name
+    assert wanted == "耳机", "配置想要哪一只必须报出来 —— 否则界面会印一个在撒谎的设备名"
+    level = api._input_level()
+    assert level["device"] == mixer.name
+    assert level["device_wanted"] == "耳机"
+    assert level["os"]["level"] == 0.55
+    assert level["os_reason"] == "", "名字对了，OS 音量就读得到"
+
+
+def test_when_the_config_and_reality_agree_nothing_is_flagged(runtime, monkeypatch):
+    """配置留空（用系统默认）时不该报「配置想要另一只」—— 一个永远亮的提示等于没有提示。"""
+    mixer = FakeMixer(level=0.4)
+    api = _mixer_api(runtime, monkeypatch, mixer)
+    api.stack.config = {"input.device": "", "input.sample_rate": 16000}
+    api.stack.capture.device = None
+
+    _selector, name, wanted = api._device_in_use()
+
+    assert name == mixer.name
+    assert wanted == ""
+    assert api._input_level()["device_wanted"] is None
+
+
+def test_a_selector_that_cannot_be_named_falls_back_to_the_default(runtime, monkeypatch):
+    """选择子问不出名字时退到系统默认 —— 那正是 `open_voice_stack` 做的事。
+
+    两层对同一只麦克风必须说同一句话；不退的话这里报空名字，而栈其实开着默认设备。
+    """
+    mixer = FakeMixer(level=0.3)
+
+    def picky(selector):
+        if selector is None:
+            return mixer.name
+        raise mixer.LevelUnavailable(f"设备 {selector!r} 打不开")
+
+    api = _mixer_api(runtime, monkeypatch, mixer)
+    monkeypatch.setattr(mixer, "device_name", picky)
+    api.stack.config = {"input.device": "幽灵麦克风", "input.sample_rate": 16000}
+    api.stack.capture.device = "幽灵麦克风"
+
+    selector, name, wanted = api._device_in_use()
+
+    assert selector is None
+    assert name == mixer.name
+    assert wanted == "幽灵麦克风"
+
+
+def test_the_no_device_message_says_what_was_tried(runtime, monkeypatch):
+    """「拿不到设备名」这句话本身不可行动 —— 它没说哪个名字没匹配上，也没说机器上有什么。"""
+    mixer = FakeMixer(level=0.3)
+
+    def never(_selector):
+        raise mixer.LevelUnavailable("一只都问不出来")
+
+    api = _mixer_api(runtime, monkeypatch, mixer)
+    monkeypatch.setattr(mixer, "device_name", never)
+    api.stack.config = {"input.device": "幽灵麦克风", "input.sample_rate": 16000}
+
+    with pytest.raises(ApiError) as caught:
+        api.calibrate_input(1.0)
+
+    said = str(caught.value)
+    assert "幽灵麦克风" in said, said
+    assert "input.device" in said
+
+
 def test_calibration_walks_a_dead_quiet_microphone_into_the_band(runtime, monkeypatch):
     """使用者的原话：「真正的最佳效果应该是无论何种设备、音量，都能准确的识别唤醒词」。
 

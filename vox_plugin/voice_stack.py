@@ -41,6 +41,7 @@ from core.audio import (
     resolve_device,
     resolve_keywords_file,
 )
+from core.audio.config import describe_device
 from core.audio.gain import AutoGain
 from core.audio.vad import SileroSpeechGate
 
@@ -389,13 +390,19 @@ def open_voice_stack(
         # 但那条路有专门的探测：开麦 4 秒后「全零输入」进运行日志（error 级）。
         # 「有一只可能听不见的麦克风」比「一只都没有」可诊断得多。
         #
+        # **必须报出退到了哪一只。** 2026-09-04 之前这句话只说「改用系统默认设备」，而
+        # 使用者在校准那一行看到的是「设备：耳机」（控制台回头又解析了一次配置，见
+        # `core/console/routes.py` 的 `_device_in_use`）—— 两层各说一句话，而且都不对。
+        #
         # **只对来自配置的名字这么做。** ``device=`` 参数是调用方点名的（探针的
         # ``--device`` 走这条），那种情况原样交出去 —— 替调用方改主意会让一个专门指定
         # 设备的测试悄悄测到别的设备上。
+        fallback = describe_device(None)
         warnings.append(
             f"input.device = {resolved_device!r} 没匹配到任何可用的输入设备 —— "
-            "耳机可能没插（蓝牙设备断开后就不在枚举里了）。这一轮改用**系统默认设备**，"
-            "它若是聋的会在开麦 4 秒后进运行日志；控制台就绪清单里有当前的设备清单"
+            "耳机可能没插（蓝牙设备断开后就不在枚举里了）。这一轮改用**系统默认设备**"
+            f"（{fallback}），它若是聋的会在开麦 4 秒后进运行日志；"
+            "控制台就绪清单里有当前的设备清单"
         )
         resolved_device = None
 

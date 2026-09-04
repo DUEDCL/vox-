@@ -993,6 +993,16 @@ details[open] > summary::before { content: "▾ "; }
         <span class="note" id="sp-level">读取输入设备…</span>
       </div>
       <p class="note" id="sp-cal-out" style="white-space:pre-line" hidden></p>
+      <!-- 输入设备清单。**后端 /api/devices 从一开始就在，页面从来没调过它** —— 于是
+           「机器上有哪几只麦克风、在用的是哪一只、它的系统音量多少」在界面上不存在，
+           而换设备只能去「其余语音参数」里手打一个名字片段。打错了不报错（栈会退回系统
+           默认），那正是使用者报「用笔记本内置麦克风时读不到设备」的形状。 -->
+      <div class="line" style="margin-top:var(--space-4)">
+        <button id="sp-dev-refresh" data-od-id="speaker-devices-refresh">刷新输入设备</button>
+        <span class="note" id="sp-dev-note">点一下列出这台机器上的麦克风</span>
+      </div>
+      <div class="rows" id="sp-devices"></div>
+      <p class="err" id="sp-dev-error" role="alert" hidden></p>
       <!-- 为什么不再用浏览器录：注册和校验必须同信道，否则相似度比的是两条录音链路的
            差别而不是两个人的差别。浏览器 getUserMedia 拿的是**浏览器认为的默认设备**
            （不是 [input] device），还带它自己的 AGC / 降噪 / 回声消除和采样率。 -->
@@ -3365,12 +3375,103 @@ async function renderInputLevel() {
     const level = state.input_level;
     if (!state.mic_running || !level) { out.textContent = "麦克风没在跑 —— 先点「开麦克风」。"; return; }
     const os = level.os;
+    /* **配置点名了一只、实际用的是另一只时必须说出来。** 使用者报过这一格写着「设备：耳机」
+       而耳机根本没插 —— 那时页面读的是配置里的名字，不是真在用的那只，所以既撒了谎又
+       连带说「音量读不到」（拿一个不存在的设备名去问 Windows 当然读不到）。 */
+    const fellBack = level.device_wanted
+      ? `　·　配置写的是「${level.device_wanted}」，没匹配到（没插？），已退回系统默认`
+      : "";
+    /* 系统音量已经接近满、峰值还是几乎为零 —— **这只麦克风本身就收不到声音**，再调什么都
+       没用。不说这句话的话人会一直在设置里找那根滑条（它已经推到顶了）。实测这台机器上
+       内置阵列在 98% 音量下峰值 0.000397，而同一时刻耳机是 0.188。 */
+    const deaf = level.too_quiet && os && !os.muted && os.level >= 0.9
+      ? `　·　**系统音量已经 ${Math.round(os.level * 100)}% 了还是这么轻 —— 是这只麦克风的问题，` +
+        `不是音量的问题。下面「刷新输入设备」里换一只。**`
+      : "";
     out.textContent =
       `设备：${level.device || "(认不出)"}　·　` +
       (os ? `Windows 输入音量 ${Math.round(os.level * 100)}%${os.muted ? "（已静音！）" : ""}` : `音量读不到：${level.os_reason || "不支持"}`) +
-      `　·　实时峰值 ${level.peak}` + (level.too_quiet ? `（低于 ${level.want_peak}，太轻）` : "");
+      `　·　实时峰值 ${level.peak}` + (level.too_quiet ? `（低于 ${level.want_peak}，太轻）` : "") +
+      fellBack + deaf;
   } catch (err) { out.textContent = err.message; }
 }
+
+/* 输入设备清单 + 「用这一只」。**这是「换麦克风」这件事在界面上的唯一入口** ——
+   在它之前只能去「其余语音参数」里手打一个名字片段，而打错不报错（栈退回系统默认）。
+   写的是设备**全名**：`_match_device` 会在同名的多个 host API 条目里按固定优先级挑
+   （WASAPI 优先），所以不必让人去理解 MME / DirectSound 的区别。 */
+async function renderDevices() {
+  const host = $("sp-devices");
+  const note = $("sp-dev-note");
+  show($("sp-dev-error"), "");
+  busy(host, "枚举输入设备…");
+  let data;
+  try { data = await api("/api/devices"); }
+  catch (err) { failed(host, err.message, renderDevices); return; }
+  host.textContent = "";
+  if (!data.available) {
+    note.textContent = "";
+    show($("sp-dev-error"), `列不出设备：${data.reason}`, "bad");
+    return;
+  }
+  note.textContent = data.wanted
+    ? `配置点名「${data.wanted}」，但没匹配到 —— 现在用的是系统默认「${data.in_use || "(认不出)"}」`
+    : `在用：${data.in_use || "(认不出)"}`;
+  /* 同一只物理麦克风在四种 host API 下各出现一次。按名字去重再列 —— 十六行里有十二行
+     是同一只麦克风的重复，那种清单没人看得下去，而「用哪个 API」不是使用者该决定的事。
+     去重时**优先留能用的那一条**：同名条目里 WDM-KS 那份是开不起来的，留它会让整只
+     麦克风看起来不可用。 */
+  const seen = new Map();
+  for (const row of data.devices) {
+    const prev = seen.get(row.name);
+    const better = !prev
+      || (row.in_use && !prev.in_use)
+      || (!row.unusable && prev.unusable && !prev.in_use);
+    if (better) seen.set(row.name, row);
+  }
+  let hidden = 0;
+  for (const row of seen.values()) {
+    /* 开不起来的条目**不给按钮**，而且默认收起来。「电脑扬声器」「立体声混音」在清单里
+       长得像麦克风，给它们一颗「用这一只」等于请人去选一只听不见的设备 —— 而那之后栈会
+       静默退回系统默认，正是这次报告的形状。 */
+    if (row.unusable && !row.in_use) { hidden += 1; continue; }
+    const line = el("div", { class: "kv" + (row.in_use ? "" : " locked") });
+    const vol = row.os
+      ? `系统音量 ${Math.round(row.os.level * 100)}%${row.os.muted ? " · 已静音！" : ""}`
+      : "读不到系统音量";
+    line.appendChild(el("code", null, row.name + (row.in_use ? "　← 在用" : "")));
+    line.appendChild(el("div", { class: "val" }, `${row.channels} 声道　·　${vol}`));
+    if (row.in_use) {
+      line.appendChild(el("div", { class: "hint" }, "当前"));
+    } else {
+      const use = el("button", null, "用这一只");
+      use.onclick = async () => {
+        use.disabled = true;
+        try {
+          await api("/api/config", {
+            method: "PUT",
+            body: { file: "voice.toml", updates: { "input.device": row.name } },
+          });
+          show($("sp-dev-error"),
+            `已把 input.device 写成「${row.name}」。**要重启 Vox 才换过去** —— ` +
+            `采集流是在启动时按这一行打开的。`, "good");
+          await renderDevices();
+        } catch (err) {
+          show($("sp-dev-error"), `写不进去：${err.message}`, "bad");
+        } finally { use.disabled = false; }
+      };
+      line.appendChild(use);
+    }
+    host.appendChild(line);
+  }
+  if (hidden) {
+    host.appendChild(el("p", { class: "note" },
+      `另有 ${hidden} 条按 ${"16 kHz 单声道"} 打不开（WDM-KS 内核流、扬声器回环、立体声混音这类），` +
+      `没有列出来 —— 选中它们只会得到一只听不见的设备。真要用的话在「其余语音参数」里写索引。`));
+  }
+}
+
+$("sp-dev-refresh").onclick = renderDevices;
 
 $("sp-cal").onclick = async (event) => {
   const button = event.currentTarget;
