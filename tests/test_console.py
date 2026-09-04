@@ -1965,6 +1965,33 @@ def test_the_no_device_message_says_what_was_tried(runtime, monkeypatch):
     assert "input.device" in said
 
 
+def test_too_quiet_needs_the_vad_to_have_heard_speech(runtime, monkeypatch):
+    """**「太轻」在没听到语音之前不成立** —— 这条是一次真实误判的回归测试。
+
+    使用者的内置麦克风在实机上唤醒是正常的（REAL-MIC），而这一层当时报「峰值 0.000397，
+    低于 0.1，太轻」，我据此断言那只麦克风听不见。那个数字是他**还没开口**时的读数：
+    `input_peak` 是 `start()` 以来的**运行最大值**，那一刻它就是一段环境声的最大值。
+
+    根子在 `core/audio/vad.py` 模块头那句话：峰值和 RMS 分不清「轻的语音」和「没有语音」。
+    用峰值回答「够不够响」而不问有没有人说话，就是问了一个它答不了的问题。
+    """
+    mixer = FakeMixer(level=0.9)
+    api = _mixer_api(runtime, monkeypatch, mixer)
+    capture = api.stack.capture
+    capture.input_peak = 0.000397
+    capture.input_blocks = 120
+
+    capture.speech_blocks = 0
+    quiet_room = api._input_level()
+    assert quiet_room["heard_speech"] is False
+    assert quiet_room["too_quiet"] is False, "没人说话的时候不许说「太轻」"
+
+    capture.speech_blocks = 7
+    spoke = api._input_level()
+    assert spoke["heard_speech"] is True
+    assert spoke["too_quiet"] is True, "确实说了话而峰值这么低，这时候「偏轻」才是结论"
+
+
 def test_calibration_walks_a_dead_quiet_microphone_into_the_band(runtime, monkeypatch):
     """使用者的原话：「真正的最佳效果应该是无论何种设备、音量，都能准确的识别唤醒词」。
 
@@ -2136,17 +2163,22 @@ def test_the_state_view_says_when_the_input_is_too_quiet_to_mean_anything(runtim
     光报 `peak: 0.0587 / silent: false` 不够 —— 「不是全零」被读成了「没问题」，而真实情况
     是那个量级根本承载不了唤醒。增益倍数同样必须可见：它越大说明设备来的越轻，而它抬起来的
     是信号也是底噪。
+
+    ``speech_blocks`` 是 2026-09-04 补进这个替身的：`too_quiet` 现在要求 VAD 先听到语音
+    （见 `test_too_quiet_needs_the_vad_to_have_heard_speech`）。这一条的前提本来就是「人在
+    说话而电平只有 0.0587」，所以补上它是把前提写明，不是放宽断言。
     """
     gain = SimpleNamespace(describe=lambda: {"gain": 9.6, "clipped_blocks": 0})
     capture = SimpleNamespace(
-        input_peak=0.0587, input_blocks=3134, sample_rate=16000, blocksize=1600,
-        input_silent=False, auto_gain=gain,
+        input_peak=0.0587, input_blocks=3134, speech_blocks=412, sample_rate=16000,
+        blocksize=1600, input_silent=False, auto_gain=gain,
     )
     api = ConsoleApi(runtime, SimpleNamespace(capture=capture, verifier=None))
     api.mic_running = True
 
     level = api._input_level()
 
+    assert level["heard_speech"] is True
     assert level["too_quiet"] is True
     assert level["want_peak"] == routes.LIVE_MIN_PEAK
     assert level["gain"]["gain"] == 9.6

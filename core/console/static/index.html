@@ -3381,17 +3381,24 @@ async function renderInputLevel() {
     const fellBack = level.device_wanted
       ? `　·　配置写的是「${level.device_wanted}」，没匹配到（没插？），已退回系统默认`
       : "";
-    /* 系统音量已经接近满、峰值还是几乎为零 —— **这只麦克风本身就收不到声音**，再调什么都
-       没用。不说这句话的话人会一直在设置里找那根滑条（它已经推到顶了）。实测这台机器上
-       内置阵列在 98% 音量下峰值 0.000397，而同一时刻耳机是 0.188。 */
+    /* 峰值那一格怎么读，取决于 **VAD 有没有听到人说话** —— 这两件事此前混在一起，而混在
+       一起就会误判。使用者的内置麦克风实机唤醒是正常的，而这一行当时写着「实时峰值
+       0.000397（低于 0.1，太轻）」，那是他还没开口时的读数（`input_peak` 是 start() 以来的
+       **运行最大值**，那一刻它就是一段环境声的最大值）。用峰值去回答「够不够响」而不问
+       有没有人在说话，正是 core/audio/vad.py 模块头说过答不了的那个问题。
+       所以「太轻」这句话现在只在真的听到语音之后才出现，措辞也只说下一步做什么，
+       不再替这只麦克风下「它听不见」的结论。 */
     const deaf = level.too_quiet && os && !os.muted && os.level >= 0.9
-      ? `　·　**系统音量已经 ${Math.round(os.level * 100)}% 了还是这么轻 —— 是这只麦克风的问题，` +
-        `不是音量的问题。下面「刷新输入设备」里换一只。**`
+      ? `　·　系统音量已经 ${Math.round(os.level * 100)}% 了说话还是这么轻 —— 先「校准输入音量」，` +
+        `还是轻再考虑换一只（下面「刷新输入设备」）`
       : "";
     out.textContent =
       `设备：${level.device || "(认不出)"}　·　` +
       (os ? `Windows 输入音量 ${Math.round(os.level * 100)}%${os.muted ? "（已静音！）" : ""}` : `音量读不到：${level.os_reason || "不支持"}`) +
-      `　·　实时峰值 ${level.peak}` + (level.too_quiet ? `（低于 ${level.want_peak}，太轻）` : "") +
+      `　·　${level.heard_speech ? "说话峰值" : "环境峰值"} ${level.peak}` +
+      (level.heard_speech
+        ? (level.too_quiet ? `（低于 ${level.want_peak}，偏轻）` : "")
+        : "　·　还没听到有人说话（这段时间都是环境声）—— 说一句再看这个数") +
       fellBack + deaf;
   } catch (err) { out.textContent = err.message; }
 }

@@ -682,16 +682,30 @@ class ConsoleApi:
 
         为什么这一项值得占就绪清单一格：Windows 上一个被静音、被隐私设置拒绝、或者根本
         不在用的输入设备**不报错** —— 流照常打开、回调照常触发、样本全是零。表现是
-        「唤醒词唤不醒」，而配置、词表、模型、声纹每一层都显示健康。实测本机默认设备
-        peak 是 0.00003（数值噪声），同一时刻另一个设备是 0.027。
+        「唤醒词唤不醒」，而配置、词表、模型、声纹每一层都显示健康。
 
         报的是峰值而不是 RMS：安静房间的 RMS 也很低，但峰值有噪声底；全零的设备两个都没有。
+
+        **峰值只回答「这个设备在不在出声」。** 「它够不够灵敏」要先问 VAD 有没有听到人说话
+        —— 见下面 ``too_quiet`` 那一段：2026-09-04 因为漏了这个前提误判过一次，把一只实测
+        能正常唤醒的内置麦克风说成听不见。``peak`` 是 ``start()`` 以来的**运行最大值**，
+        所以在人开口之前它就是一段环境声的最大值。
         """
         capture = self.stack.capture if self.stack is not None else None
         if capture is None or not self.mic_running:
             return None
         peak = float(getattr(capture, "input_peak", 0.0) or 0.0)
         blocks = int(getattr(capture, "input_blocks", 0) or 0)
+        # **VAD 有没有听到人说话。** 这一格是 2026-09-04 补的，理由是一次真实的误判：
+        # 使用者的内置麦克风在实机上唤醒**是正常的**，而这一层当时报「峰值 0.000397，太轻」，
+        # 于是我据此断言那只麦克风听不见 —— 那个数字是他**还没开口**时的读数（`input_peak`
+        # 是 start() 以来的**运行最大值**，不是瞬时值），也就是一段环境声的最大值。
+        #
+        # 这正是 `core/audio/vad.py` 模块头写着的那件事：**峰值和 RMS 分不清「轻的语音」和
+        # 「没有语音」**。所以「太轻」这个判断在没听到语音之前根本不成立，而下面的
+        # `too_quiet` 此前一律按峰值算，不问有没有人说话。
+        speech_blocks = int(getattr(capture, "speech_blocks", 0) or 0)
+        heard_speech = speech_blocks > 0
         rate = int(getattr(capture, "sample_rate", 16000) or 16000)
         size = int(getattr(capture, "blocksize", 1600) or 1600)
         gain = getattr(capture, "auto_gain", None)
@@ -718,10 +732,20 @@ class ConsoleApi:
             # —— 「设备坏了」和「音量是 1%」此前在界面上长得一模一样。
             "os": os_side,
             "os_reason": os_reason,
-            # **原始峰值够不够用**，单独报一格。0.0587 这种量级和「麦克风是死的」区分不开，
-            # 而在缓冲存加增益样本的那个版本里，它被 10 倍增益盖成了一段「健康语音」。
-            "too_quiet": bool(peak and peak < LIVE_MIN_PEAK),
+            # **原始峰值够不够用** —— 但只在 VAD 真的听到人说话之后才算。
+            #
+            # **2026-09-04 加上了 `heard_speech` 这个前提，因为不加就是一次误判。**
+            # 使用者的内置麦克风在实机上唤醒是正常的，而这一格当时报「0.000397，太轻」并
+            # 让我据此断言那只麦克风听不见。那个数字是他**还没开口**时的运行最大值 ——
+            # 一段环境声。用峰值去判「够不够响」而不问有没有人说话，等于问了一个
+            # `core/audio/vad.py` 模块头明确说过答不了的问题。
+            "too_quiet": bool(heard_speech and peak and peak < LIVE_MIN_PEAK),
             "want_peak": LIVE_MIN_PEAK,
+            # VAD 听到语音的块数 / 总块数。**「还没有人说话」和「说了但太轻」必须分得开** ——
+            # 界面据此决定说哪一句，而这两句要人做的事完全不同（一个是「说句话」，
+            # 一个是「调音量或换设备」）。
+            "speech_blocks": speech_blocks,
+            "heard_speech": heard_speech,
             # 自适应增益在放多少倍。**这个数字必须能看见**：它越大说明设备来的越轻，
             # 而它放大的是信号也是底噪 —— 增益爬到 10 倍以上时下游看到的「语音」很可能
             # 只是被抬起来的房间。

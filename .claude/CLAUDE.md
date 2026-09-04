@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1811 passed, 3 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1812 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -33,7 +33,7 @@
 | `core/tools/mcp.py` `config/mcp.toml` `contracts/mcp.schema.json` | `pytest tests/test_mcp.py -q` | **51 passed**（假 server，SIM） |
 | `core/config_edit.py` | `pytest tests/test_config_edit.py -q` | **33 passed** |
 | `core/models_config.py` `config/models.toml` `core/console/providers.py` | `pytest tests/test_models_config.py tests/test_config_edit.py -q` | **93 passed**（不打真网络；`write_active` 与 `voice_overrides` 的验收在 `test_console.py`） |
-| `core/console/` `core/console/static/index.html` | `pytest tests/test_console.py -q` + **控制台渲染取证**（`preview_start console` → 点一遍导航 → `preview_eval` 查 hidden 与控件类型） | **203 passed** + 页面无 console 错误 |
+| `core/console/` `core/console/static/index.html` | `pytest tests/test_console.py -q` + **控制台渲染取证**（`preview_start console` → 点一遍导航 → `preview_eval` 查 hidden 与控件类型） | **204 passed** + 页面无 console 错误 |
 | `core/audio/winlevel.py`（OS 输入音量） | `pytest tests/test_console.py -k calibrat -q` + 真机读一次 `endpoints()` | **5 passed** + 三个端点的音量读得到（REAL-WIN） |
 | `core/audio/gain.py` `vad.py` | `pytest tests/test_auto_gain.py -q` | **16 passed** |
 | 唤醒链路本身（喂真录音过生产回调） | `PYTHONUTF8=1 .venv\Scripts\python.exe .vox-ref\wake_path_check.py` | 「你好小沃」念三遍 **3/3 命中**（SIM；改增益/VAD/KWS 参数后必跑） |
@@ -280,7 +280,7 @@ pm` 不在 Windows PATH 上，而 `claude` 装在那里** —— 实测用户 PA
 ## 注意事项
 
 - **git 只有一条主干 `main`**，流程与自查命令见 [`docs/git-workflow.md`](../docs/git-workflow.md)。开工前 `git status --short` + `git branch --show-current` 确认站对了地方，不要覆盖无关脏文件。破坏性 git 操作（`reset --hard`、`push --force`、`clean -f`、`stash`）一律先问。
-- **「唤醒不命中」先量输入电平，不要先怀疑词表。** 2026-08-29 查清：本机**系统默认输入设备 `麦克风阵列 (Realtek(R) Audio)` 在出零** —— 录 1 秒 peak = `0.00003`（数值噪声），而同一时刻 `[2] 耳机 (沉麟的耳机)` 是 `0.188`。Windows 上一个被静音 / 被隐私设置拒绝 / 根本不在用的设备**不报错**：流照常打开、回调照常以正确速率触发、样本全是零。于是 KWS 永远不命中，而配置、词表、音素、模型、声纹每一层都报告自己健康。词表、阈值、音素被逐个怀疑了好几轮，没有一层坏。<br>现在不必靠记性：`capture` 开麦 4 秒后把「全零输入」按 **error** 级记进运行日志（`SounddeviceWakeCapture.on_input_silent`），`GET /api/state` 的 `input_level` 报实时峰值。诊断工具 `.vox-ref/diagnose_wake.py` 逐个设备录 1 秒并报峰值。`config/voice.toml` 的 `input.device` 现在是 `"2"` 而不是 `""`。
+- **「唤醒不命中」先量输入电平，不要先怀疑词表。** 2026-08-29 录 1 秒：系统默认输入设备 `麦克风阵列 (Realtek(R) Audio)` peak = `0.00003`，同一时刻 `[2] 耳机 (沉麟的耳机)` 是 `0.188`。**2026-09-04 更正由此外推的结论：那只阵列不是坏的** —— 使用者实测它能正常完成语音唤醒（REAL-MIC）。0.00003 是安静房间的读数，而 09-01 的复测里两只都是 0.0003 量级（拿静音比静音）。峰值分不清「轻的语音」和「没有语音」（`core/audio/vad.py`），所以它只能回答「此刻有没有大声音」，回答不了「这只麦克风行不行」—— 判灵敏度必须先让 VAD 确认有人在说话，控制台那一行现在就是这么做的。Windows 上一个被静音 / 被隐私设置拒绝 / 根本不在用的设备**不报错**：流照常打开、回调照常以正确速率触发、样本全是零。于是 KWS 永远不命中，而配置、词表、音素、模型、声纹每一层都报告自己健康。词表、阈值、音素被逐个怀疑了好几轮，没有一层坏。<br>现在不必靠记性：`capture` 开麦 4 秒后把「全零输入」按 **error** 级记进运行日志（`SounddeviceWakeCapture.on_input_silent`），`GET /api/state` 的 `input_level` 报实时峰值。诊断工具 `.vox-ref/diagnose_wake.py` 逐个设备录 1 秒并报峰值。`config/voice.toml` 的 `input.device` 现在是 `"2"` 而不是 `""`。
 - **第一次注册就在控制台里做，不必先开终端。** 声纹门 fail-closed，此前「一个人都没注册」也抛 —— 而控制台注册要从采集缓冲取音频，于是形成死锁，第一次只能跑 `scripts/enroll_speaker.py`。现在走 **`enroll_only`**（注册模式）：`_check_gate_preconditions` 在没人注册时置位而不是抛，设备开着、缓冲照常填，但 `wake_held` 恒真、`_authorise` 一次都到不了。不许绕过的那条断言仍然成立（「唤醒不经校验不许通过」），由 `test_nobody_enrolled_opens_the_device_only_for_enrolling` 钉：注册模式下灌正常电平音频 + 一个 KWS 命中，`on_wake` 必须零次、`kws_hits` 必须是 0。**注册成功之后必须调 `capture.arm_after_enrollment()`** —— `enroll_only` 只在 `start()` 里判一次，2026-09-01 实机因此出现「页面显示注册成功、写着注册完就会响应唤醒词，而喊什么都没反应，必须重启」。那个方法**只从「按住」走向「正常」**（复用声纹门自己的前提：档案表非空），反向不做 —— 一个能打开 `enroll_only` 的公开方法等于给「让唤醒失效」开了个远程开关。两条注册路径（`enroll` / `enroll_captured`）都要调它并把 `wake_armed` 报给页面。
 - **「喊了没反应」有第五个根因，而它不是故障：注册模式。** 唤醒漏斗的四个计数（命中/接受/拒绝/没进聆听）在 `enroll_only` 下必然全是 0，而每一层看起来都健康 —— 和「KWS 根本没装上」长得一模一样。`_wake_funnel()` 因此报 `enroll_only` 与 `held`，页面把它排在输入电平那一行的最前面。
 - **页面上的上限不许自己写一份。** 2026-09-01 实机：服务端上限是 `DEFAULT_ROUNDS`（6），而 `index.html` 里另写了一个硬编码的 3，于是页面画着 6 个格子、录到第 4 段被自己拦下，提示语还写着「已经录了 3 段」。后两句「往后退两步」永远录不到 —— 而那两句正是「不同距离也能唤醒」的全部依据（只用近场注册时远场相似度实测 0.607）。上限现在读 `/api/speaker` 的 `max_clips`；条数还没拿到时**不拦**，真正的闸在服务端那道 409。
