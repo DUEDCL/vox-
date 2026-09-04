@@ -396,6 +396,27 @@ main {
 /* 字段段落紧跟在头下面，而不是 .note 默认的 12px 外边距 —— 它们属于同一条记录。 */
 .logrow .lg-fields { margin: var(--space-1) 0 0; max-width: none; overflow-wrap: anywhere; }
 
+/* 微信会话记录的行同样**不能**复用 .row，踩的就是上面那个坑的第二次：三个子元素
+   （时间头 / 正文 / 标记）一个都不带 .dot/.name/.detail，于是「22:19:20 他 1234」被塞进
+   8px 的第一列，而冒号在 UAX #14 里不是换行机会 —— 那一块只能横着溢出，正好压在第二列的
+   正文上，屏幕上是两层文字叠在一起。同样不是假想。 */
+.msgrow {
+  display: block;
+  padding: var(--space-3) var(--space-2);
+  border-bottom: 1px solid var(--border-soft);
+}
+.msgrow:hover { background: color-mix(in oklab, var(--surface-warm), var(--surface) 62%); }
+/* 头一行：时间、谁、标记。前两块是短的定长块，flex:none 免得被正文挤断。 */
+.msgrow .mg-head {
+  display: flex; gap: var(--space-3); align-items: baseline; flex-wrap: wrap;
+  font-size: var(--text-xs);
+}
+.msgrow .mg-head code { color: var(--muted); font-family: var(--font-mono); flex: none; }
+.msgrow .mg-head b { flex: none; }
+.msgrow .mg-head em { color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
+/* 正文独占整行宽 —— 一句请求可以很长，挤在 13em 的列里读不了。 */
+.msgrow .mg-text { margin: var(--space-1) 0 0; max-width: none; overflow-wrap: anywhere; }
+
 /* 可点的小标签。拉回来的模型名铺成一排 —— <datalist> 的建议按输入框内容过滤，
    所以列表必须有一个不依赖过滤的出口，否则「拉到 40 个模型」之后下拉里是空的。 */
 .chip {
@@ -4140,21 +4161,24 @@ async function renderWeixin() {
   if (keep) select.value = keep;
 }
 
+/* 一条会话记录一行。**不用 .row**（四列网格，理由见样式表里 .msgrow 上面那段），
+   也不用 innerHTML：sender 与正文都来自微信那一侧，是外部输入，而原先手工只转义了
+   < 和 & —— 走 el()/textContent 就不必记得转义哪几个字符。 */
 function wxRow(entry) {
-  const row = document.createElement("div");
-  row.className = "row";
-  const who = entry.direction === "in"
+  const row = el("div", { class: "msgrow" });
+  const head = el("div", { class: "mg-head" });
+  head.appendChild(el("code", null, entry.at || ""));
+  head.appendChild(el("b", null, entry.direction === "in"
     ? (entry.sender ? "他 " + String(entry.sender).slice(-4) : "他")
-    : (entry.by === "console" ? "我（手打）" : "Vox");
+    : (entry.by === "console" ? "我（手打）" : "Vox")));
   const marks = [];
   if (entry.kind === "voice") marks.push("语音");
   if (entry.source === "provider") marks.push("微信转写");
   if (entry.voice_out) marks.push("带语音");
   if (entry.sent === false) marks.push("发送失败");
-  row.innerHTML =
-    `<b>${entry.at} ${who}</b>` +
-    `<span>${(entry.text || "").replace(/[<&]/g, (c) => (c === "<" ? "&lt;" : "&amp;"))}</span>` +
-    (marks.length ? `<em class="note">${marks.join(" · ")}</em>` : "");
+  if (marks.length) head.appendChild(el("em", null, marks.join(" · ")));
+  row.appendChild(head);
+  row.appendChild(el("p", { class: "mg-text" }, entry.text || ""));
   return row;
 }
 

@@ -34,6 +34,14 @@
       "autoPort": true
     },
     {
+      "name": "console-fakeweixin",
+      "_comment": "验证微信那一栏只能用这条。上面那条 `console` 现在会把**真的**通道起来（`channels.toml` 的 enabled 是 true，且 check() 认扫码凭据），于是任何进来的微信消息都会被一个半验证的构建自动回一句。这条把凭据与通道配置指到 .vox-ref/wx-sandbox/，base_url 是关着的 127.0.0.1:9 —— 一个字节都不出网。端口不用 8899：使用者本人那台 `run_console.py --voice` 常年占着它，而那是他正在用的助手。脚本在 .vox-ref/（不进版本控制），换机器要按它开头的注释重建。",
+      "runtimeExecutable": "D:/program/vioce-wake/.venv/Scripts/python.exe",
+      "runtimeArgs": [".vox-ref/console_fake_weixin.py", "--port", "8903"],
+      "port": 8903,
+      "autoPort": false
+    },
+    {
       "name": "csp",
       "_comment": "服 desktop/dist 并**带上 tauri.conf.json 那条真的 CSP** —— 上面几条 dev server 一个字节的 CSP 都不发，所以只在打包后成立的失败（2026-09-03：序列层的 fetch 被 connect-src 拒，静默回退手写渲染器）在它们上面看不见。",
       "runtimeExecutable": "D:/program/vioce-wake/.venv/Scripts/python.exe",
