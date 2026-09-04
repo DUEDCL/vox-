@@ -4,18 +4,26 @@
 REAL-WEIXIN，这个文件里没有任何一处声称它已经通过。
 
 三条边界各有一条测试钉着：
-1. **凭据只从环境变量读** —— 配置文件里写 token 会被「未知键」拒掉；
-2. **默认关** —— 出厂配置下 `open_weixin` 返回 None，一个字节都不出网；
+1. **凭据永不进配置文件** —— 写 token 会被「未知键」拒掉；扫码换来的那份落在
+   `.vox/channels/weixin.json`（gitignored），环境变量优先于它；
+2. **默认关** —— 出厂默认下 `open_weixin` 返回 None，一个字节都不出网；
 3. **媒体只从微信 CDN 下载** —— 一个能指向任意主机的字段就是一次 SSRF。
 """
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
 from core.channels.audio import to_16k_mono, to_wav_bytes
-from core.channels.config import ChannelConfigError, load_channels_config, open_weixin
+from core.channels.config import (
+    ChannelConfigError,
+    defaults,
+    load_channels_config,
+    open_weixin,
+)
 from core.channels.contract import IncomingMessage, OutgoingMessage
 from core.channels.crypto import aes128_ecb_encrypt
 from core.channels.runner import PROVIDER_STT_NOTE, ChannelRunner
@@ -67,15 +75,41 @@ def token(monkeypatch):
     monkeypatch.setenv("VOX_WEIXIN_TOKEN", "offline-token")
 
 
+@pytest.fixture
+def unbound(monkeypatch, tmp_path):
+    """两个凭据来源都空。
+
+    **必须两个都动。** `check()` 与 `_token()` 都是「环境变量优先，然后是扫码存下来的
+    那份」，所以只 `delenv` 一个变量的测试在一台真的绑过微信的机器上会读到 `.vox/
+    channels/weixin.json` 然后判定「能用」—— 一个结果取决于开发机私有状态的测试等于
+    没有这条断言。
+    """
+    monkeypatch.delenv("VOX_WEIXIN_TOKEN", raising=False)
+    monkeypatch.setenv("VOX_WEIXIN_CREDENTIALS", str(tmp_path / "nobody.json"))
+
+
 # ----------------------------------------------------------------- 三条边界
 
 
-def test_the_shipped_config_keeps_everything_off():
-    """**默认关**。打开它意味着长轮询腾讯的端点、收发媒体 —— 出网必须是一次显式选择。"""
-    config = load_channels_config()
+def test_the_factory_default_keeps_everything_off(tmp_path):
+    """**默认关**。打开它意味着长轮询腾讯的端点、收发媒体 —— 出网必须是一次显式选择。
 
-    assert config["weixin.enabled"] is False
-    assert open_weixin(config) is None
+    判的是**代码的默认值**与一份没写 `enabled` 的文件，不是仓库里那份 `config/
+    channels.toml`。2026-09-04 之前这一条读的是后者，而从那天起控制台自己会往那个文件
+    写 `enabled = true`（扫码成功之后）—— 于是这条断言会在**任何一台真的绑过微信的
+    机器上失败**，把产品正常工作报成回归。
+    """
+    assert defaults()["weixin.enabled"] is False
+
+    empty = tmp_path / "channels.toml"
+    empty.write_text("[weixin]\n", encoding="utf-8")
+    assert load_channels_config(empty)["weixin.enabled"] is False
+    assert open_weixin(load_channels_config(empty)) is None
+
+    # 文件根本不在也是全关 —— 「不配就一个字节都不出网」。
+    missing = load_channels_config(tmp_path / "nope.toml")
+    assert missing["weixin.enabled"] is False
+    assert open_weixin(missing) is None
 
 
 def test_a_token_in_the_file_is_refused(tmp_path):
@@ -115,9 +149,8 @@ def test_media_outside_the_weixin_cdn_is_not_downloaded(token):
 # ----------------------------------------------------------------- 协议
 
 
-def test_check_does_not_touch_the_network(monkeypatch):
+def test_check_does_not_touch_the_network(unbound):
     """和 agent 适配器的 `check()` 同一条规矩：它答的是「能不能用」，不是「通不通」。"""
-    monkeypatch.delenv("VOX_WEIXIN_TOKEN", raising=False)
 
     class Boom:
         def post_json(self, *a, **k):
@@ -126,7 +159,65 @@ def test_check_does_not_touch_the_network(monkeypatch):
     status = WeixinChannel(transport=Boom()).check()
 
     assert status["available"] is False
-    assert "VOX_WEIXIN_TOKEN" in status["reason"]
+    assert status["source"] == ""
+    # 说清**该往哪走**。上一版这里只说「没有 $VOX_WEIXIN_TOKEN」，而那个 token 本来就是
+    # 扫码换来的 —— 一个正常使用者读完这句话仍然无处可取。
+    assert "扫码登录" in status["reason"]
+
+
+def test_check_accepts_the_scanned_credentials(monkeypatch, tmp_path):
+    """**扫码存下来的凭据要算「能用」。**
+
+    这是使用者报的那件事的根因：`check()` 只问环境变量，而 `_token()` 早就先环境变量、
+    后扫码凭据。于是扫完码、把 `enabled` 打开、重启之后，`start_channels` 读到
+    `available=False`，打印一行「配了但用不了 —— 没有 $VOX_WEIXIN_TOKEN」就什么都不起：
+    绑定成功了，微信里说话没有任何反应，而唯一的线索是一行启动日志。
+    """
+    monkeypatch.delenv("VOX_WEIXIN_TOKEN", raising=False)
+    path = tmp_path / "weixin.json"
+    path.write_text(
+        json.dumps({"account_id": "acc-1", "token": "scanned-token", "base_url": "https://b.example"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VOX_WEIXIN_CREDENTIALS", str(path))
+
+    status = WeixinChannel().check()
+
+    assert status["available"] is True
+    assert status["source"] == "scan"
+    assert status["reason"] == ""
+    # 报的是**将要用的**那个 base_url：`scaned_but_redirect` 会把账号分到另一个域名上。
+    assert status["base"] == "https://b.example"
+    # **永不回显 token。** 这一页会被截图。
+    assert "scanned-token" not in json.dumps(status, ensure_ascii=False)
+
+
+def test_check_does_not_mutate_the_channel(monkeypatch, tmp_path):
+    """`check()` 不带副作用 —— 「看一眼状态」不该顺手改掉 base_url。"""
+    monkeypatch.delenv("VOX_WEIXIN_TOKEN", raising=False)
+    path = tmp_path / "weixin.json"
+    path.write_text(
+        json.dumps({"account_id": "a", "token": "t", "base_url": "https://moved.example"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VOX_WEIXIN_CREDENTIALS", str(path))
+    channel = WeixinChannel()
+    before = channel.base_url
+
+    channel.check()
+
+    assert channel.base_url == before
+
+
+def test_the_env_var_still_wins(monkeypatch, tmp_path):
+    """环境变量优先。反过来的话，一个想临时换账号的人会发现改了环境变量没有用。"""
+    path = tmp_path / "weixin.json"
+    path.write_text(json.dumps({"account_id": "a", "token": "scanned"}), encoding="utf-8")
+    monkeypatch.setenv("VOX_WEIXIN_CREDENTIALS", str(path))
+    monkeypatch.setenv("VOX_WEIXIN_TOKEN", "from-env")
+
+    assert WeixinChannel().check()["source"] == "env"
+    assert WeixinChannel()._token() == "from-env"
 
 
 def test_the_sync_cursor_advances_and_the_context_token_is_kept(token):

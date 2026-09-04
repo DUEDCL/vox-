@@ -432,6 +432,20 @@ EDITABLE: dict[str, tuple[str, ...]] = {
         "web.open_search_url",
     ),
     "memory.toml": ("memory.recall_limit", "memory.short_keep"),
+    # 2026-09-04：微信通道的五项。**它们此前一项都不在这里** —— 而 `weixin.enabled` 正是
+    # 「绑定完了为什么还不收消息」的那个开关，于是控制台上扫完码，页面只能告诉使用者
+    # 「去 config/channels.toml 里打开 enabled 并重启」。使用者的判断和唤醒球那三项时
+    # 一样：一项配置只能靠改文件，在他的使用路径里等于不存在。
+    #
+    # **`weixin.token_env` 刻意不在这里**，和 `tts.key_env` / `asr.key_env` 同一条理由：
+    # 它是「去读哪个环境变量」，让网页改它等于让它决定把哪个凭据发给腾讯。
+    "channels.toml": (
+        "weixin.enabled",
+        "weixin.reply_with_voice",
+        "weixin.voice_native",
+        "weixin.local_asr",
+        "weixin.poll_timeout_s",
+    ),
 }
 
 #: Per-agent keys the settings screen may write, by key name (the section carries
@@ -476,6 +490,7 @@ _VALIDATORS: dict[str, str] = {
     "speaker.toml": "speaker",
     "tools.toml": "tools",
     "memory.toml": "memory",
+    "channels.toml": "channels",
 }
 
 
@@ -538,6 +553,8 @@ def _validator(kind: str):
             from core.audio.speaker import load_speaker_config as loader
         elif kind == "tools":
             from core.tools.policy import load_tools_config as loader
+        elif kind == "channels":
+            from core.channels.config import load_channels_config as loader
         else:
             from core.memory.store import load_memory_config as loader
         loader(path)
@@ -578,6 +595,16 @@ class ConsoleApi:
         #: 注入而不是在这里建：这一层不该决定「要不要出网」。那是 ``config/channels.toml``
         #: 的 ``enabled`` 加启动脚本的事，而控制台只负责显示它的状态、看会话、手打一条。
         self.channel_runner: Any = None
+        #: 由启动脚本注入的通道开关，签名是 ``(action: str) -> Mapping``，``action`` 是
+        #: ``"start"`` / ``"stop"``。**它会顺手把 ``self.channel_runner`` 换掉。**
+        #:
+        #: 2026-09-04 加的，理由和 ``restart_hook`` 一样但更硬：在这之前「打开微信通道」
+        #: 只有一条路 —— 改 ``config/channels.toml`` 再重启整个进程。而扫码绑定是在这个
+        #: 页面上完成的，绑完却要人去改一个文件，等于把一次已经做完的授权动作重新问一遍。
+        #:
+        #: 怎么起线程、借哪个 ASR/TTS 仍然是启动脚本的知识（它手上有 stack），所以这里
+        #: 只有一个钩子。没注入时报 501 而不是假装成功。
+        self.channel_hook: Any = None
         #: 正在进行的扫码登录会话。**一次只有一个** —— 两张二维码同时挂着的话，先扫的那张
         #: 换来的凭据会被后扫的覆盖，而使用者看到的是「扫了但没绑上」。
         self._weixin_login: Any = None
@@ -1393,25 +1420,116 @@ class ConsoleApi:
     # ---------------------------------------------------------------- 微信通道
 
     def weixin_view(self) -> dict[str, Any]:
-        """微信那一栏的状态：绑没绑、通道跑没跑、有哪些会话。
+        """微信那一栏的状态：绑没绑、通道跑没跑、**没跑的话卡在哪**、有哪些会话。
 
         **永不回显 token** —— ``describe_credentials()`` 只报 account id 的前 8 位和
         base_url。这一页会被截图。
+
+        ``check`` 那一项是 2026-09-04 加的，它回答的是使用者问过的那句「我已经绑定了
+        微信，为什么还不能对话」：在这之前这个视图只报 ``enabled`` 和 ``runner``，而
+        ``runner`` 是 ``None`` 时页面无从知道原因是「配置关着」、「凭据没绑」还是
+        「启动时通道起不来」—— 三件事在界面上长得一模一样。
         """
-        from core.channels.config import load_channels_config
+        from core.channels.config import load_channels_config, open_weixin
         from core.channels.weixin_login import describe_credentials
 
         config = load_channels_config()
         runner = self.channel_runner
-        return {
+        # 报的是**真的键**。上一版这里读 `weixin.voice_in` / `weixin.voice_out`，而 schema
+        # 里没有这两个键 —— `load_channels_config` 拍平出来的字典里永远没有它们，于是
+        # `.get(..., True)` 每次都取默认值 True：两行凭空报出来的「开」。
+        enabled = bool(config.get("weixin.enabled", False))
+        view: dict[str, Any] = {
             "credentials": describe_credentials(),
-            "enabled": bool(config.get("weixin.enabled", False)),
-            "voice_in": bool(config.get("weixin.voice_in", True)),
-            "voice_out": bool(config.get("weixin.voice_out", True)),
+            "enabled": enabled,
+            "reply_with_voice": bool(config.get("weixin.reply_with_voice", True)),
+            "voice_native": bool(config.get("weixin.voice_native", False)),
+            "local_asr": bool(config.get("weixin.local_asr", True)),
+            "poll_timeout_s": float(config.get("weixin.poll_timeout_s", 35.0)),
             "runner": runner.describe() if runner is not None else None,
             "chats": runner.chats() if runner is not None else [],
             "login_active": self._weixin_login is not None,
+            "can_switch": self._can_switch_channel(),
         }
+        # 凭据这一关单独问一次，**即使 enabled 是关的**：一个「已绑定但没打开」和一个
+        # 「打开了但没绑定」需要不同的下一步，而页面只有拿到两个答案才能说对是哪一个。
+        try:
+            probe = open_weixin({**config, "weixin.enabled": True})
+            view["check"] = dict(probe.check()) if probe is not None else {}
+        except Exception as exc:  # noqa: BLE001 - 状态页不能因为探测失败而整页 500
+            view["check"] = {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
+        return view
+
+    def _can_switch_channel(self) -> bool:
+        """这个进程能不能在线开关通道。
+
+        ``--no-weixin`` 之后钩子仍然装着（它是启动脚本无条件注入的），但它会拒绝一切
+        ``start`` —— 所以「装了没装」不等于「能不能用」。问的是钩子自己报的 ``enabled``：
+        不问的后果是 ``weixin_switch`` 先把 ``enabled = true`` 写进文件、再从钩子拿到
+        拒绝，于是一次失败的操作留下了一半的副作用。
+        """
+        hook = self.channel_hook
+        return hook is not None and bool(getattr(hook, "enabled", True))
+
+    def _channels_path(self) -> Path:
+        """通道配置的路径。**读和写必须落在同一个文件上。**
+
+        走 ``core.channels.config.config_path()``（它认 ``VOX_CHANNELS_CONFIG``）而不是
+        ``self.config_dir / "channels.toml"``：运行时那一侧读的就是它。一个「页面写 A、
+        运行时读 B」的开关点下去不报错也不生效，而那是最难查的一种失败。
+        """
+        from core.channels.config import config_path
+
+        return config_path()
+
+    def _set_channel_enabled(self, enabled: bool) -> dict[str, Any]:
+        """把 ``weixin.enabled`` 写进通道配置。
+
+        写文件而不是只改内存：这个开关要在下次启动时还在。用 ``channels.toml`` 自己的
+        loader 当校验器，和 ``config_update`` 走的是同一个 —— 写坏的文件在换过去之前
+        就被拒。
+        """
+        key = "weixin.enabled"
+        if key not in EDITABLE["channels.toml"]:  # pragma: no cover - 防重构漂移
+            raise ApiError(f"{key} 不在可写清单里")
+        try:
+            changed = set_scalars(
+                self._channels_path(), {key: bool(enabled)}, validate=_validator("channels")
+            )
+        except (ConfigEditError, OSError) as exc:
+            raise ApiError(f"写不进 channels.toml：{exc}", status=409) from exc
+        return {"changed": changed}
+
+    def weixin_switch(self, on: bool) -> dict[str, Any]:
+        """开/关微信通道 —— **立即生效，不重启**，并把选择写进配置。
+
+        两件事一起做是刻意的。只写配置的话，页面上那个开关要等下一次重启才有效果，
+        而「点了开关但什么都没发生」会被读成坏了；只起线程的话，重启之后它自己关掉了。
+        """
+        if not self._can_switch_channel():
+            raise ApiError(
+                "这个控制台不能在线开关通道（只有 scripts/run_console.py 起的才有；"
+                "启动时带了 --no-weixin 也会落在这里）—— 去掉那个参数重启即可",
+                status=501,
+            )
+        want = bool(on)
+        if want:
+            # **先看凭据。** 没绑就打开的话，通道会起来然后每 35 秒失败一次，而页面上
+            # 只会显示「在跑」—— 一个跑着的空转线程比一个明确的「还没绑定」难查得多。
+            from core.channels.config import load_channels_config, open_weixin
+
+            probe = open_weixin({**load_channels_config(), "weixin.enabled": True})
+            status = probe.check() if probe is not None else {"available": False}
+            if not status.get("available"):
+                raise ApiError(str(status.get("reason") or "微信还没绑定"), status=409)
+        self._set_channel_enabled(want)
+        try:
+            result = dict(self.channel_hook("start" if want else "stop") or {})
+        except Exception as exc:  # noqa: BLE001 - 起不来要带上原因
+            raise ApiError(f"通道{'打开' if want else '关闭'}失败：{exc}", status=502) from exc
+        if want and not result.get("running"):
+            raise ApiError(str(result.get("reason") or "通道没起来"), status=502)
+        return {**result, **self.weixin_view()}
 
     def weixin_login(self) -> dict[str, Any]:
         """开始一次扫码登录，返回渲好的二维码 SVG。
@@ -1433,6 +1551,16 @@ class ConsoleApi:
         """问一次状态。**一次一问** —— 等待留给页面。
 
         一个 8 分钟不返回的 HTTP 请求会被任何一层超时掐断，所以这里不阻塞轮询。
+
+        **扫成功就直接开始收消息**（2026-09-04）。此前这里只存凭据，然后页面写一行
+        「通道要在 config/channels.toml 里打开 enabled 并重启才开始收消息」—— 使用者
+        的反应是对的：他刚刚用自己的微信扫了一个码，那已经是这条链路上最明确的一次
+        授权，再要求他去改一个 TOML 文件不是在守什么边界，只是把一次做完的动作重问
+        一遍。``enabled`` 这个键留着（它记住这个选择，也让「关掉」有地方落），但它现在
+        由这一步来写。
+
+        自动打开**失败不影响绑定**：凭据已经存下来了，页面据 ``started`` / ``start_error``
+        说清「绑上了，但通道没起来，原因是……」。
         """
         session = self._weixin_login
         if session is None:
@@ -1445,15 +1573,65 @@ class ConsoleApi:
         if result.get("status") == "confirmed":
             # 绑上了就把会话丢掉：留着它只会让下一次点「扫码登录」拿到一个已经用过的票据。
             self._weixin_login = None
+            result = {**result, **self._start_after_scan()}
         return result
 
+    def _start_after_scan(self) -> dict[str, Any]:
+        """扫码成功之后自动打开通道。返回给页面的两个字段，**不抛**。
+
+        不抛是因为调用它的那一步已经成功了（凭据在盘上）。把这里的失败变成 502 会让
+        「绑定成功」显示成「登录失败」，而那是一句错话。
+        """
+        if self.channel_hook is None:
+            return {
+                "started": False,
+                "start_error": "这个进程不能在线打开通道（启动时带了 --no-weixin？）—— "
+                "在 config/channels.toml 里把 weixin.enabled 设成 true 再重启",
+            }
+        if not self._can_switch_channel():
+            return {
+                "started": False,
+                "start_error": "这个进程带着 --no-weixin 启动，不起通道 —— "
+                "去掉那个参数重启，凭据已经存好了",
+            }
+        try:
+            self._set_channel_enabled(True)
+            result = dict(self.channel_hook("start") or {})
+        except Exception as exc:  # noqa: BLE001 - 绑定已经成了，这一步的失败只报告
+            return {"started": False, "start_error": f"{type(exc).__name__}: {exc}"}
+        if not result.get("running"):
+            return {"started": False, "start_error": str(result.get("reason") or "通道没起来")}
+        return {"started": True, "start_error": ""}
+
     def weixin_unbind(self) -> dict[str, Any]:
-        """解绑。**不动 `enabled`** —— 那是配置，改它要走配置那条路并重启。"""
+        """解绑：**先停通道，再删凭据，并把 ``enabled`` 关掉。**
+
+        2026-09-04 之前这里只删文件、明写「不动 enabled，那是配置」。而后果是一个还在
+        长轮询的线程带着一份已经被删掉的凭据继续跑：每 35 秒一次失败，页面上仍然显示
+        「在跑」。凭据和通道是同一件事的两半，删一半留一半没有任何场景需要。
+        """
         from core.channels.weixin_login import describe_credentials, forget_credentials
 
+        stopped = False
+        if self.channel_hook is not None:
+            try:
+                self.channel_hook("stop")
+                stopped = True
+            except Exception:  # noqa: BLE001 - 停不掉也要把凭据删掉
+                pass
+            try:
+                self._set_channel_enabled(False)
+            except ApiError:
+                # 配置写不进去（文件只读、被占用）不该让「解绑」失败：凭据删掉之后
+                # 通道下次启动照样起不来（`check()` 会拒），只是那一行配置还写着 true。
+                pass
         removed = forget_credentials()
         self._weixin_login = None
-        return {"removed": removed, "credentials": describe_credentials()}
+        return {
+            "removed": removed,
+            "stopped": stopped,
+            "credentials": describe_credentials(),
+        }
 
     def weixin_messages(self, since: int = 0, limit: int = 200) -> dict[str, Any]:
         """会话记录的增量。页面每一两秒问一次，游标是序号。"""
@@ -1475,7 +1653,7 @@ class ConsoleApi:
         """
         runner = self.channel_runner
         if runner is None:
-            raise ApiError("微信通道没在跑（config/channels.toml 里 enabled = false？）", status=409)
+            raise ApiError("微信通道没在跑 —— 在这一栏点「打开通道」（没绑定的话先扫码）", status=409)
         if not str(chat_id or "").strip():
             raise ApiError("chat_id is required")
         try:

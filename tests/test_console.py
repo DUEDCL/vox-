@@ -2402,8 +2402,59 @@ def test_the_first_enrollment_can_be_done_from_the_console(runtime, monkeypatch)
 
 @pytest.fixture
 def weixin_api(tmp_path, monkeypatch):
+    """微信那一栏，凭据与通道配置**都指到 tmp**。
+
+    两个都要隔离。凭据不隔离的话测试会读到开发机上真的绑过的那份（`check()` 从
+    2026-09-04 起就认它），断言变成「取决于这台机器绑没绑微信」；通道配置不隔离的话
+    「打开通道」那条路会**往仓库里的 config/channels.toml 写 enabled = true** ——
+    一次测试运行改掉工作区的文件。
+    """
     monkeypatch.setenv("VOX_WEIXIN_CREDENTIALS", str(tmp_path / "weixin.json"))
+    channels = tmp_path / "channels.toml"
+    channels.write_text(
+        "[weixin]\nenabled = false\ntoken_env = \"VOX_WEIXIN_TOKEN\"\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("VOX_CHANNELS_CONFIG", str(channels))
+    monkeypatch.delenv("VOX_WEIXIN_TOKEN", raising=False)
     return ConsoleApi(runtime=None, stack=None)
+
+
+class FakeChannelControl:
+    """启动脚本注入的那个开关的替身。记下每一次动作。
+
+    ``enabled`` 对应 ``--no-weixin``：那种情况下钩子**仍然装着**（启动脚本无条件注入），
+    但它拒绝一切 start。所以「装了没装」和「能不能用」是两个问题。
+    """
+
+    def __init__(self, api, *, ok: bool = True, reason: str = "", enabled: bool = True) -> None:
+        self.api = api
+        self.ok = ok
+        self.reason = reason
+        self.enabled = enabled
+        self.actions: list[str] = []
+
+    def __call__(self, action: str) -> dict:
+        from core.channels.runner import ChannelRunner
+
+        self.actions.append(action)
+        if action == "stop":
+            self.api.channel_runner = None
+            return {"running": False, "reason": ""}
+        if not self.ok:
+            self.api.channel_runner = None
+            return {"running": False, "reason": self.reason}
+        self.api.channel_runner = ChannelRunner(
+            channel=SimpleNamespace(name="weixin"), runtime=None
+        )
+        return {"running": True, "reason": ""}
+
+
+def _bind(tmp_path) -> None:
+    """写一份「已经扫过码」的凭据。**不打网络。**"""
+    (tmp_path / "weixin.json").write_text(
+        json.dumps({"account_id": "acc-12345678", "token": "tk-" + "y" * 30}),
+        encoding="utf-8",
+    )
 
 
 def test_the_weixin_panel_says_unbound_before_anyone_scans(weixin_api):
@@ -2412,6 +2463,111 @@ def test_the_weixin_panel_says_unbound_before_anyone_scans(weixin_api):
     assert view["credentials"]["bound"] is False
     assert view["runner"] is None, "通道没起来就该如实说没起来"
     assert view["chats"] == []
+    # 「没绑」和「绑了但通道关着」需要不同的下一步，所以这两件事分开报。
+    assert view["check"]["available"] is False
+    assert view["enabled"] is False
+    assert view["can_switch"] is False, "没注入开关时页面上那颗要禁用而不是点了报错"
+
+
+def test_the_panel_reports_the_real_keys_not_invented_ones(weixin_api):
+    """报的必须是 schema 里真有的键。
+
+    上一版这里报 ``voice_in`` / ``voice_out``，而 ``channels.toml`` 的 schema 里没有这
+    两个键 —— 拍平出来的字典里永远没有它们，于是 ``.get(..., True)`` 每次都取默认值：
+    两行凭空报出来的「开」。一个「看起来在报状态但其实在报常量」的读数比没有这个读数更糟。
+    """
+    view = weixin_api.weixin_view()
+
+    for key in ("reply_with_voice", "voice_native", "local_asr", "poll_timeout_s"):
+        assert key in view
+    assert "voice_in" not in view and "voice_out" not in view
+
+
+def test_channels_toml_is_editable_from_the_console():
+    """``weixin.enabled`` 必须能从页面改。
+
+    使用者的原话是「为什么我已经绑定了微信，还不能直接进行微信的对话呢，还要去改配置
+    文件」—— 而在这之前 ``channels.toml`` 整份文件都不在 ``EDITABLE`` 里，所以那个开关
+    只有改文件一条路。``token_env`` **仍然不许从页面改**（同 tts.key_env）。
+    """
+    allowed = EDITABLE["channels.toml"]
+
+    assert "weixin.enabled" in allowed
+    assert "weixin.token_env" not in allowed
+
+
+def test_opening_the_channel_without_credentials_is_refused(weixin_api):
+    """没绑就打开的话，通道会起来然后每 35 秒失败一次，而页面上只写「在跑」。"""
+    weixin_api.channel_hook = FakeChannelControl(weixin_api)
+
+    with pytest.raises(ApiError, match="扫码登录"):
+        weixin_api.weixin_switch(True)
+
+    assert weixin_api.weixin_view()["enabled"] is False, "被拒的开关不该写进配置"
+
+
+def test_opening_the_channel_writes_the_choice_and_starts_it(weixin_api, tmp_path):
+    """**两件事一起做。** 只写配置的话，点了开关要等下一次重启才有效果，而「点了没反应」
+    会被读成坏了；只起线程的话，重启之后它自己关掉了。"""
+    _bind(tmp_path)
+    hook = FakeChannelControl(weixin_api)
+    weixin_api.channel_hook = hook
+
+    result = weixin_api.weixin_switch(True)
+
+    assert hook.actions == ["start"]
+    assert result["enabled"] is True, "配置里要留下这个选择"
+    assert result["runner"] is not None
+    assert weixin_api.weixin_view()["can_switch"] is True
+
+
+def test_closing_the_channel_turns_it_off_in_the_config_too(weixin_api, tmp_path):
+    _bind(tmp_path)
+    hook = FakeChannelControl(weixin_api)
+    weixin_api.channel_hook = hook
+    weixin_api.weixin_switch(True)
+
+    result = weixin_api.weixin_switch(False)
+
+    assert hook.actions == ["start", "stop"]
+    assert result["enabled"] is False
+    assert result["runner"] is None
+
+
+def test_a_channel_that_will_not_start_says_why_instead_of_claiming_success(
+    weixin_api, tmp_path
+):
+    _bind(tmp_path)
+    weixin_api.channel_hook = FakeChannelControl(weixin_api, ok=False, reason="端口被占")
+
+    with pytest.raises(ApiError, match="端口被占"):
+        weixin_api.weixin_switch(True)
+
+
+def test_switching_without_the_hook_reports_501_not_a_fake_success(weixin_api, tmp_path):
+    """没注入开关时明确说这里不支持 —— 一个点了没反应的按钮更难查。"""
+    _bind(tmp_path)
+
+    with pytest.raises(ApiError, match="不能在线开关通道"):
+        weixin_api.weixin_switch(True)
+
+
+def test_no_weixin_refuses_before_writing_the_config(weixin_api, tmp_path):
+    """``--no-weixin`` 之后钩子仍然装着，但它拒绝一切 start。
+
+    **必须在写配置之前就拒。** 顺序反过来的话，一次失败的「打开通道」会把
+    ``enabled = true`` 留在文件里 —— 一半的副作用，而页面上显示的是失败。
+    """
+    _bind(tmp_path)
+    hook = FakeChannelControl(weixin_api, enabled=False)
+    weixin_api.channel_hook = hook
+
+    assert weixin_api.weixin_view()["can_switch"] is False
+    with pytest.raises(ApiError, match="--no-weixin"):
+        weixin_api.weixin_switch(True)
+
+    assert hook.actions == [], "被拒的开关不该碰到钩子"
+    assert weixin_api.weixin_view()["enabled"] is False, "也不该写进配置"
 
 
 def test_polling_before_starting_a_login_is_refused(weixin_api):
@@ -2451,6 +2607,8 @@ def test_a_login_renders_the_qr_on_the_server(weixin_api, monkeypatch):
             super().__init__(**kwargs)
 
     monkeypatch.setattr(login, "QrLogin", OfflineQrLogin)
+    hook = FakeChannelControl(weixin_api)
+    weixin_api.channel_hook = hook
 
     first = weixin_api.weixin_login()
     assert first["svg"].startswith("<?xml")
@@ -2463,17 +2621,72 @@ def test_a_login_renders_the_qr_on_the_server(weixin_api, monkeypatch):
     assert weixin_api.weixin_view()["credentials"]["bound"] is True
     # 绑上之后会话要丢掉，否则下一次点「扫码登录」拿到一个用过的票据。
     assert weixin_api._weixin_login is None
+    # **扫成功就开始收消息。** 用自己的微信扫一个码已经是这条链路上最明确的一次授权，
+    # 再要求人去改一个 TOML 文件不是在守什么边界。
+    assert done["started"] is True
+    assert hook.actions == ["start"]
+    assert weixin_api.weixin_view()["enabled"] is True
 
 
-def test_unbinding_does_not_silently_turn_the_channel_off(weixin_api):
-    """解绑只删凭据。``enabled`` 是配置 —— 改它要走配置那条路并重启，
-    而一个悄悄改了配置文件的按钮会让「为什么重启后不收消息了」变成一次考古。"""
-    before = weixin_api.weixin_view()["enabled"]
+def test_a_scan_that_cannot_auto_start_still_counts_as_bound(weixin_api, monkeypatch):
+    """自动打开失败**不影响绑定** —— 凭据已经在盘上了。
+
+    把这一步的失败变成 502 会让「绑定成功」显示成「登录失败」，而那是一句错话。
+    """
+    import core.channels.weixin_login as login
+
+    class FakeTransport:
+        def __init__(self) -> None:
+            self.script = [
+                {"qrcode": "hex1", "qrcode_img_content": "https://ilinkai.weixin.qq.com/l?t=1"},
+                {"status": "confirmed", "ilink_bot_id": "bot-9", "bot_token": "tk-" + "q" * 30},
+            ]
+
+        def get_json(self, url, headers, timeout_s):
+            del url, headers, timeout_s
+            return self.script.pop(0)
+
+    class OfflineQrLogin(login.QrLogin):
+        def __init__(self, **kwargs):
+            kwargs.setdefault("transport", FakeTransport())
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(login, "QrLogin", OfflineQrLogin)
+    weixin_api.channel_hook = FakeChannelControl(weixin_api, ok=False, reason="起不来")
+
+    weixin_api.weixin_login()
+    done = weixin_api.weixin_login_poll()
+
+    assert done["status"] == "confirmed"
+    assert done["started"] is False
+    assert "起不来" in done["start_error"]
+    assert weixin_api.weixin_view()["credentials"]["bound"] is True
+
+
+def test_unbinding_stops_the_channel_and_turns_it_off(weixin_api, tmp_path):
+    """解绑 = 停通道 + 删凭据 + 关配置。**三件事一起。**
+
+    2026-09-04 之前这里只删凭据，明写「不动 enabled，那是配置」。真机上那个立场的代价
+    是一个还在长轮询的线程带着一份已经被删掉的凭据继续跑：`_token()` 每次都抛、`poll()`
+    每次吞掉、页面上仍然显示「在跑」。凭据和通道是同一件事的两半，删一半留一半没有任何
+    场景需要它。
+
+    「不悄悄改配置文件」这条顾虑仍然成立，答案是**报出来**而不是不做：返回里带
+    ``stopped``，页面上那句确认写着「会停掉通道并删掉凭据」。
+    """
+    _bind(tmp_path)
+    hook = FakeChannelControl(weixin_api)
+    weixin_api.channel_hook = hook
+    weixin_api.weixin_switch(True)
 
     result = weixin_api.weixin_unbind()
 
     assert result["credentials"]["bound"] is False
-    assert weixin_api.weixin_view()["enabled"] == before
+    assert result["stopped"] is True
+    assert "stop" in hook.actions
+    view = weixin_api.weixin_view()
+    assert view["enabled"] is False
+    assert view["runner"] is None
 
 
 def test_sending_without_a_running_channel_says_so_instead_of_failing_silently(weixin_api):

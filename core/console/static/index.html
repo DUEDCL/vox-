@@ -1240,9 +1240,15 @@ details[open] > summary::before { content: "▾ "; }
       <p class="note" id="wx-state" style="margin-top:0">读取…</p>
       <div class="line">
         <button id="wx-login" class="primary" data-od-id="weixin-login">扫码登录</button>
+        <button id="wx-switch" data-od-id="weixin-switch">打开通道</button>
         <button id="wx-unbind" class="danger" data-od-id="weixin-unbind">解绑</button>
         <span class="note" id="wx-login-state" style="margin:0"></span>
       </div>
+      <p class="note" style="margin:var(--space-3) 0 0">
+        扫完码通道<b>自己就开了</b>，不用改配置也不用重启 —— 用自己的微信扫一个码，
+        比编辑一个配置文件明确得多。「打开通道 / 关闭通道」这颗是给之后随时开关用的，
+        它同时写进 <code>config/channels.toml</code>，所以下次启动还记得。
+      </p>
       <div id="wx-qr" hidden style="margin-top:var(--space-4);display:flex;gap:var(--space-4);align-items:flex-start;flex-wrap:wrap">
         <div id="wx-qr-img" style="background:#fff;padding:10px;border-radius:12px;line-height:0"></div>
         <p class="note" style="margin:0;max-width:26em">
@@ -4087,18 +4093,40 @@ async function renderWeixin() {
   catch (err) { setText($("wx-state"), "读不到：" + err.message); return; }
   const cred = view.credentials || {};
   const runner = view.runner;
+  const check = view.check || {};
   const bits = [];
   bits.push(cred.bound ? `已绑定 ${cred.account_id}（${cred.saved_at}）` : "未绑定");
-  bits.push(view.enabled ? "通道已开" : "通道关着（config/channels.toml 的 enabled）");
-  if (runner) {
+  /* 「跑没跑」和「配置写着开没开」是两件事，分开说。上一版只报后者，于是一个
+     enabled=true 但根本没起来的通道在页面上写着「通道已开」—— 那句话是假的。 */
+  if (runner && runner.running) {
+    bits.push("正在收消息");
     bits.push(`处理 ${runner.handled} 条 · 失败 ${runner.failures}`);
     bits.push(`语音回复 ${runner.voice_out ? "开" : "关"} · 本机转写 ${runner.local_asr ? "开" : "关"}`);
     if (runner.last_error) bits.push("最近一次错误：" + runner.last_error);
+  } else if (!cred.bound) {
+    bits.push("没在收消息 —— 先点「扫码登录」");
+  } else if (!check.available) {
+    bits.push("没在收消息 —— " + (check.reason || "凭据不可用"));
   } else if (view.enabled) {
-    bits.push("通道没起来 —— 看启动日志");
+    /* 绑了、配置也开着，却没有 runner：这一格只在启动时通道起不来时出现。 */
+    bits.push("配置是开的但通道没起来 —— 点「打开通道」，还不行就看运行日志");
+  } else {
+    bits.push("通道关着 —— 点「打开通道」");
   }
+  if (check.source === "env") bits.push("凭据来自环境变量");
   setText($("wx-state"), bits.join("  ·  "));
   $("wx-unbind").disabled = !cred.bound;
+
+  const live = !!(runner && runner.running);
+  const toggle = $("wx-switch");
+  setText(toggle, live ? "关闭通道" : "打开通道");
+  toggle.classList.toggle("danger", live);
+  /* 没绑定就不能开；这个进程装不了开关（--no-weixin）时也不能。禁用而不是让它报错 ——
+     一个点下去只会弹错误的按钮等于在教人忽略错误。 */
+  toggle.disabled = !view.can_switch || (!live && !check.available);
+  toggle.title = !view.can_switch
+    ? "这个控制台不能在线开关通道（启动时带了 --no-weixin）"
+    : (!live && !check.available ? (check.reason || "还没绑定") : "");
 
   const select = $("wx-chat");
   const keep = select.value;
@@ -4194,7 +4222,12 @@ $("wx-login").onclick = async () => {
         $("wx-login").disabled = false;
         box.hidden = true;
         renderWeixin();
-        setText($("wx-login-state"), "绑定成功 —— 通道要在 config/channels.toml 里打开 enabled 并重启才开始收消息");
+        /* 后端在确认那一刻就把通道打开了（写 enabled + 起线程），所以这里报的是结果
+           而不是一份待办清单。上一版这句话是「通道要在 config/channels.toml 里打开
+           enabled 并重启才开始收消息」—— 让人刚扫完码就去改一个文件。 */
+        setText($("wx-login-state"), step.started
+          ? "绑定成功 —— 通道已经在收消息了，直接在微信里跟它说话"
+          : "绑定成功，但通道没自动打开：" + (step.start_error || "原因未知"));
       }
     }, 1500);
   } catch (loginErr) {
@@ -4204,8 +4237,27 @@ $("wx-login").onclick = async () => {
   }
 };
 
+$("wx-switch").onclick = async () => {
+  const button = $("wx-switch");
+  const err = $("wx-error");
+  const turningOn = button.textContent.indexOf("打开") >= 0;
+  err.hidden = true;
+  button.disabled = true;
+  setText($("wx-login-state"), turningOn ? "打开通道…" : "关闭通道…");
+  try {
+    await api("/api/weixin/switch", { method: "POST", body: { on: turningOn } });
+    setText($("wx-login-state"), turningOn ? "通道已打开 —— 在微信里跟它说话" : "通道已关闭");
+  } catch (switchErr) {
+    err.hidden = false; setText(err, switchErr.message);
+    setText($("wx-login-state"), "");
+  } finally {
+    button.disabled = false;
+    renderWeixin();
+  }
+};
+
 $("wx-unbind").onclick = async () => {
-  if (!confirm("解绑之后要重新扫码才能收发微信消息。继续？")) return;
+  if (!confirm("解绑会停掉通道并删掉凭据，要重新扫码才能收发微信消息。继续？")) return;
   try { await api("/api/weixin/unbind", { method: "POST", body: {} }); }
   catch (err) { $("wx-error").hidden = false; setText($("wx-error"), err.message); return; }
   if (wxPolling) { clearInterval(wxPolling); wxPolling = null; }

@@ -1020,20 +1020,21 @@ $env:PYTHONUTF8=1; .\.venv\Scripts\python.exe scripts/acceptance/real_mic_e2e.py
 代码级（AUTO，不打网络）：
 
 ```powershell
-python -m pytest tests/test_channels.py tests/test_channel_crypto.py tests/test_weixin_login.py -q
+python -m pytest tests/test_channels.py tests/test_channel_crypto.py tests/test_weixin_login.py tests/test_channel_control.py -q
 ```
 
-期望 **63 passed**（channels 31 + crypto 15 + login 17）。
+期望 **72 passed**（channels 34 + crypto 15 + login 17 + control 6）。
 
-控制台那一侧另有几条，**`-k weixin` 抓不全**（`-k` 匹配的是测试名，而那几条里只有一个名字
+控制台那一侧另有十几条，**`-k weixin` 抓不全**（`-k` 匹配的是测试名，而那几条里只有几个名字
 带 weixin，其余叫 `..._renders_the_qr_...` / `..._unbinding_...` / `..._cursor_...`）：
 
 ```powershell
-python -m pytest tests/test_console.py -q -k "weixin or qr or unbind or cursor or channel"
+python -m pytest tests/test_console.py -q -k "weixin or qr or unbind or cursor or channel or scan or panel"
 ```
 
-期望 **7 passed**。其中最该看的两条：「token 的值不出现在返回给页面的任何地方」（这一页会被
-截图）和「游标只返回新条目」（重复给会让同一条消息在界面上出现好几遍）。
+期望 **15 passed**。其中最该看的三条：「token 的值不出现在返回给页面的任何地方」（这一页会被
+截图）、「游标只返回新条目」（重复给会让同一条消息在界面上出现好几遍）、以及
+「`--no-weixin` 在写配置之前就拒」（顺序反过来会让一次失败的操作留下一半的副作用）。
 
 真机那一步按顺序做，**每一步都有它自己会失败的方式**：
 
@@ -1041,8 +1042,15 @@ python -m pytest tests/test_console.py -q -k "weixin or qr or unbind or cursor o
    - 页面一直停在「请用手机微信扫码」而手机说已确认 → 看 `scaned_but_redirect` 有没有生效
      （凭据里的 `base_url` 应该变成了另一个域名）。
    - 二维码框空白 → 缺 `segno`：`.venv\Scripts\python.exe -m pip install segno`。
-2. **打开通道。** `config/channels.toml` 的 `enabled = true`，然后在控制台点「重启」。
-   启动日志里应该有 `weixin: 在听（语音回复 开，出站语音走 文件附件）`。
+2. **通道自己就开了**（2026-09-04 起）。页面上应该出现「绑定成功 —— 通道已经在收消息了」，
+   状态那一行变成「正在收消息」，启动/运行日志里有
+   `weixin: 在听（凭据来自扫码，语音回复 开，本机转写 开，出站语音走 文件附件）`。
+   - **写着「绑定成功，但通道没自动打开」** → 后面跟着原因。带 `--no-weixin` 启动是最常见的
+     一个；去掉那个参数重启，凭据已经存好了。
+   - 之后要开关就点那一栏的「打开通道 / 关闭通道」，**立即生效**，同时写进
+     `config/channels.toml` 的 `enabled`（下次启动还记得）。手改那一行仍然有效，只是要重启。
+   - **状态写着「配置是开的但通道没起来」** → 这一格只在启动那一刻起不来时出现，
+     点一次「打开通道」看它报什么。
 3. **文字往返。** 从另一个微信号给它发一句「现在几点」。控制台「微信」栏的实时收发里
    应该出现一条 `in` 和一条 `out`。
    - 有 `in` 没有 `out` → 看运行日志里 `weixin` 那一源，多半是 `context_token` 没回带

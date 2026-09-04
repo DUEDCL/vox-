@@ -339,14 +339,16 @@ class ConsoleServer:
                 return api.sites_delete(
                     str(payload.get("kind", "")), str(payload.get("name", ""))
                 )
-            # 微信：扫码绑定与那一栏的实时收发。四个都是 POST —— 它们都有副作用
-            # （开一次登录会话、写凭据、删凭据、发一条消息）。
+            # 微信：扫码绑定与那一栏的实时收发。**五个都是 POST** —— 它们都有副作用
+            # （开一次登录会话、写凭据、删凭据、开关一条出网通道、发一条消息）。
             if path == "/api/weixin/login":
                 return api.weixin_login()
             if path == "/api/weixin/poll":
                 return api.weixin_login_poll()
             if path == "/api/weixin/unbind":
                 return api.weixin_unbind()
+            if path == "/api/weixin/switch":
+                return api.weixin_switch(bool(payload.get("on", True)))
             if path == "/api/weixin/send":
                 return api.weixin_send(
                     str(payload.get("chat_id", "")), str(payload.get("text", ""))

@@ -14,7 +14,7 @@
 
 | 改动范围 | 命令 | 期望 |
 |---|---|---|
-| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1812 passed, 3 skipped** |
+| `core/` `vox_plugin/` | `.venv\Scripts\python.exe -m pytest tests -q` | **1830 passed, 3 skipped** |
 | `contracts/voice-events.schema.json` 或事件结构 | `pytest tests/test_event_schema.py tests/test_events.py tests/test_voice_contract.py tests/test_plugin_tools.py -q` | 全绿 |
 | `contracts/agent-events.schema.json` `agents.schema.json` | `pytest tests/test_agent_event_schema.py -q` | **34 passed** |
 | `core/events.py` | `pytest tests/test_events.py tests/test_agent_event_schema.py -q` | 全绿 |
@@ -33,7 +33,7 @@
 | `core/tools/mcp.py` `config/mcp.toml` `contracts/mcp.schema.json` | `pytest tests/test_mcp.py -q` | **51 passed**（假 server，SIM） |
 | `core/config_edit.py` | `pytest tests/test_config_edit.py -q` | **33 passed** |
 | `core/models_config.py` `config/models.toml` `core/console/providers.py` | `pytest tests/test_models_config.py tests/test_config_edit.py -q` | **93 passed**（不打真网络；`write_active` 与 `voice_overrides` 的验收在 `test_console.py`） |
-| `core/console/` `core/console/static/index.html` | `pytest tests/test_console.py -q` + **控制台渲染取证**（`preview_start console` → 点一遍导航 → `preview_eval` 查 hidden 与控件类型） | **204 passed** + 页面无 console 错误 |
+| `core/console/` `core/console/static/index.html` | `pytest tests/test_console.py -q` + **控制台渲染取证**（`preview_start console` → 点一遍导航 → `preview_eval` 查 hidden 与控件类型） | **213 passed** + 页面无 console 错误 |
 | `core/audio/winlevel.py`（OS 输入音量） | `pytest tests/test_console.py -k calibrat -q` + 真机读一次 `endpoints()` | **5 passed** + 三个端点的音量读得到（REAL-WIN） |
 | `core/audio/gain.py` `vad.py` | `pytest tests/test_auto_gain.py -q` | **16 passed** |
 | 唤醒链路本身（喂真录音过生产回调） | `PYTHONUTF8=1 .venv\Scripts\python.exe .vox-ref\wake_path_check.py` | 「你好小沃」念三遍 **3/3 命中**（SIM；改增益/VAD/KWS 参数后必跑） |
@@ -46,7 +46,8 @@
 | `core/tools/app_index.py`（发现已装应用） | `pytest tests/test_app_index.py -q` | **18 passed**（扫描器被注入，不碰真注册表） |
 | `core/memory/promote.py`（隐式记忆） | `pytest tests/test_memory_promote.py -q` | **29 passed** |
 | `core/channels/weixin_login.py`（扫码） | `pytest tests/test_weixin_login.py -q` | **17 passed**（假 transport，**不打网络**） |
-| `core/channels/` `config/channels.toml` | `pytest tests/test_channels.py tests/test_channel_crypto.py -q` | **41 passed**（channels 26 + crypto 15；crypto 那 15 条钉在 FIPS-197 官方向量上，因为那份 AES 是我们自己写的） |
+| `core/channels/` `config/channels.toml` | `pytest tests/test_channels.py tests/test_channel_crypto.py -q` | **49 passed**（channels 34 + crypto 15；crypto 那 15 条钉在 FIPS-197 官方向量上，因为那份 AES 是我们自己写的） |
+| `scripts/run_console.py` 的通道开关 | `pytest tests/test_channel_control.py -q` | **6 passed**（按路径 import 启动脚本；`open_channel` 被替换，不起真线程） |
 | `core/session_bridge.py` | `pytest tests/test_session_bridge.py tests/test_plugin_tools.py -q` | 全绿 |
 | `desktop/src/` | `cd desktop && npm run build` | tsc + vite 通过 |
 | `desktop/src/sequence.ts` `scripts/build_orb_assets.py` `desktop/public/orb/` | 上面那条 + **六态渲染取证**（`preview_start desktop-ui` → 打 `demo.html?state=<态>&big=1&light=1` → `preview_eval` 从 canvas 读回像素量三个数，深浅两底各一轮） | 六态互不相同（听/思/说三档能量 + 朱红 + 琥珀 + 暗）· **逐时亮度摆动 < 1.3×**（≥ 2× 就是使用者说的「鬼畜」）· **球体饱和度 > 0.45**（素材本身只有 0.285，低于 0.45 说明 `SATURATE` 没生效）· **球外环 alpha ≈ 0**（不为零就是那圈「暗灰色的边边」）· 中心是白热光核不是黑洞 · 生产页 `index.html?state=idle` **画布全空** |
@@ -246,6 +247,8 @@ Phase 4（生产实现）**进行中**：P0 骨架、P1 声纹门、P2 平台事
   - **AES-128-ECB 是我们自己写的**（`core/channels/crypto.py`，纯 Python，因为这台机器没有 `cryptography`）。S-box 是算的不是抄的，钉在 FIPS-197 官方向量上。ECB 不是密码学选择是协议要求 —— 密钥每个文件一把、随机生成、随消息交给对端
   - **上传用 POST 不用 PUT**（上游踩过：PUT 在微信 CDN 上回 404），媒体只从 `*.weixin.qq.com` 下载（一个能指向任意主机的字段就是一次 SSRF，有测试钉着）
 - **微信这条路上 `speaker` 永远是 `None`** —— 一个微信 id 证明不了对面是谁，所以 `shell.run` 天然进不来（它要 `require_verified_speaker`）。这不是限制，是这条链路唯一正确的答案
+- **扫完码通道自己就开，不用改文件也不用重启（2026-09-04）** —— 使用者报的是「为什么我已经绑定了微信，还不能直接进行微信的对话呢，还要去改配置文件，而且我改了之后还是不能用」。**两个缺陷叠在一起**：① `WeixinChannel.check()` 只问 `VOX_WEIXIN_TOKEN`，而 `_token()` 早就是「环境变量优先，然后扫码凭据」—— 于是 `start_channels` 拿到 `available=False`，扫码这条路**从来没有能让通道起来过**（症状：`enabled = true` 也没用，唯一线索是启动日志里一行「配了但用不了」）；② `config/channels.toml` **整份文件都不在 `EDITABLE` 里**，所以那个开关只有改文件一条路，而 `scripts/audit_config_surface.py` 只审 voice/tools 两个文件，一次都没报过它。现在：`check()` 问两个来源并报 `source`（`env`/`scan`）· `channels.toml` 五项可从页面改（`token_env` 不在内，同 `tts.key_env`）· `weixin_login_poll` 在 `confirmed` 时写 `enabled = true` 并起线程 · 那一栏有「打开通道 / 关闭通道」（`api.channel_hook`，由 `run_console.py` 注入，和 `restart_hook` 同一个形状）· 解绑 = 停通道 + 关配置 + 删凭据（此前只删凭据，留下一条带着已删凭据继续长轮询的线程）。四个容易记错的：**`--no-weixin` 之后钩子仍然装着**但 `control.enabled = False`，所以 `weixin_switch` 必须问 `_can_switch_channel()` 而不是 `channel_hook is not None` —— 顺序反了会先把 `enabled = true` 写进文件再失败 · **重复点「打开」要先停旧的**（两条长轮询线程各自收到同一批消息 → 每条微信消息被回答两次）· 控制台读写通道配置走 `config_path()`（认 `VOX_CHANNELS_CONFIG`）而不是 `self.config_dir`，否则「页面写 A、运行时读 B」的开关点下去不报错也不生效 · `weixin_view` 此前报的 `voice_in`/`voice_out` **schema 里没有这两个键**，`.get(..., True)` 每次都取默认值 —— 两行凭空报出来的「开」
+- **验证微信界面不要用 `console` 那条启动项** —— 它现在会把**真的**通道起来（`enabled` 是 true 且 `check()` 认扫码凭据），于是任何进来的微信消息都会被一个半验证的构建自动回一句。用 `.vox-ref/console_fake_weixin.py`（假凭据 + `base_url` 指到关着的 `127.0.0.1:9`，一个字节都不出网），launch.json 里是 `console-fakeweixin`；只看页面不点开关时用 `console-noweixin`
 - **agent 会用工具了（`core/agents/skills.py`）** —— 修的是「说『好，正在打开网易云音乐』然后什么都没发生」。那不是模型撒谎：请求能到它那里而能力不在它手上，说得像做过了是它最容易的出路。四条容易记错的：调用是**一行纯文本** `⟦vox:tool app.open {"name":"网易云"}⟧`（U+27E6/U+27E7 挑的就是「不可能从语音转写里冒出来」，四种后端一视同仁，不用 provider 的 function calling —— 那三种形状各不相同而红线 2 只许标量）· `REGISTERED` 是**白名单**，`shell.run` 连名字都不给它看（确认卡是给**使用者说的那句话**准备的界面，一个模型发起、使用者确认的命令执行混淆了「谁想跑它」）· 执行走**同一个 ToolRunner**，`origin="agent"` 且**不传 speaker**，所以这个功能扩大的是「谁能发起」不是「什么能被执行」· 一轮最多一次调用（延迟预算：每轮 2–20 秒），第二轮失败时**拿工具结果当回答**（应用已经开起来了，这时说「agent 失败了」最没用）
 - **三条本机快路径，都不派发** —— `is_dismissal`（「退下吧」→ 收窗收球）· `is_progress_query`（「进度怎么样了」→ 报手上那件活跑了多久，`_inflight` / `_last_done` 两份状态）· 工具快路径。前两条都是**整句锚定**的纯函数：「这个项目进度怎么样」带宾语，仍然派给 agent；漏掉这道边界的症状是一句明显的误答而不是报错。`DispatchResult` 没有 `text` 字段（它是从 chunks 派生的属性），本机答案要走 `chunks=(AgentChunk(kind="text", text=...),)`
 - **`shell.run` 2026-09-03 在出厂配置里打开了**（使用者点名要「能直接执行终端命令」），但 `policy.py` 的**代码默认仍然是 False** —— 删掉配置文件不会获得代码执行。那个 `true` 的可接受性由三条断言共同担保：白名单只读（20 条，`git status`/`dir`/`tasklist` 这类，测试逐条检查没有 `pip`/`python`/`rm`/`git commit`）· `require_confirmation` · `require_verified_speaker`。危险模式仍在代码里。就绪清单里那条 `shell.run is enabled: a misrecognised utterance can reach a command` 警告有测试看着，**不要去消除它**

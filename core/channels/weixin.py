@@ -246,15 +246,51 @@ class WeixinChannel:
     # ------------------------------------------------------------------ 契约
 
     def check(self) -> dict[str, Any]:
-        """能不能用。**不打网络** —— 和 agent 适配器的 `check()` 同一条规矩。"""
+        """能不能用。**不打网络** —— 和 agent 适配器的 `check()` 同一条规矩。
+
+        **两个来源都要问，顺序和 `_token()` 一致。** 2026-09-04 之前这里只问环境变量，
+        而 `_token()` 从一开始就是「环境变量优先，然后是扫码存下来的那份」—— 于是扫码
+        这条路在 `check()` 眼里永远不可用。症状是使用者扫完码、把 `enabled` 打开、重启，
+        然后 `scripts/run_console.py` 的 `start_channels` 读到 `available=False`，打印
+        一行「配了但用不了 —— 没有 $VOX_WEIXIN_TOKEN」就什么都不起：绑定成功了，通道
+        却一条消息都不收，而唯一的线索是一行启动日志。
+
+        **一个 gate 和它守的那个函数用不同的判据，就是这种故障的全部内容。** 判据现在
+        只有一处（这个方法委托给同一份来源顺序），`source` 一起报出来好让页面能说
+        「用的是扫码那份」还是「用的是环境变量」。
+
+        不打网络，所以它答不了「token 过期了没有」—— 那个只有 `poll()` 收到 iLink 的
+        错误码时才知道，落在 `last_error` 里。
+        """
         import os
 
-        has_token = bool(os.environ.get(self.token_env, "").strip())
+        from core.channels.weixin_login import load_credentials
+
+        base = self.base_url
+        if os.environ.get(self.token_env, "").strip():
+            source = "env"
+        else:
+            saved = load_credentials()
+            source = "scan" if saved and saved.get("token") else ""
+            if source and saved:
+                # 报**将要用的**那个 base_url。`_token()` 会在真的发请求时把它换过来
+                # （`scaned_but_redirect` 把账号分到另一个域名上），而这里只是照着算一遍：
+                # 一个 `check()` 带副作用会让「看一眼状态」变成一次状态变更。
+                stored = str(saved.get("base_url", "")).strip()
+                if stored and base == ILINK_BASE_URL:
+                    base = stored
         return {
             "name": self.name,
-            "available": has_token,
-            "reason": "" if has_token else f"没有 ${self.token_env}",
-            "base": self.base_url,
+            "available": bool(source),
+            # "env" / "scan" / "" —— 页面据此说清凭据是从哪来的。**永不带 token 本身。**
+            "source": source,
+            "reason": ""
+            if source
+            else (
+                "还没绑定 —— 到控制台「微信」那一栏点「扫码登录」，用手机微信扫一下"
+                f"（自动化可以改走环境变量 ${self.token_env}）"
+            ),
+            "base": base,
             "voice_native": self.voice_native,
             "last_error": self.last_error,
         }

@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.audio.config import _SCHEMA as VOICE_SCHEMA  # noqa: E402
+from core.channels.config import _SCHEMA as CHANNELS_SCHEMA  # noqa: E402
 from core.console.routes import EDITABLE  # noqa: E402
 from core.tools.policy import DEFAULTS as TOOLS_DEFAULTS  # noqa: E402
 
@@ -38,6 +39,8 @@ WONT: dict[str, str] = {
     "tts.key_env": "它是「去读哪个环境变量」。让网页改它等于让它决定把哪个凭据发给百炼；"
     "密钥的**值**走 /api/secret 的白名单，那条路已经在了",
     "asr.key_env": "同 tts.key_env —— 识别 2026-09-03 也上云了，凭据变量名同样不从页面改",
+    "weixin.token_env": "同 tts.key_env —— 让网页改「去读哪个环境变量」等于让它决定把哪个"
+    "凭据发给腾讯。微信的 token 正常是扫码换来的，落在 .vox/channels/weixin.json",
     # --- 文件系统入口：走约定，不走网页 ----------------------------------------
     "wake.keywords_file": "它是个文件系统入口。留空时走约定路径 config/keywords.txt，"
     "而控制台的「唤醒词」那一栏写的就是那个文件 —— 手改与界面改落在同一处",
@@ -91,6 +94,19 @@ def tools_keys() -> list[str]:
     ]
 
 
+def channels_keys() -> list[str]:
+    """``config/channels.toml`` 的全部键。
+
+    **2026-09-04 加进来的，而它一进来就报出五个缺口。** 那五个里有 `weixin.enabled` ——
+    「绑定完了为什么还不收微信消息」的那个开关。这份审计此前只看 voice.toml 与
+    tools.toml，所以一个整份文件的缺口它一次都没报过：一个只审两个文件的「全范围可配」
+    审计，漏掉的正好是它该发现的东西。
+    """
+    return [
+        f"{section}.{key}" for section, keys in CHANNELS_SCHEMA.items() for key in keys
+    ]
+
+
 def missing_from_shipped() -> list[str]:
     """在白名单里、但**出厂文件里没写**的键。
 
@@ -115,7 +131,11 @@ def missing_from_shipped() -> list[str]:
 
 
 def audit() -> int:
-    surfaces = {"voice.toml": voice_keys(), "tools.toml": tools_keys()}
+    surfaces = {
+        "voice.toml": voice_keys(),
+        "tools.toml": tools_keys(),
+        "channels.toml": channels_keys(),
+    }
     gaps: list[str] = []
     for file, keys in surfaces.items():
         editable = set(EDITABLE.get(file, ()))
@@ -155,7 +175,7 @@ def audit() -> int:
             print(f"  {entry}")
         gaps.extend(invisible)
 
-    print("\n--- 不在这两张表里的配置面（各有自己的编辑入口）---")
+    print("\n--- 不在上面这几张表里的配置面（各有自己的编辑入口）---")
     for line in (
         "config/models.toml   模型方案：/api/models（整段读写，含 provider / model / voice / key_env 变量名）",
         "config/agents.toml   agent 注册表：/api/agents/config（AGENT_EDITABLE 那几个字段）",

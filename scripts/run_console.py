@@ -67,6 +67,15 @@ def make_restart(api, server, runtime, stack, stop, pump):
         if server.token:
             os.environ[TOKEN_ENV] = server.token
         stop.set()
+        # 先停微信通道。它是个 daemon 线程，`execv` 会连它一起换掉，但那条长轮询握着一个
+        # 打开的连接 —— 让新进程带着同一个账号再挂一条，而旧的还没断，会让同一批消息被
+        # 投给两条链路。
+        channel = getattr(api, "channel_runner", None)
+        if channel is not None:
+            try:
+                channel.stop()
+            except Exception:  # noqa: BLE001 - 收尸失败不能挡住重启
+                pass
         pump.join(timeout=2.0)
         for step in (api.mic_stop, server.stop, runtime.close, stack.close):
             try:
@@ -118,18 +127,31 @@ def start_channels(
     """
     if disabled:
         return None, None
+    runner, thread, reason = open_channel(runtime, stack)
+    if reason:
+        print(reason)
+    return runner, thread
+
+
+def open_channel(runtime: VoiceRuntime, stack: Any) -> tuple[Any, Any, str]:
+    """建一个通道 runner 并起它的线程。返回 ``(runner, thread, 说明)``。
+
+    从 ``start_channels`` 里拆出来，因为**控制台要能在运行中打开它**：扫码绑定发生在
+    页面上，而在这之前「打开通道」只有「改 config/channels.toml + 重启整个进程」一条路。
+    拆开之后启动那条路和页面那条路走同一段代码，不会各自漂移。
+
+    说明是给人看的一行；``runner is None`` 时它就是原因。
+    """
     try:
         config = load_channels_config()
         channel = open_weixin(config)
     except Exception as exc:  # noqa: BLE001 - 通道配置坏了不该拖死控制台
-        print(f"warning: 消息通道没起来：{type(exc).__name__}: {exc}")
-        return None, None
+        return None, None, f"warning: 消息通道没起来：{type(exc).__name__}: {exc}"
     if channel is None:
-        return None, None
+        return None, None, ""
     status = channel.check()
     if not status.get("available"):
-        print(f"weixin: 配了但用不了 —— {status.get('reason')}")
-        return None, None
+        return None, None, f"weixin: 配了但用不了 —— {status.get('reason')}"
     runner = ChannelRunner(
         channel=channel,
         runtime=runtime,
@@ -144,12 +166,66 @@ def start_channels(
         daemon=True,
     )
     thread.start()
-    print(
-        f"weixin: 在听（语音回复 {'开' if runner.reply_with_voice else '关'}，"
+    return (
+        runner,
+        thread,
+        f"weixin: 在听（凭据来自{'扫码' if status.get('source') == 'scan' else '环境变量'}，"
+        f"语音回复 {'开' if runner.reply_with_voice else '关'}，"
         f"本机转写 {'开' if runner.asr is not None else '关'}，"
-        f"出站语音走 {'原生气泡（未验证）' if channel.voice_native else '文件附件'}）"
+        f"出站语音走 {'原生气泡（未验证）' if channel.voice_native else '文件附件'}）",
     )
-    return runner, thread
+
+
+def make_channel_control(
+    api: Any, runtime: VoiceRuntime, stack: Any, *, disabled: bool = False
+) -> Any:
+    """页面上那个「打开通道 / 关闭通道」。签名 ``(action) -> dict``。
+
+    存在的理由是使用者的一句话：「为什么我已经绑定了微信，还不能直接进行微信的对话呢，
+    还要去改配置文件」。扫码是在这个页面上完成的 —— 用自己的微信扫一个码，比编辑一个
+    TOML 文件明确得多，所以那一次动作就该足够。``enabled`` 那个键留着记住这个选择，
+    但写它的人从此是程序不是使用者。
+
+    ``--no-weixin`` 仍然赢：它是命令行上点名的「这一轮不要通道」，一个网页不该翻它。
+    """
+    state: dict[str, Any] = {"thread": None}
+
+    def control(action: str) -> dict[str, Any]:
+        step = str(action or "").strip().lower()
+        if step not in ("start", "stop"):
+            raise ValueError(f"未知的动作 {action!r}")
+        if disabled:
+            return {
+                "running": False,
+                "reason": "启动时带了 --no-weixin，这一轮不起通道",
+            }
+        # 先停旧的。重复点「打开」不该留下两条长轮询线程 —— 它们会各自收到同一批消息，
+        # 于是每条微信消息被回答两次。
+        previous = api.channel_runner
+        if previous is not None:
+            try:
+                previous.stop()
+            except Exception:  # noqa: BLE001 - 停不掉也要继续，下面会换掉引用
+                pass
+            api.channel_runner = None
+            state["thread"] = None
+        if step == "stop":
+            return {"running": False, "reason": ""}
+        runner, thread, note = open_channel(runtime, stack)
+        api.channel_runner = runner
+        state["thread"] = thread
+        if note:
+            print(note)
+        return {
+            "running": runner is not None,
+            "reason": "" if runner is not None else (note or "通道没起来"),
+        }
+
+    # 让上层能**在写配置之前**知道这个进程能不能开通道。挂在函数上而不是多一个动作：
+    # `control("start")` 的失败已经太晚了 —— `weixin_switch` 那时已经把 enabled 写进
+    # 文件，于是一次失败的操作留下了一半的副作用。
+    control.enabled = not disabled
+    return control
 
 
 def pump_forever(runtime: VoiceRuntime, stop: threading.Event) -> None:
@@ -269,6 +345,10 @@ def main() -> int:
     # 控制台那一栏要能看实时收发、能手打一条发出去 —— 所以它得拿到这个 runner。
     # 注入而不是让 ConsoleApi 自己去建：这一层不该决定「要不要出网」。
     api.channel_runner = channel_runner
+    # 页面上那个开关。**在这里注入**：怎么起线程、借哪个 ASR/TTS 是启动脚本的知识
+    # （它手上有 stack），而 ConsoleApi 只知道「有人要打开通道」。没有它的话扫完码仍然
+    # 得去改 config/channels.toml 再重启，而那正是使用者报过的那件事。
+    api.channel_hook = make_channel_control(api, runtime, stack, disabled=args.no_weixin)
     try:
         server = ConsoleServer(
             api,
@@ -323,8 +403,12 @@ def main() -> int:
         print("stopping")
     finally:
         stop.set()
-        if channel_runner is not None:
-            channel_runner.stop()
+        # **读 `api.channel_runner` 而不是启动时那个局部变量。** 通道现在能在运行中被
+        # 打开和关闭（页面上那个开关），所以启动时抓到的那个引用可能早就不是当前那条了 ——
+        # 停一个已经被换掉的 runner 等于没停。
+        current = getattr(api, "channel_runner", None) or channel_runner
+        if current is not None:
+            current.stop()
         pump.join(timeout=2.0)
         if channel_thread is not None:
             channel_thread.join(timeout=2.0)
