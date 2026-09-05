@@ -111,6 +111,17 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # 回答比一句「打开了，搜不了」糟得多。
         "play": {},
     },
+    "system": {
+        # `system.volume` —— 读或改**默认播放设备**的音量（「声音大一点」）。
+        #
+        # 默认开。它是朗读期间最自然的一句话，而那正是使用者手不在键盘上的时刻 —— 一个
+        # 语音助手回答「请在任务栏上点音量图标」是这个产品最没有说服力的一种回答。
+        #
+        # 不需要确认卡：可逆、无数据损失、后果当场可听见。和 `app.open` 同一档。
+        # 非 Windows 上这个工具**不注册**（`core/audio/winlevel.py` 是 Core Audio 的
+        # ctypes 绑定），所以关掉它只在 Windows 上有意义。
+        "enabled": True,
+    },
     "memory": {
         # `memory.recall` —— 让 agent **主动**翻记忆（`⟦vox:tool memory.recall {"query": …}⟧`）。
         #

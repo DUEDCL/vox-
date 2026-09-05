@@ -61,6 +61,20 @@ open_enabled = true
 # 「打开 X 搜一下」用哪个搜索页，`{q}` 是编码后的查询词。必应不需要 JS 就能出结果页。
 open_search_url = "https://www.bing.com/search?q={q}"
 
+[system]
+# `system.volume` —— 读或改**默认播放设备**的音量（使用者说「声音大一点」时走的那条路）。
+#
+# 默认开。它是朗读期间最自然的一句话，而那正是使用者手不在键盘上的时刻 —— 一个语音助手
+# 回答「请在任务栏上点音量图标」是这个产品最没有说服力的一种回答。
+#
+# 不需要确认卡：可逆、无数据损失、后果当场可听见（和 `app.open` 同一档）。只碰**默认**
+# 播放设备 —— 说「大一点」的人指的是他此刻正在听的那个，要求他先说清哪个设备是把一句
+# 自然的话变成一次配置。
+#
+# 非 Windows 上这个工具**不注册**（`core/audio/winlevel.py` 是 Core Audio 的 ctypes
+# 绑定），所以关掉它只在 Windows 上有意义。
+enabled = true
+
 [memory]
 # `memory.recall` —— agent 能不能**主动**翻记忆（`⟦vox:tool memory.recall {"query": …}⟧`）。
 #

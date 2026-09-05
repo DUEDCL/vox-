@@ -38,7 +38,13 @@ _S_FALSE = 1
 _RPC_E_CHANGED_MODE = -2147417850  # 0x80010106
 _CLSCTX_ALL = 23
 _COINIT_MULTITHREADED = 0
-#: EDataFlow: eRender = 0, eCapture = 1。这个文件只碰 eCapture —— 改输出音量不是它的事。
+#: EDataFlow: eRender = 0, eCapture = 1。
+#:
+#: **两侧都用得到了（2026-09-05）**：采集侧是「这只麦克风够不够响」（`read_level` /
+#: `set_level` / 控制台的校准），播放侧是使用者说「声音大一点」时 `system.volume` 要调的
+#: 那根滑条。COM 那一整套底座两侧完全相同，所以 flow 是个参数而不是两份代码 ——
+#: 默认值仍是 eCapture，采集侧的行为一个字节都没变。
+_E_RENDER = 0
 _E_CAPTURE = 1
 #: ERole: eConsole = 0（「默认设备」在设置面板里指的就是这一个）
 _ROLE_CONSOLE = 0
@@ -181,21 +187,35 @@ class _Session:
         )
         return self.keep(out)
 
-    def default_name(self, enumerator) -> str:
-        """默认采集端点的名字。只用来给列表里的那一行打个 ``default`` 标记。"""
+    def default_name(self, enumerator, flow: int = _E_CAPTURE) -> str:
+        """默认端点的名字。采集侧只用来给列表里的那一行打个 ``default`` 标记；
+        播放侧**它就是答案** —— 说「声音大一点」的人指的是他此刻正在听的那个设备。"""
         ctypes = self.ctypes
         out = ctypes.c_void_p()
         # IMMDeviceEnumerator::GetDefaultAudioEndpoint = vtable[4]
         code = _method(
             ctypes, enumerator, 4, ctypes.HRESULT,
             ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
-        )(enumerator, _E_CAPTURE, _ROLE_CONSOLE, ctypes.byref(out))
+        )(enumerator, flow, _ROLE_CONSOLE, ctypes.byref(out))
         if code != _S_OK:
             return ""
         self.keep(out)
         return self.name_of(out)
 
-    def devices(self, enumerator) -> list:
+    def default_device(self, enumerator, flow: int = _E_CAPTURE):
+        """默认端点本身（不是名字）。播放侧要它才能拿到音量接口。"""
+        ctypes = self.ctypes
+        out = ctypes.c_void_p()
+        code = _method(
+            ctypes, enumerator, 4, ctypes.HRESULT,
+            ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
+        )(enumerator, flow, _ROLE_CONSOLE, ctypes.byref(out))
+        if code != _S_OK:
+            return None
+        self.keep(out)
+        return out
+
+    def devices(self, enumerator, flow: int = _E_CAPTURE) -> list:
         ctypes = self.ctypes
         collection = ctypes.c_void_p()
         # IMMDeviceEnumerator::EnumAudioEndpoints = vtable[3]
@@ -204,7 +224,7 @@ class _Session:
             _method(
                 ctypes, enumerator, 3, ctypes.HRESULT,
                 ctypes.c_int, ctypes.c_ulong, ctypes.POINTER(ctypes.c_void_p),
-            )(enumerator, _E_CAPTURE, _DEVICE_STATE_ACTIVE, ctypes.byref(collection)),
+            )(enumerator, flow, _DEVICE_STATE_ACTIVE, ctypes.byref(collection)),
         )
         self.keep(collection)
         count = ctypes.c_uint()
@@ -317,6 +337,14 @@ class _Session:
             volume, 0, None
         )
 
+    def set_muted(self, volume, muted: bool) -> None:
+        """静音或取消静音。`unmute` 是它的特例，留着是因为采集侧的调用点从来只需要那一半 ——
+        而一个只做一件事的名字比一个带布尔参数的名字更难用错。"""
+        ctypes = self.ctypes
+        _method(ctypes, volume, 14, ctypes.HRESULT, ctypes.c_int, ctypes.c_void_p)(
+            volume, 1 if muted else 0, None
+        )
+
 
 # -- 公开的四个动作 -----------------------------------------------------------
 
@@ -383,6 +411,70 @@ def set_level(name: str, value: float, *, unmute: bool = True) -> Endpoint:
     raise LevelUnavailable(f"没有名叫「{wanted}」的活动采集端点")
 
 
+def output_level() -> Endpoint:
+    """**默认播放端点**当下的音量与静音状态。0.0–1.0，和设置面板里那根滑条同一个量。
+
+    只碰默认设备，不列全部：说「声音大一点」的人指的是他此刻正在听的那个 —— 让他先说清
+    「哪个设备」是把一句自然的话变成一次配置。
+
+    采集侧的 `read_level` 要求精确设备名（那里选错设备等于「改了但没生效」），这里反过来：
+    默认设备**就是**答案，没有可选错的东西。
+    """
+    with _Session() as session:
+        enumerator = session.enumerator()
+        device = session.default_device(enumerator, _E_RENDER)
+        if device is None:
+            raise LevelUnavailable("这台机器没有默认播放设备")
+        name = session.name_of(device) or "默认播放设备"
+        volume = session.volume(device)
+        if volume is None:
+            raise LevelUnavailable(f"「{name}」没有音量控制（虚拟设备常见）")
+        level, muted = session.read(volume)
+        return Endpoint(name, level, muted, True)
+
+
+def set_output_level(value: float, *, unmute: bool = True) -> Endpoint:
+    """把默认播放端点的音量设成 ``value``（0.0–1.0）。返回设完之后**重读**的值。
+
+    重读而不是回显参数，理由与 `set_level` 相同：有些驱动只支持有级的音量，把请求值原样
+    报回去等于报一个没发生的事 —— 而这个工具的回答会被念出来。
+
+    ``unmute`` 默认真：「声音大一点」在静音状态下只把数字调大是**没做到那件事**。
+    """
+    target = max(0.0, min(1.0, float(value)))
+    with _Session() as session:
+        enumerator = session.enumerator()
+        device = session.default_device(enumerator, _E_RENDER)
+        if device is None:
+            raise LevelUnavailable("这台机器没有默认播放设备")
+        name = session.name_of(device) or "默认播放设备"
+        volume = session.volume(device)
+        if volume is None:
+            raise LevelUnavailable(f"「{name}」没有音量控制（虚拟设备常见）")
+        if unmute and target > 0:
+            session.unmute(volume)
+        session.write(volume, target)
+        level, muted = session.read(volume)
+        return Endpoint(name, level, muted, True)
+
+
+def set_output_muted(muted: bool) -> Endpoint:
+    """静音 / 取消静音默认播放端点。**和设音量是两件事** —— 一个静音的设备把音量调到 100
+    仍然不出声，而使用者说「静音」时不希望他原来的音量被忘掉。"""
+    with _Session() as session:
+        enumerator = session.enumerator()
+        device = session.default_device(enumerator, _E_RENDER)
+        if device is None:
+            raise LevelUnavailable("这台机器没有默认播放设备")
+        name = session.name_of(device) or "默认播放设备"
+        volume = session.volume(device)
+        if volume is None:
+            raise LevelUnavailable(f"「{name}」没有音量控制（虚拟设备常见）")
+        session.set_muted(volume, bool(muted))
+        level, now_muted = session.read(volume)
+        return Endpoint(name, level, now_muted, True)
+
+
 def unavailable_reason() -> str:
     """空串 = 能用。否则是一句能贴到界面上的原因。"""
     try:
@@ -421,7 +513,10 @@ __all__ = [
     "LevelUnavailable",
     "device_name",
     "endpoints",
+    "output_level",
     "read_level",
     "set_level",
+    "set_output_level",
+    "set_output_muted",
     "unavailable_reason",
 ]

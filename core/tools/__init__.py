@@ -11,6 +11,7 @@ has no backend until one is injected, and the shell tool is off by default.
 
 from __future__ import annotations
 
+import sys
 from typing import Any, Mapping
 
 from .contract import ORIGINS, TOOL_NAMES, Tool, ToolPolicy, ToolRequest, ToolResult
@@ -51,6 +52,7 @@ from .search_backends import (
     open_search_backend,
 )
 from .shell import ShellRunTool
+from .volume import SystemVolumeTool
 from .web import WebSearchTool
 
 
@@ -122,6 +124,11 @@ def open_tools(
     # 没有它更糟：模型会用它，然后据「记忆里没有」下结论。
     if memory_recaller is not None and resolved.get("memory", {}).get("enabled", True):
         runner.register(MemoryRecallTool(memory_recaller, resolved))
+    # 音量只在 Windows 上有实现（winlevel 是 Core Audio 的 ctypes 绑定）。别的平台上
+    # **不注册**而不是注册一个恒失败的名字：`describe()["registered"]` 是「这台机器能做
+    # 什么」的答案，它不该列出做不到的事。
+    if sys.platform == "win32" and resolved.get("system", {}).get("enabled", True):
+        runner.register(SystemVolumeTool(resolved))
     if resolved.get("shell", {}).get("enabled", False):
         runner.register(ShellRunTool(resolved))
     if registry is not None:
@@ -149,6 +156,7 @@ __all__ = [
     "SearchBackendError",
     "SearxBackend",
     "ShellRunTool",
+    "SystemVolumeTool",
     "Tool",
     "ToolPolicy",
     "ToolRequest",

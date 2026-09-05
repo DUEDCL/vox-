@@ -60,6 +60,7 @@ REGISTERED: tuple[str, ...] = (
     "fs.read",
     "time.now",
     "memory.recall",
+    "system.volume",
 )
 
 #: 一轮最多几次工具调用。**2026-09-05 从 1 提到 3。**
@@ -104,6 +105,10 @@ _HOW: Mapping[str, str] = {
     "memory.recall": (
         '翻以前说过的话和记住的偏好。{"query": "买什么"}；'
         "**使用者提到「上次」「之前」「我说过」而你手上没有那件事时，先查这个再回答**"
+    ),
+    "system.volume": (
+        '音量。大一点 {"delta": 0.1}；小一点 {"delta": -0.1}；'
+        '调到一半 {"level": 0.5}；静音 {"mute": true}；只想知道多大声就传 {}'
     ),
 }
 
