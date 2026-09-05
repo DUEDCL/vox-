@@ -31,7 +31,7 @@
 #
 # **所以这一行会被程序改，`git status` 显示这个文件被修改是正常的**（和 `config/
 # keywords.txt` 同一类）—— 仓库里存的是出厂值，你机器上那份是你的选择。
-enabled = false
+enabled = true
 
 # 去读哪个环境变量拿 iLink bot token。**名字，不是值。**
 #
