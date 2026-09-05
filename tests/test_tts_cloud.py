@@ -603,7 +603,7 @@ def test_streaming_is_the_default_and_asks_for_raw_pcm(monkeypatch):
     monkeypatch.setenv("VOX_TTS_KEY", "sk-not-a-real-key")
     fake = _FakeSse([_pcm([0, 16384, -16384, 0])])
     monkeypatch.setattr("core.audio.tts_cloud.urlopen", fake)
-    provider = DashScopeTtsProvider(key_env="VOX_TTS_KEY", sample_rate=24000)
+    provider = DashScopeTtsProvider(key_env="VOX_TTS_KEY", sample_rate=24000, wire="sse")
     assert provider.stream is True
 
     audio = provider.synthesize("好的。")
@@ -620,7 +620,7 @@ def test_frames_are_concatenated_in_order(monkeypatch):
     monkeypatch.setenv("VOX_TTS_KEY", "sk-not-a-real-key")
     fake = _FakeSse([_pcm([1000, 2000]), _pcm([3000]), _pcm([4000, 5000, 6000])])
     monkeypatch.setattr("core.audio.tts_cloud.urlopen", fake)
-    audio = DashScopeTtsProvider(key_env="VOX_TTS_KEY").synthesize("测试")
+    audio = DashScopeTtsProvider(key_env="VOX_TTS_KEY", wire="sse").synthesize("测试")
     assert len(audio.samples) == 6
     assert audio.samples[0] * 32768 == pytest.approx(1000, abs=1)
     assert audio.samples[-1] * 32768 == pytest.approx(6000, abs=1)
@@ -631,7 +631,7 @@ def test_a_stream_with_no_audio_frames_raises_rather_than_returning_silence(monk
     monkeypatch.setenv("VOX_TTS_KEY", "sk-not-a-real-key")
     monkeypatch.setattr("core.audio.tts_cloud.urlopen", _FakeSse([], finish="length"))
     with pytest.raises(DashScopeTtsError, match="一帧音频都没有"):
-        DashScopeTtsProvider(key_env="VOX_TTS_KEY").synthesize("测试")
+        DashScopeTtsProvider(key_env="VOX_TTS_KEY", wire="sse").synthesize("测试")
 
 
 def test_a_corrupt_frame_does_not_lose_the_rest(monkeypatch):
@@ -647,7 +647,7 @@ def test_a_corrupt_frame_does_not_lose_the_rest(monkeypatch):
             yield from _FakeSse.__iter__(self)
 
     monkeypatch.setattr("core.audio.tts_cloud.urlopen", Broken([_pcm([8000])]))
-    audio = DashScopeTtsProvider(key_env="VOX_TTS_KEY").synthesize("测试")
+    audio = DashScopeTtsProvider(key_env="VOX_TTS_KEY", wire="sse").synthesize("测试")
     assert len(audio.samples) == 1
 
 
@@ -659,7 +659,7 @@ def test_a_barge_in_stops_reading_the_stream(monkeypatch):
     样本数停在第 1 帧 —— 也就是「连接立刻不再读」，而不是「读完再丢掉」。
     """
     monkeypatch.setenv("VOX_TTS_KEY", "sk-not-a-real-key")
-    provider = DashScopeTtsProvider(key_env="VOX_TTS_KEY")
+    provider = DashScopeTtsProvider(key_env="VOX_TTS_KEY", wire="sse")
 
     class Barging(_FakeSse):
         def __init__(self, frames) -> None:

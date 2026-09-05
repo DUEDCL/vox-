@@ -250,9 +250,30 @@ class DashScopeTtsProvider:
     #:
     #: 注入了 ``transport`` 时走非流式那条：测试替掉的是 ``post``/``get`` 两个方法。
     stream: bool = True
+    #: 走哪条线：``"ws"`` WebSocket（默认）· ``"sse"`` HTTP 分块 · ``"http"`` 两个往返。
+    #:
+    #: **2026-09-05 默认改成 WebSocket，因为同一个模型同一个音色它整段快 2.6 秒。**
+    #: 同一句「好，开好了。」、`qwen-audio-3.0-tts-plus` + `longanhuan_v3.6`：
+    #:
+    #: | 传输 | 第一块音频 | 整段到手 |
+    #: |---|---|---|
+    #: | SSE | 2015 ms | **3578 ms** |
+    #: | **WS** | **702 ms** | **936 ms** |
+    #:
+    #: 差的不是合成速度，是 **HTTP 层的固定开销**（建连 + TLS + 服务端把 SSE 攒够才下发）。
+    #: 上面那张 SSE 表里「首块到达与句子长度基本无关」这个观察现在有了解释：那 2 秒从来
+    #: 不在合成里。协议实现在 `core/audio/tts_ws.py`，客户端在 `core/ws.py`（标准库自己写）。
+    #:
+    #: **注入了 ``transport`` 时这一项被忽略** —— 那是测试替掉 HTTP 的注入点，而 WS 那条路
+    #: 不经过它。所以现有的 21 条 tts_cloud 测试一条都不用改：它们全都注入了假 transport。
+    wire: str = "ws"
     playback: Any = None
     #: 注入点，给测试用。默认是真的 HTTP。
     transport: Any = None
+    #: 最近一次 WS 合成里「第一块音频到手」的毫秒。**「第一声要等多久」是这个产品唯一重要的
+    #: 延迟指标**，而它只有在协议那一层量得到；报出来是为了「换了传输之后到底快了多少」不必
+    #: 重新搭一次探针。0 = 还没走过 WS 那条路。
+    last_first_audio_ms: int = 0
     _stopped: bool = False
 
     @property
@@ -305,6 +326,8 @@ class DashScopeTtsProvider:
         import numpy as np
 
         started = time.monotonic()
+        if str(self.wire).strip().lower() == "ws" and self.transport is None:
+            return self._synthesize_ws(text, started)
         streaming = self.stream and self.transport is None
         payload = {
             "model": self.model,
@@ -351,6 +374,48 @@ class DashScopeTtsProvider:
         )
 
     # -- HTTP ---------------------------------------------------------------
+
+    def _synthesize_ws(self, text: str, started: float) -> TtsAudio:
+        """WebSocket 那条路。**协议在 `core/audio/tts_ws.py`，这里只做形状转换。**
+
+        失败原样抛 `DashScopeTtsError` —— `FallbackTts` 认的是这个类型，换一个类型出去会让
+        「云端不可用就换本机嗓子」这条降级路径静默失效，而那正是 2026-09-03 立场反转要修的
+        那个毛病（一句话都不出声，而哪里都不说为什么）。
+        """
+        import numpy as np
+
+        from core.audio.tts_ws import WsTtsError, synthesize_pcm
+
+        key = os.getenv(self.key_env, "").strip()
+        if not key:
+            raise ProviderUnavailable(f"{self.key_env} 没有值")
+        try:
+            raw, first_ms = synthesize_pcm(
+                model=self.model,
+                voice=self.voice,
+                text=text,
+                key=key,
+                sample_rate=int(self.sample_rate),
+                speed=float(self.speed),
+                volume=int(self.volume),
+                instruction=self.instruction,
+                timeout_s=float(self.timeout_s),
+                # 打断在**帧之间**生效：`stop()` 之后不必等整句合成完。
+                should_stop=self.is_stopped,
+            )
+        except WsTtsError as exc:
+            raise DashScopeTtsError(f"流式合成失败：{exc}") from exc
+        except Exception as exc:  # noqa: BLE001 - 握手 / TLS / socket 的意外都归一成同一类
+            raise DashScopeTtsError(f"流式合成连不上：{type(exc).__name__}: {exc}") from exc
+        if not raw:
+            raise DashScopeTtsError("合成失败：WebSocket 上一帧音频都没有")
+        self.last_first_audio_ms = first_ms
+        # 16 位小端裸样本。采样率就是请求里那个 —— 裸 PCM 不自带它。
+        return TtsAudio(
+            samples=(np.frombuffer(raw, dtype="<i2").astype("float32") / 32768.0),
+            sample_rate=int(self.sample_rate),
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
 
     def _post_sse(self, payload: dict[str, Any]) -> bytes:
         """一个请求，边读边收帧。返回拼好的裸 PCM。

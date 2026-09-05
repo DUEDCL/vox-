@@ -127,6 +127,10 @@ _SCHEMA: dict[str, dict[str, Any]] = {
         "voice": "",
         "instruction": "",
         "key_env": "VOX_DASHSCOPE_KEY",
+        # 云端那条路走哪条线：``"ws"`` WebSocket（默认）· ``"sse"`` HTTP 分块 ·
+        # ``"http"`` 两个往返。2026-09-05 实测同模型同音色整段 936 ms vs 3578 ms ——
+        # 差的是 HTTP 层的固定开销，不是合成速度。只对 provider = "dashscope" 有意义。
+        "wire": "ws",
     },
     "input": {
         "device": "",

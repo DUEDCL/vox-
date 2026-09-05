@@ -363,6 +363,10 @@ EDITABLE: dict[str, tuple[str, ...]] = {
         "asr.max_utterance_s",
         "asr.timeout_s",
         "tts.enabled",
+        # `tts.wire` = 云端合成走 WebSocket / SSE / 两个往返（2026-09-05 新增，默认 ws）。
+        # 三条线的结果字节相同，差的只有等多久（整段 936 ms vs 3578 ms 实测）—— 所以它是
+        # 一个性能旋钮，不是边界。出问题时能从页面改回 `"sse"` 正是它该放开的理由。
+        "tts.wire",
         # 2026-08-29:合成的 provider / 模型 / 音色可从页面改 —— 这正是「控制台不能配置
         # 云端 TTS」缺的最后一环(前三环是:没有云端 provider、schema 没有这几个键、
         # models.toml 没有读侧)。

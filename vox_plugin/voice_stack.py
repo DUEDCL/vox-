@@ -234,6 +234,10 @@ def _open_tts(resolved: dict[str, Any], warnings: list[str]) -> Any:
             # 里有 `tts.instruction`，所以页面上改了会显示成功。**一个能改、能存、
             # 不生效的配置项比没有这个配置项糟得多。**
             instruction=str(resolved.get("tts.instruction", "")).strip(),
+            # 走哪条线。**默认 WS，因为同模型同音色整段快 2.6 秒**（936 ms vs 3578 ms，
+            # 2026-09-05 实测）。和 `instruction` 同一条教训：一个能改、能存、不生效的
+            # 配置项比没有这个配置项糟得多，所以这一行必须在这里传。
+            wire=str(resolved.get("tts.wire", "ws")).strip().lower() or "ws",
         )
         local = SherpaTtsProvider(
             resolved["tts_dir"],
