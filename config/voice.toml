@@ -208,27 +208,54 @@ provider = "dashscope"
 
 # --- 只有 provider = "dashscope" 时下面几个有意义 ---------------------------
 #
-# **2026-08-29 实测定下来的组合。** 过程与结论：
+# **2026-09-05 换成龙颜（`longyan_v3`，官方描述「温暖春风女」，30~35 岁）。** 使用者要
+# 「性感一点、有磁性的女声」；上一把是龙安欢（`longanhuan_v3.6`，「欢脱元气女」）。
 #
-# | 组合 | 结果 |
+# 挑法是扫 26 个 (model, voice) 组合、各合成同一句话、落 wav 让使用者听
+# （`.vox-ref/voice_timbre_probe.py`，18 个可用）。**基频只用来排序，不用来拍板** ——
+# 气声与共鸣量不出来，最终判据是耳朵。这一把实测基频中位数 231 Hz、首块 530 ms
+# （上一把 197 Hz / 639 ms），所以**它不是候选里最低的那个** —— 使用者听完挑的是它。
+#
+# 两件事这一轮才知道，都会影响下一次换音色：
+#
+#   · **`cosyvoice-v2` 整族回 403 `AllocationQuota.FreeTierOnly`**（免费额度耗尽），
+#     而 **`cosyvoice-v3-flash` 是通的**。官方音色表里「浪漫风情」「优雅知性」「高雅气质」
+#     那一批只在 v2/v3 上，所以这个发现把候选面从 5 个扩到 18 个。
+#   · 下面那张 2026-08-29 的表是 **HTTP 时代**的。`cosyvoice-v1` 在 HTTP 上回 400
+#     `current user api does not support http call`，而在 **WS 上它是通的**（实测 657 ms
+#     首块）。**拿那张表去否定 cosyvoice 会白丢整个音色库** —— 这一轮差点又踩一次。
+#
+# | 组合 | 结果（HTTP，2026-08-29） |
 # |---|---|
 # | `cosyvoice-v2` + longyuan | 403 `AllocationQuota.FreeTierOnly` —— 不在你的免费额度里 |
-# | `cosyvoice-v1` + longyuan | 400 `current user api does not support http call` —— v1 不走 HTTP |
-# | **`qwen-audio-3.0-tts-plus` + `longanhuan_v3.6`** | **200，703ms/1.10s** ✅ |
+# | `cosyvoice-v1` + longyuan | 400 `current user api does not support http call`（**WS 上通**） |
+# | `qwen-audio-3.0-tts-plus` + `longanhuan_v3.6` | 200，703ms/1.10s |
 #
-# 关键约束（文档原话）：**每个 model 只支持一组特定的 voice，不能混用。** 所以 longyuan
-# 这个名字在 qwen-audio-3.0-tts-plus 上是无效的 —— 实测 20 个候选音色名，只有
-# `longanhuan_v3.6` 回 200，其余全部 411 `TTS speak operation failed`。
+# 关键约束（文档原话）：**每个 model 只支持一组特定的 voice，不能混用。** 填一个这个模型
+# 不认的音色名回 411 `TTS speak operation failed`，所以换音色必须连模型一起换。
 #
-# 它是女声：合成一句话测基频中位数 **253 Hz**（女声区间 165–255 Hz）。样本在
-# `.vox-ref/voice_*.wav`，可以自己听。
-model = "qwen-audio-3.0-tts-plus"
-voice = "longanhuan_v3.6"
+# 退路是两行加一行：把这两行改回 `qwen-audio-3.0-tts-plus` / `longanhuan_v3.6`，并把下面
+# 的 `instruction` 填回去（那一段里有原文）。
+model = "cosyvoice-v3-flash"
+voice = "longyan_v3"
 
-# 自由指令：控制语气与情绪。**只有 qwen-audio-3.0-tts-* 支持**（文档明写只有 plus 和 flash）。
-# 音色决定「是谁在说」，这一行决定「她怎么说」—— 想要温柔就在这里说，不要去改音色。
-# 实测它真的生效：同一句话不带指令 2.69s，带这行 3.25s（「语速稍慢」被执行了）。
-instruction = "用温柔、亲和、放松的语气说，语速稍慢，像在耳边轻声说话"
+# 自由指令：控制语气与情绪。**当前这一族不支持，所以它必须是空的。**
+#
+# 2026-09-05 实测（同一句话、同一把音色，只差这一个字段）：
+#
+# | 组合 | 带 instruction 的结果 |
+# |---|---|
+# | `cosyvoice-v3-flash` + `longyan_v3` | **`InvalidParameter: [cosyvoice:]Engine return error code: 428`** |
+# | `qwen-audio-3.0-tts-plus` + `longanhuan_v3.6` | 200，音频 1.33s → 1.49s（「语速稍慢」被执行了） |
+#
+# **它是硬失败，不是静默忽略，代价因此很贵**：这一行非空 = 每一句合成都抛 → `FallbackTts`
+# latch 到本机 VITS，于是听到的是 VITS 的默认女声 —— 和使用者挑的这一把毫无关系，而症状
+# 读起来像「新音色就是这个味道」而不是「配置写错了」。
+#
+# 换回 `qwen-audio-3.0-tts-*` 时把它填回去：音色决定「是谁在说」，这一行决定「她怎么说」,
+# 想要温柔就在这里说，不要去改音色。上一版的原文是
+# "用温柔、亲和、放松的语气说，语速稍慢，像在耳边轻声说话"。
+instruction = ""
 
 # 密钥的**变量名**，不是密钥。值写在 .env 里（已 gitignore），或者在控制台「密钥」那一栏
 # 存进去。这个键**不可从网页修改** —— 让网页决定去读哪个环境变量等于让它决定把哪个凭据
