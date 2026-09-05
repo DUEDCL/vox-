@@ -175,9 +175,91 @@ _WEB_OPEN_PATTERNS = (
 )
 
 
+#: 「使用者点名了一个动词」的那些词。只给 ``weather.now`` 的否定前视用。
+#:
+#: 它们各自已经有自己的规则（`web.search` / `fs.read` / `app.open` / `shell.run`），
+#: 而**显式动词赢**：说「搜一下武汉天气」的人点名了要搜网页，即便这个平台有一个更准的
+#: 天气工具。挡在正则开头而不是靠规则顺序，是因为顺序只解决带空格的那一种 —— 粘着写的
+#: 「搜一下武汉天气」会让城市变成「搜一下武汉」，然后报一句「没找到叫『搜一下武汉』的地方」。
+_REQUEST_VERBS = (
+    r"(?:请|請|麻烦|麻煩|帮我|幫我|帮忙|幫忙|给我|給我|替我|为我|為我|能不能|可以|"
+    r"please|can\s+you|搜|查|找|读|讀|看|打开|打開|启动|啟動|运行|運行|执行|執行|"
+    r"播放|放|听|聽|显示|顯示|告诉|告訴)"
+)
+
+#: ``weather.now``：「今天天气怎么样」。
+#:
+#: **这一句最该走快路径**，因为它是被问得最多的一句，而派给 agent 要多一次 LLM 往返
+#: （实测 1.8–4 秒）换回来的只是同一个工具调用。
+#:
+#: **标记词是「天气」/「气温」/「下雨」/「下雪」，而且必须整句锚定** —— 「天气」这个词在
+#: 别的句子里出现时多半是在谈论它而不是在问它（「天气这个词怎么写」「天气预报那个节目」），
+#: 而那两句都带着后缀，整句锚定就把它们排除了。
+#:
+#: **开头那个否定前视是必需的，它修的是一次真实的冲突。** 「搜一下 武汉天气」在测试里
+#: 是一条 ``web.search``（有它自己的理由：使用者点名了动词），而城市捕获组会把「搜一下 武汉」
+#: 整段吃进去。显式动词赢 —— 所以这里先把 `_REQUEST_VERBS` 挡在外面，而不是靠
+#: `web.search` 排在前面这一条顺序（顺序解决带空格那一种，挡不住粘着写的「搜一下武汉天气」，
+#: 那时城市会变成「搜一下武汉」，然后地名解析报「没找到叫『搜一下武汉』的地方」）。
+#:
+#: 城市捕获只收**汉字与字母**（不含空白与标点），时间词在 ``_extract`` 里剥掉
+#: （「今天上海天气」→ 上海）。捕不到城市时 ``city`` 是空串，工具用默认城市 —— 那正是
+#: 「今天天气怎么样」该走的路。
+_WEATHER_PATTERNS = (
+    # [今天/明天][上海]天气[怎么样/如何/好不好]
+    rf"\A(?!{_REQUEST_VERBS})(?:今天|今日|明天|明日|现在|現在|当前|當前)?\s*"
+    r"([一-鿿A-Za-z]{0,8}?)\s*"
+    r"(?:的)?\s*(?:天气|天氣|气温|氣溫)\s*"
+    r"(?:预报|預報)?\s*(?:怎么样|怎麼樣|咋样|咋樣|如何|好不好|怎样|怎樣|多少度)?"
+    r"\s*[?？。!！]?\s*\Z",
+    # [明天][北京]会下雨 —— `_QUESTION_TAIL` 会先把带「吗」的整句拦成 agent，所以真正
+    # 落到这里的是「明天下雨」「今天会下雨」这类不带语气词的说法。
+    rf"\A(?!{_REQUEST_VERBS})(?:今天|今日|明天|明日)?\s*"
+    r"([一-鿿A-Za-z]{0,8}?)\s*(?:会|會)?\s*"
+    r"(?:下雨|下雪|降雨|降雪)\s*[?？。!！]?\s*\Z",
+    r"\A(?:what(?:'s| is)\s+the\s+weather)(?:\s+in\s+(.+?))?\s*[?.]?\s*\Z",
+)
+
+#: 「今天 / 明天」这些词不是城市名。城市捕获组会把它们连着城市一起吃进去
+#: （「上海明天天气」→ ``上海明天``），所以在 ``_extract`` 里剥掉。
+_WHEN_WORDS = ("今天", "今日", "明天", "明日", "现在", "現在", "当前", "當前", "的", "会", "會")
+
+#: 哪些词表示「明天」。剥城市名之前先看一眼原句 —— 剥完就看不出来了。
+_TOMORROW_MARKS = ("明天", "明日")
+
+
+def _weather_arguments(sentence: str, captured: str) -> dict[str, Any]:
+    """「今天上海天气怎么样」→ ``{"city": "上海", "day": "today"}``。
+
+    城市捕获组是贪心之外的一段任意文本，所以它会把时间词、「的」「会」这类虚词连着城市
+    一起吃进去。剥掉它们**只在两端做**（`strip`），不在中间删字：「西安」里没有虚词，
+    而一个会在中间删字的清理器会把地名改成另一个地名，那正是这个工具最不能出的错。
+
+    剥完只剩一个字或什么都不剩时报空城市 —— 那时工具用默认城市，比拿「天」去查一个
+    不存在的地方好。
+    """
+    day = "tomorrow" if any(mark in sentence for mark in _TOMORROW_MARKS) else "today"
+    city = captured.strip()
+    changed = True
+    while changed and city:
+        changed = False
+        for word in _WHEN_WORDS:
+            for stripped in (city.removeprefix(word), city.removesuffix(word)):
+                if stripped != city:
+                    city, changed = stripped.strip(), True
+                    break
+            if changed:
+                break
+    return {"city": city if len(city) >= 2 else "", "day": day}
+
+
 #: 不捕获参数的规则。``_plausible`` 对它们放行 —— 「几点了」没有参数可提，而一个要求
 #: 参数非空的检查会把这一整类拒掉。
-_NO_ARGUMENT_RULES = frozenset({"time.now", "play.any"})
+#:
+#: ``weather.now`` 在里面是因为**空城市是它的正常输入**：「今天天气怎么样」捕不到城市，
+#: 那时该用默认城市，而不是让整条规则失配掉到 agent 上（那就白花了一次 LLM 往返）。
+#: 它的 ``_extract`` 因此**不走** ``_NO_ARGUMENT_RULES`` 那条早退 —— 它有参数，只是允许为空。
+_NO_ARGUMENT_RULES = frozenset({"time.now", "play.any", "weather.now"})
 
 #: 允许**单字**参数的规则。
 #:
@@ -386,6 +468,7 @@ class RuleBasedIntentResolver:
     ) -> None:
         self.patterns = dict(patterns) if patterns is not None else {
             "time.now": _TIME_NOW_PATTERNS,
+            "weather.now": _WEATHER_PATTERNS,
             "play.any": _PLAY_ANY_PATTERNS,
             "play.song": _PLAY_SONG_PATTERNS,
             "web.search": _WEB_SEARCH_PATTERNS,
@@ -426,6 +509,7 @@ class RuleBasedIntentResolver:
         # 剩下的任何东西，是这一串里最宽的一条。
         for tool in (
             "time.now",
+            "weather.now",
             "play.any",
             "play.song",
             "web.search",
@@ -480,6 +564,11 @@ class RuleBasedIntentResolver:
     def _extract(self, tool: str, match: re.Match[str]) -> dict[str, Any]:
         """The named payload from the regex hit."""
         captured = match.group(1).strip() if match.lastindex else ""
+        if tool == "weather.now":
+            # **在 ``_NO_ARGUMENT_RULES`` 那条早退之前。** 它在那个集合里只是为了让
+            # ``_plausible`` 放行空城市（「今天天气怎么样」该用默认城市，不该掉给 agent），
+            # 但它确实有参数 —— 从那条早退里出来会把捕到的城市名扔掉。
+            return _weather_arguments(match.string, captured)
         if tool in _NO_ARGUMENT_RULES:
             # 「几点了」「放点音乐」都没有参数：前者的时区是本机属性，后者开哪个由配置定。
             return {}

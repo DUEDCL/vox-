@@ -452,6 +452,17 @@ EDITABLE: dict[str, tuple[str, ...]] = {
         # `system.enabled` = 「声音大一点」这句话有没有用（`system.volume`，2026-09-05 新增）。
         # 可逆、无数据损失、后果当场可听见 —— 和 `apps.enabled` 同一档的偏好，不是边界。
         "system.enabled",
+        # `weather.*` = 「今天天气怎么样」（`weather.now`，2026-09-05 新增）。
+        #
+        # `enabled` 是**一个出网开关**，所以它和 `web.open_enabled` 同一档：开着的时候
+        # 能做的事（向 Open-Meteo 的两个固定主机 GET 一次）不因为「从网页点的」而变多，
+        # 而主机是代码里的常量、不在配置里 —— 没有任何一个可编辑的键能改变请求发到哪台机器。
+        #
+        # `default_city` **必须能从页面改**，否则它是这个仓库反复记过的那种键：出厂空着、
+        # 空着就答不了「今天天气怎么样」，而唯一的改法是编辑文件加重启。
+        "weather.enabled",
+        "weather.default_city",
+        "weather.timeout_s",
     ),
     "memory.toml": ("memory.recall_limit", "memory.short_keep"),
     # 2026-09-04：微信通道的五项。**它们此前一项都不在这里** —— 而 `weixin.enabled` 正是

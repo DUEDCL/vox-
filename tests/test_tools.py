@@ -522,3 +522,29 @@ def test_importing_the_package_starts_nothing(config):
     tools = open_tools(config)
     assert tools.executed == 0
     assert WebSearchTool(config).describe()["backend_configured"] is False
+
+
+def test_every_registered_tool_can_get_past_the_policy_gate():
+    """**「注册了」不等于「跑得动」，而两者分岔时所有测试都是绿的。**
+
+    2026-09-05 实测：`weather.now` 已经 `register()` 了、已经在 `core/agents/skills.REGISTERED`
+    里、已经在控制台页面上列出来了，而 `contract.TOOL_NAMES`（政策门的入口白名单）里没有它
+    —— 于是每一次调用都回 `unknown tool`，而当时那个工具自己的 12 条测试全绿：它们验的是
+    「在不在清单里」，不是「过不过那道门」。
+
+    这一条是那个缺口的通用护栏：**注册了什么就必须能过门**。加一个新工具而忘了 `TOOL_NAMES`，
+    这里会红，而且红在「加工具」那一次而不是在真机上。
+
+    MCP 那一族除外：它们的名字在运行时才知道，门里有自己的分支（`mcp.` 前缀）。
+    """
+    from core.tools.contract import TOOL_NAMES
+
+    registered = set(open_tools().describe()["registered"])
+    missing = sorted(
+        name for name in registered if not name.startswith("mcp.") and name not in TOOL_NAMES
+    )
+
+    assert missing == [], (
+        "这些工具注册了但政策门不认它们，每次调用都会回 unknown tool —— "
+        "把它们加进 core/tools/contract.py 的 TOOL_NAMES：" + ", ".join(missing)
+    )

@@ -55,6 +55,7 @@ from .search_backends import (
 )
 from .shell import ShellRunTool
 from .volume import SystemVolumeTool
+from .weather import WeatherTool
 from .web import WebSearchTool
 
 
@@ -140,6 +141,10 @@ def open_tools(
     # 的失败形状：它会答「好，二十分钟后提醒你」，然后什么都不会发生。
     if reminders is not None and resolved.get("timer", {}).get("enabled", True):
         runner.register(TimerRemindTool(resolved, store=reminders))
+    # 天气**是一次对外请求**（Open-Meteo 的两个固定主机，无 key），所以它有自己的开关 ——
+    # 和 `web.search` 的 `allow_internet`、`web.open` 的 `open_enabled` 同一个形状。
+    if resolved.get("weather", {}).get("enabled", True):
+        runner.register(WeatherTool(resolved.get("weather", {})))
     if resolved.get("shell", {}).get("enabled", False):
         runner.register(ShellRunTool(resolved))
     if registry is not None:
@@ -176,6 +181,7 @@ __all__ = [
     "ToolResult",
     "ToolRunner",
     "ToolsConfigError",
+    "WeatherTool",
     "WebSearchTool",
     "command_is_allowed",
     "dangerous_reason",

@@ -63,6 +63,7 @@ REGISTERED: tuple[str, ...] = (
     "memory.recall",
     "system.volume",
     "timer.remind",
+    "weather.now",
 )
 
 #: 一轮最多几次工具调用。**2026-09-05 从 1 提到 3。**
@@ -116,6 +117,11 @@ _HOW: Mapping[str, str] = {
     "system.volume": (
         '音量。大一点 {"delta": 0.1}；小一点 {"delta": -0.1}；'
         '调到一半 {"level": 0.5}；静音 {"mute": true}；只想知道多大声就传 {}'
+    ),
+    "weather.now": (
+        '查真实天气。{"city": "上海"}；明天加 {"day": "tomorrow"}；'
+        "没说城市就传 {}（用默认城市）。**问到天气一律先调它** —— 你手上没有今天的数据，"
+        "自己编一个气温不会被发现"
     ),
 }
 

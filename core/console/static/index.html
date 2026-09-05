@@ -3739,7 +3739,12 @@ function renderSkillTools(runtime) {
     return;
   }
   for (const name of tools) {
-    const remote = name.includes(".") && !["fs", "web", "shell", "memory"].includes(name.split(".")[0]);
+    /* 平台自有工具的前缀表。**必须和 core/tools/__init__.py 注册的那些同步** ——
+       漏一个前缀的后果不是排版问题：页面会告诉使用者他自己的内置工具「可能来自 MCP」，
+       而那一栏正是他用来回答「这台机器上多了个第三方工具吗」的地方。2026-09-05 实测这里
+       漏了五个（app / system / time / timer / weather），于是六个内置工具全被标成了可疑。 */
+    const own = ["fs", "web", "shell", "memory", "app", "system", "time", "timer", "weather"];
+    const remote = name.includes(".") && !own.includes(name.split(".")[0]);
     host.appendChild(rowOf("ok", name, remote ? "可能来自 MCP（按前缀猜的）" : "平台自有工具", null, "tool-" + name));
   }
 }
