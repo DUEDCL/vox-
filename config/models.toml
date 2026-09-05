@@ -35,10 +35,28 @@ label = "唤醒本机 + 云端识别 / 合成 / 推理"
 
 [profiles.local.asr]
 provider = "custom"
-model = "qwen-audio-3.0-asr-flash"
+# **2026-09-05 从 qwen-audio-3.0-asr-flash 换成 fun-asr-flash，理由是量出来的。**
+#
+# 同一段真录音、同一只端点各跑两轮（`.vox-ref/asr_model_race.py`，REAL）：
+#
+# | 模型 | 2.64 s 音频 | 7.15 s 音频 | 写对「沃」 |
+# |---|---|---|---|
+# | `qwen-audio-3.0-asr-flash` | 3609 / 3655 ms | 3797 / 3359 ms | 2/2 |
+# | **`fun-asr-flash-2026-06-15`** | **2250 / 2546 ms** | 3671 / 3500 ms | **2/2** |
+#
+# **短句省 1.1–1.4 秒，长句相当**，而短句是语音助手的常态（「几点了」「打开网易云」）。
+# 准确度这一列必须一起看：一个快 1 秒但把「小沃」写成「小吴」的模型是净损失 —— 那正是
+# 2026-09-03 把识别搬上云的全部理由（本机 14M 模型的字表里没有「沃」）。两个模型都写对了。
+#
+# `qwen3-asr-flash` 试过，**HTTP 400**：它的请求形状与 `qwen-audio-3.0-*` 不同（多模态那套
+# `input_audio` + `parameters.format` 它不认），接它要改 `core/audio/asr_cloud.py` 的 payload。
+#
+# **名字带日期是这一行唯一的隐患**：百炼没给它不带日期的别名，所以这个 tag 下线时会 4xx。
+# 那时的正确动作是重跑上面那个探针挑新的，不是回退到慢的那个。
+model = "fun-asr-flash-2026-06-15"
 # **必须是原生多模态端点，不是 compatible-mode/v1。** 使用者 2026-09-03 报的那个 400
-# 就是这一行写成兼容端点：`qwen-audio-3.0-asr-flash` 要 `parameters.format`，而 OpenAI
-# 协议里**没有地方放它**，于是兼容端点恒回 `UNSUPPORTED_FORMAT: format is empty`。
+# 就是这一行写成兼容端点：这一族模型要 `parameters.format`，而 OpenAI 协议里**没有地方放
+# 它**，于是兼容端点恒回 `UNSUPPORTED_FORMAT: format is empty`。
 # 实测原生端点 + `data:audio/wav;base64,…` + `parameters.format` = 200，转写正确。
 base = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation"
 proto = "dashscope"
@@ -106,7 +124,7 @@ label = "退路：中转站 claude-opus-5（慢 4 倍，但不需要百炼 key�
 
 [profiles.opus.asr]
 provider = "custom"
-model = "qwen-audio-3.0-asr-flash"
+model = "fun-asr-flash-2026-06-15"
 base = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation"
 proto = "dashscope"
 key_env = "VOX_ASR_KEY"

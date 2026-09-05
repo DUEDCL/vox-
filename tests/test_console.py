@@ -554,12 +554,21 @@ def test_models_view_reports_where_the_profile_and_voice_toml_disagree(
 
     TTS 那一栏的注释从 2026-08-29 就写着「两处必须一致」，而在这之前没有任何一层去保证它。
     ASR 2026-09-03 上云之后同一个坑多了一个。
+
+    **模型名不写死在这条测试里。** 上一版把 `qwen-audio-3.0-asr-flash` 抄进了 `.replace()`，
+    于是 2026-09-05 换成 `fun-asr-flash` 之后那次替换变成空操作、测试红在一个 KeyError 上 ——
+    而它想验的东西一个字都没变。同一个坑在 `tests/test_models_config.py` 上踩过一次（使用者
+    在控制台改一次方案就让 11 条变红）。现在从文件里读出当前那个值再改它。
     """
     api = ConsoleApi(runtime, config_dir=config_dir)
     voice = config_dir / "voice.toml"
+    from core.audio.config import load_voice_config  # noqa: PLC0415 - 与本文件其它用法一致
+
+    shipped = load_voice_config(voice)["asr.model"]
+    assert shipped, "出厂 voice.toml 应当点名一个 ASR 模型"
     voice.write_text(
         voice.read_text(encoding="utf-8").replace(
-            'model = "qwen-audio-3.0-asr-flash"', 'model = "别的模型"', 1
+            f'model = "{shipped}"', 'model = "别的模型"', 1
         ),
         encoding="utf-8",
     )
@@ -567,7 +576,7 @@ def test_models_view_reports_where_the_profile_and_voice_toml_disagree(
     assert report["error"] == ""
     diverged = {row["key"]: row for row in report["diff"]}
     assert diverged["asr.model"]["voice"] == "别的模型"
-    assert diverged["asr.model"]["profile"] == "qwen-audio-3.0-asr-flash"
+    assert diverged["asr.model"]["profile"] == shipped
     # 出厂配置里两处的 key_env 一致，所以**不该**有那条 note ——
     # 一个永远亮的警告等于没有警告，使用者会学会忽略它，包括它真该亮那一次。
     assert not [note for note in report["notes"] if "key_env" in note]
