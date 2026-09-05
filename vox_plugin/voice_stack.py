@@ -99,11 +99,26 @@ class VoiceStack:
         elif hasattr(self.asr, "model_dir"):
             asr_where = str(self.asr.model_dir)
         else:
-            asr_where = f"{self.asr.model} @ {self.asr._safe_endpoint()}"
+            # **不许调 provider 的私有方法。** 上一版这里写的是 `self.asr._safe_endpoint()`，
+            # 而 2026-09-05 新增的流式 provider 没有那个方法 —— 于是 `/api/state` 每次轮询都
+            # 抛 AttributeError，页面上是一句「连接失败 · failed: AttributeError · 还没成功
+            # 读到过」，而控制台的其余部分看起来完全正常。一个跨模块的私有依赖让「换一条
+            # provider」这件事变成了一次运行时崩溃，而三个 provider 的**公开**接口是齐的。
+            #
+            # `describe()["endpoint"]` 是三个云端 provider 都有的那一项；没有就退到类名，
+            # 因为这一行的用途是「让人看见在用哪个」，不是一个可解析的字段。
+            described = self.asr.describe() if hasattr(self.asr, "describe") else {}
+            endpoint = str(described.get("endpoint") or "") or type(self.asr).__name__
+            asr_where = f"{getattr(self.asr, 'model', '?')} @ {endpoint}"
             latency = int(getattr(self.asr, "last_latency_ms", 0))
+            commit = int(getattr(self.asr, "last_commit_ms", 0))
             failures = int(getattr(self.asr, "failures", 0))
             if latency:
                 asr_where = f"{asr_where}（上一次 {latency} ms）"
+            elif commit:
+                # 流式那条路量的是「说完 → 最终文本」，和整段那条的「整段往返」不是同一个数，
+                # 所以措辞不同 —— 印成同一句话会让两条路的读数被拿来直接比较。
+                asr_where = f"{asr_where}（说完后 {commit} ms 出文本）"
             if failures:
                 asr_where = f"{asr_where} —— 失败 {failures} 次"
         asr_cloud = self.asr is not None and not hasattr(self.asr, "model_dir")
@@ -138,7 +153,16 @@ class VoiceStack:
         elif hasattr(engine, "model_dir"):
             where = str(engine.model_dir)
         else:
-            where = f"{engine.model} / {engine.voice} @ {engine._safe_endpoint()}"
+            # 和 ASR 那一行同一条：**不调 provider 的私有方法。** 这一处 2026-09-05 之前写的是
+            # `engine._safe_endpoint()`，只是碰巧那个 provider 有它 —— 而同形的故障已经在
+            # ASR 那一侧发生过（`/api/state` 抛 AttributeError，页面写「连接失败」）。
+            spoken = engine.describe() if hasattr(engine, "describe") else {}
+            endpoint = str(spoken.get("endpoint") or "") or type(engine).__name__
+            wire = str(spoken.get("wire") or "")
+            where = f"{getattr(engine, 'model', '?')} / {getattr(engine, 'voice', '?')} @ {endpoint}"
+            if wire and wire != "ws":
+                # 只在**不是**默认那条线时印出来：一个永远显示的字段读不出信息。
+                where = f"{where}（{wire}）"
             if degraded:
                 # 降级了就把这件事印在「在哪」那一栏：使用者听到的是本机那把嗓子，
                 # 而这一行如果只印云端的音色，他会以为配置生效了。

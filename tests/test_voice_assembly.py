@@ -184,3 +184,88 @@ def test_an_unresolvable_config_name_falls_back_to_the_default_device(nowhere):
     assert stack.capture.device is None
     assert any("没匹配到任何可用的输入设备" in w for w in stack.warnings)
     assert any("系统默认" in w for w in stack.warnings)
+
+
+# -- 就绪清单不许依赖 provider 的私有方法 ---------------------------------------
+#
+# 这一组的根因是一次真实故障，而且**同形的它出现过两次**：`readiness()` 里写着
+# `self.asr._safe_endpoint()` / `engine._safe_endpoint()`，于是 2026-09-05 新增的流式
+# provider（没有那个私有方法）让 `GET /api/state` 每次轮询都抛 AttributeError —— 页面上是
+# 一句「连接失败 · failed: AttributeError · 还没成功读到过」，而语音其实一直在正常工作。
+#
+# 一个包装层或一条新 provider 让**别的**层报错，就是这种「看起来毫不相关」的故障。所以判据
+# 不是「那个方法还在不在」，是**每一条 provider 都能过一遍就绪清单**。
+
+
+def _stack_with(**providers):
+    from vox_plugin.voice_stack import VoiceStack
+
+    from core.audio.config import load_voice_config
+
+    return VoiceStack(config=load_voice_config(), **providers)
+
+
+def _asr_providers():
+    from core.audio.asr import SherpaStreamingAsrProvider
+    from core.audio.asr_cloud import DashScopeAsrProvider
+    from core.audio.asr_ws import DashScopeWsAsrProvider
+
+    return [
+        SherpaStreamingAsrProvider("models/nonexistent"),
+        DashScopeAsrProvider(model="fun-asr-flash-2026-06-15"),
+        DashScopeWsAsrProvider(model="fun-asr-realtime"),
+    ]
+
+
+def _tts_providers():
+    from core.audio.tts import SherpaTtsProvider
+    from core.audio.tts_cloud import DashScopeTtsProvider
+    from core.audio.tts_fallback import FallbackTts
+
+    cloud = DashScopeTtsProvider(model="qwen-audio-3.0-tts-plus", voice="longanhuan_v3.6")
+    return [
+        SherpaTtsProvider("models/nonexistent"),
+        cloud,
+        FallbackTts(cloud, SherpaTtsProvider("models/nonexistent")),
+    ]
+
+
+@pytest.mark.parametrize("provider", _asr_providers(), ids=lambda p: type(p).__name__)
+def test_every_asr_provider_survives_the_readiness_board(provider):
+    """三条识别路都要能被印出来。**这条测试就是那个 bug 缺的东西。**"""
+    rows = {row["item"]: row for row in _stack_with(asr=provider).readiness()}
+
+    assert rows["asr"]["detail"], "「在哪」那一栏不许是空的 —— 它是「配置有没有生效」的答案"
+
+
+@pytest.mark.parametrize("provider", _tts_providers(), ids=lambda p: type(p).__name__)
+def test_every_tts_provider_survives_the_readiness_board(provider):
+    """合成这一侧同理，而它多一层 `FallbackTts` 包装 —— 2026-09-03 那次就是没穿过它。"""
+    rows = {row["item"]: row for row in _stack_with(tts=provider).readiness()}
+
+    assert rows["tts"]["detail"]
+
+
+def test_the_board_never_reaches_for_a_private_attribute():
+    """一个只实现了**公开**契约的 provider 也要能过。
+
+    直接钉住这条立场：跨模块调 `_foo()` 的代码在下一条 provider 上就会炸，而那时报错的
+    地方（`/api/state`）和根因（新 provider）看起来毫不相关。
+    """
+
+    class BareBones:
+        """公开契约齐全，一个下划线开头的东西都没有。"""
+
+        model = "bare"
+        voice = "plain"
+        available = True
+
+        def describe(self):
+            return {"endpoint": "wss://example.test", "wire": "ws"}
+
+    asr_rows = {row["item"]: row for row in _stack_with(asr=BareBones()).readiness()}
+    tts_rows = {row["item"]: row for row in _stack_with(tts=BareBones()).readiness()}
+
+    assert "bare" in asr_rows["asr"]["detail"]
+    assert "example.test" in asr_rows["asr"]["detail"]
+    assert "bare" in tts_rows["tts"]["detail"]

@@ -313,6 +313,27 @@ class DashScopeTtsProvider:
         parsed = urlparse(self.endpoint)
         return f"{parsed.scheme}://{parsed.hostname}"
 
+    def describe(self) -> dict[str, Any]:
+        """给就绪清单与控制台看的读数。**公开的，因为跨模块的私有依赖已经咬过两次。**
+
+        2026-09-03 与 2026-09-05 各出过一次同形的故障：`voice_stack.readiness()` 调
+        provider 的 `_safe_endpoint()`，而换一条 provider 之后那个方法不在 —— 于是
+        `/api/state` 每次轮询都抛 AttributeError，页面上写「连接失败」而语音其实一直在
+        正常工作。三个 ASR provider 都有 `describe()`，合成这一侧此前没有，就是那个不对称。
+        """
+        return {
+            "engine": "dashscope",
+            "model": self.model,
+            "voice": self.voice,
+            "endpoint": self._safe_endpoint(),
+            "key_env": self.key_env,
+            "wire": self.wire,
+            "available": self.available,
+            "sample_rate": int(self.sample_rate),
+            "instruction": bool(self.instruction.strip()),
+            "last_first_audio_ms": int(self.last_first_audio_ms),
+        }
+
     def synthesize(self, text: str, **_ignored: Any) -> TtsAudio:
         """一句话 -> float32 采样。
 
