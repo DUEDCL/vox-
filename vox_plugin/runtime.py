@@ -282,7 +282,11 @@ class VoiceRuntime:
                     self.memory_store = self.memory_writer = self.memory_recaller = None
 
             self.tool_runner = open_tools(
-                on_event=self.on_event, memory_writer=self.memory_writer
+                on_event=self.on_event,
+                memory_writer=self.memory_writer,
+                # **记忆接上了才有 `memory.recall` 这个工具。** 给一个查不到任何东西的
+                # 记忆工具比没有它更糟：模型会用它，然后据「记忆里没有」下结论。
+                memory_recaller=self.memory_recaller,
             )
 
             descriptors, self.adapters, agent_warnings = self._open_agents()

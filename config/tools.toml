@@ -61,6 +61,22 @@ open_enabled = true
 # 「打开 X 搜一下」用哪个搜索页，`{q}` 是编码后的查询词。必应不需要 JS 就能出结果页。
 open_search_url = "https://www.bing.com/search?q={q}"
 
+[memory]
+# `memory.recall` —— agent 能不能**主动**翻记忆（`⟦vox:tool memory.recall {"query": …}⟧`）。
+#
+# **这不是一次新的出网授权。** 记忆文本在这个工具之前就已经随每一轮请求出网了：
+# `Dispatcher._recall_context()` 每轮都把 `facts()` + `recent_turns()` 拼进发给云端 LLM 的
+# `Task.context`。这个开关决定的是**谁挑哪一条** —— 被动召回按「当前这句话」的词去检索，
+# 于是「我上次说想买的那个东西叫什么」必然查不到（这句话里没有那个东西的名字）；主动查
+# 把检索词交给知道自己缺什么的那一方。
+#
+# 关掉就退回纯被动召回，和这个工具不存在时一模一样。
+#
+# **只读，没有 `memory.write`**：给模型一支能往长期记忆里写字的笔，等于让一次转写错误变成
+# 一条永久的「事实」。写入仍然只走 `write_turn` 与隐式提炼（core/memory/promote.py）。
+# 审计层（`long` scope）也查不到 —— 一句「搜一下我的历史」不该把命令执行记录念出来。
+enabled = true
+
 [shell]
 # **2026-09-03 打开了。** 使用者点名要「能直接执行终端命令」，而在这之前这一整条路是关的。
 #

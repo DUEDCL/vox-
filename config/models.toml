@@ -60,11 +60,66 @@ base = "https://dashscope.aliyuncs.com/api/v1/services/audio/tts"
 proto = "dashscope"
 key_env = "VOX_TTS_KEY"
 
-# 云端推理。**key_env 2026-09-01 从 VOX_DASHSCOPE_KEY 改成 VOX_LLM_KEY。**
-# 一个名字叫 DASHSCOPE 的变量被这条（端点是中转站）点名，于是为了让聊天能用而往它里面
-# 存的是中转站的 key —— 而 config/voice.toml 的 TTS 读的正是那个变量，百炼回 401
-# InvalidApiKey，表现为「回答不出声」。一个变量只服务一个角色。
+# 云端推理。**2026-09-05 从中转站的 claude-opus-5 换成百炼的 qwen-plus，理由是量出来的。**
+#
+# 同一句话、同一段系统提示，各跑一次（`.vox-ref/llm_latency_probe.py`，REAL 级）：
+#
+# | 端点 / 模型 | 首字 | 整轮 | text 块 |
+# |---|---|---|---|
+# | 中转站 `claude-opus-5` | **7938 ms** | 7938 ms | **1 条** |
+# | 百炼 `qwen-flash` | 1516 ms | 1641 ms | 7 条 |
+# | 百炼 `qwen-plus` | **1844 ms** | 2297 ms | 8 条 |
+# | 百炼 `qwen3-max` | 1813 ms | 2375 ms | 8 条 |
+#
+# 两件事同时成立：**快 4 倍**，而且**真的增量下发**（中转站把整段攒完一次吐出，所以
+# 「把 LLM 增量喂进 TTS」在它上面一秒都省不到 —— 2026-09-01 就是据此放弃那个优化的）。
+# 中转站的 `/v1/models` 只自报两个模型（`claude-opus-5` 与 `claude-opus-5-thinking`），
+# 其余候选一律 403，所以在那个端点上「换一个更快的模型」这条路根本不存在。
+#
+# 选 plus 不选 flash：工具调用四题两者都是 4/4（`.vox-ref/model_pick_probe.py`），
+# 而 plus 只慢 28 ms（1769 vs 1741 ms 平均首字）—— 那点差价买的是推理余量。
+#
+# **key_env 是新的变量名，值就是这台机器上已有的那把百炼 key**（`VOX_ASR_KEY` /
+# `VOX_TTS_KEY` 里那个 35 字符的）。不直接点名那两个是因为「一个凭据变量只服务一个角色」：
+# 名字叫 ASR 的变量被 LLM 点名之后，换 ASR 服务商就会把对话一起弄坏 —— 那正是
+# `VOX_DASHSCOPE_KEY` 的教训（见下面那段历史）。
+#
+# **这个变量没设的时候不会退步。** `apply_llm_profile` 会检查它在不在位，空的话整条不套用、
+# 对话仍走 `agents.toml` 里的 relay，并在启动警告里说清缺哪个变量。
 [profiles.local.llm]
+provider = "custom"
+model = "qwen-plus"
+base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+proto = "openai"
+key_env = "VOX_QWEN_KEY"
+
+# ------------------------------------------------------- 退路：中转站上的 claude-opus-5
+# 上一套（2026-09-05 之前的出厂配置）。留着它是因为换回去应当是**改一行 `active`**，
+# 不是去翻 git 历史。代价写在这里：首字 7.9 秒、且不增量下发。
+#
+# **key_env 2026-09-01 从 VOX_DASHSCOPE_KEY 改成 VOX_LLM_KEY。** 一个名字叫 DASHSCOPE 的
+# 变量被这条（端点是中转站）点名，于是为了让聊天能用而往它里面存的是中转站的 key ——
+# 而 config/voice.toml 的 TTS 读的正是那个变量，百炼回 401 InvalidApiKey，表现为
+# 「回答不出声」。一个变量只服务一个角色。
+[profiles.opus]
+label = "退路：中转站 claude-opus-5（慢 4 倍，但不需要百炼 key）"
+
+[profiles.opus.asr]
+provider = "custom"
+model = "qwen-audio-3.0-asr-flash"
+base = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation"
+proto = "dashscope"
+key_env = "VOX_ASR_KEY"
+
+[profiles.opus.tts]
+provider = "custom"
+model = "qwen-audio-3.0-tts-plus"
+voice = "longanhuan_v3.6"
+base = "https://dashscope.aliyuncs.com/api/v1/services/audio/tts"
+proto = "dashscope"
+key_env = "VOX_TTS_KEY"
+
+[profiles.opus.llm]
 provider = "custom"
 model = "claude-opus-5"
 base = "https://api.justwoker.icu/v1"

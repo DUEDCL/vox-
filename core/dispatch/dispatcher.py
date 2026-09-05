@@ -31,7 +31,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterator, Mapping
 
 from core.agents.contract import AgentChunk, Task
-from core.agents.skills import parse_calls, render_result, strip_calls
+from core.agents.skills import MAX_CALLS, parse_calls, render_result, strip_calls
 from core.dispatch.contract import (
     Aggregator,
     DispatchPlan,
@@ -41,6 +41,15 @@ from core.dispatch.contract import (
 )
 from core.events import AGENT_SCHEMA_PATH, build_event, validate_event
 from core.tools.contract import ToolRequest
+
+
+#: 一轮对话里最多回去问模型几次。**这不是 `MAX_CALLS` 的复读**：那个数管的是「执行了几个
+#: 工具」，这个管的是「多花了几次 LLM 往返」，而后者才是使用者等待的来源。
+#:
+#: 同一轮里的多个调用一次执行完，所以「查时间 + 开应用」这类独立请求只用掉一次往返，
+#: 而**依赖**前一步结果的第二步会占掉第二次。2 是有意留窄的：语音的耐心以秒计，
+#: 而每一次往返在百炼 flash 档是 1.5–2.4 s（2026-09-05 实测）。
+MAX_TOOL_ROUNDS = 2
 
 
 _SAFE_FAILURE_REASONS = frozenset(
@@ -451,6 +460,32 @@ class Dispatcher:
             ok=ok,
         )
 
+    def _execute_tool(self, name: str, arguments: Mapping[str, Any]) -> tuple[bool, str]:
+        """跑一个 agent 点名的工具。返回 (成功, 给模型看的详情)。
+
+        **来源是 agent，说话人不传。** 一个由模型发起的请求不该继承使用者的声纹身份 ——
+        那正是 `shell.run` 的 `require_verified_speaker` 要挡住的东西。执行走的是和语音
+        快路径同一套闸门，所以这里只决定「谁在发起」，不决定「什么能被执行」。
+        """
+        request = ToolRequest(tool=name, arguments=dict(arguments), origin="agent")
+        try:
+            outcome = self.tool_runner.run(request)  # type: ignore[union-attr]
+        except Exception as exc:  # noqa: BLE001 - 工具炸了也要把话说完
+            tool_ok, detail = False, f"{type(exc).__name__}: {exc}"
+        else:
+            tool_ok = bool(outcome.ok)
+            detail = (outcome.output or outcome.error or "").strip()
+        self._detail(
+            "agent",
+            f"agent 要求 {name} → {'成功' if tool_ok else '失败'}",
+            level="info" if tool_ok else "warn",
+            tool=name,
+            arguments=dict(arguments),
+            ok=tool_ok,
+            detail=detail[:200],
+        )
+        return tool_ok, detail
+
     def _settle_tool_calls(
         self,
         task: Task,
@@ -474,70 +509,67 @@ class Dispatcher:
         1. **只解析，不放行。** 执行走 `self.tool_runner`，也就是和语音快路径**同一套闸门**
            （沙箱、白名单、危险模式、`shell.run` 的确认与声纹）。所以这个功能扩大的是
            「谁能发起」，不是「什么能被执行」—— 而 `shell.run` 根本不在 agent 看得到的清单里。
-        2. **一轮一次**（`MAX_CALLS`）。延迟预算：每一轮 agent 是 2–20 秒。
-        3. **失败要回给它。** 拿不到「失败」这一位，它会把「拒绝了」当成「做完了」然后向用户
+        2. **多步，但有界**（`MAX_CALLS` 次执行 / `MAX_TOOL_ROUNDS` 次再问）。**2026-09-05
+           从「一轮一次」改过来** —— 原来那个 1 的理由是延迟预算，而预算在换掉 LLM 端点之后
+           变了（中转站 `claude-opus-5` 首字 7.9 s 且不增量下发；百炼 flash 档 1.5–2.4 s）。
+           「先查时间再打开网易云」这类请求在一次调用的上限下必然只做一半，而使用者听到的是
+           一句把两件事都汇报了的话 —— 说得像做过了，正是这一整段要修的毛病。
+        3. **同一轮里的多个调用一次执行完再问。** 独立的两件事因此只多花一次往返；而**依赖**
+           前一步结果的第二步模型自己会分轮说出来（它第一轮只写得出第一个）。反过来做
+           （每步都回去问一次）会让独立的两件事也各花一次往返。
+        4. **失败要回给它。** 拿不到「失败」这一位，它会把「拒绝了」当成「做完了」然后向用户
            汇报成功 —— 那正是这一段要修的毛病，不能在这里重新引入。
 
         没有工具调用（绝大多数轮）时原样返回，一次多余的对象构造都不做。
         """
         if self.tool_runner is None:
             return collected, ok
-        text = "".join(chunk.text or "" for chunk in collected if chunk.kind == "text")
-        calls = parse_calls(text)
-        if not calls:
+        current, current_ok = collected, ok
+        budget = MAX_CALLS
+        last_detail = ""
+        last_tool_ok = False
+        did_run = False
+        for step in range(MAX_TOOL_ROUNDS):
+            text = "".join(chunk.text or "" for chunk in current if chunk.kind == "text")
+            calls = parse_calls(text)[:budget]
+            if not calls:
+                break
+            results: list[str] = []
+            for name, arguments in calls:
+                last_tool_ok, last_detail = self._execute_tool(name, arguments)
+                results.append(render_result(name, last_tool_ok, last_detail))
+                did_run = True
+            budget -= len(calls)
+            asked = "、".join(name for name, _ in calls)
+            followup = replace(
+                task,
+                id=f"{task.id}-tool{step + 1}" if step else f"{task.id}-tool",
+                context=tuple(task.context or ())
+                + (f"你刚才要求 {asked}，结果如下。用一句话把结果告诉用户。",)
+                + tuple(results),
+            )
+            current = tuple(self._stream_agents(followup, plan, available, started))
+            last = current[-1] if current else None
+            current_ok = last is not None and last.kind == "done" and not last.error
+            if not current_ok:
+                # 再问那一轮失败时**不要丢掉工具已经做了这件事**：拿工具的结果直接当回答，
+                # 比一句「agent 失败了」有用得多 —— 应用其实已经开起来了。
+                spoken = last_detail or ("做好了" if last_tool_ok else "没做成")
+                return (
+                    AgentChunk(kind="text", text=spoken[:200]),
+                    AgentChunk(kind="done"),
+                ), last_tool_ok
+            if budget <= 0:
+                break
+        if not did_run:
             return collected, ok
-
-        name, arguments = calls[0]
-        request = ToolRequest(
-            tool=name,
-            arguments=arguments,
-            # **来源是 agent，说话人不传。** 一个由模型发起的请求不该继承使用者的声纹身份 ——
-            # 那正是 `shell.run` 的 `require_verified_speaker` 要挡住的东西。
-            origin="agent",
-        )
-        try:
-            outcome = self.tool_runner.run(request)
-        except Exception as exc:  # noqa: BLE001 - 工具炸了也要把话说完
-            outcome = None
-            detail, tool_ok = f"{type(exc).__name__}: {exc}", False
-        else:
-            tool_ok = bool(outcome.ok)
-            detail = (outcome.output or outcome.error or "").strip()
-        self._detail(
-            "agent",
-            f"agent 要求 {name} → {'成功' if tool_ok else '失败'}",
-            level="info" if tool_ok else "warn",
-            tool=name,
-            arguments=dict(arguments),
-            ok=tool_ok,
-            detail=detail[:200],
-        )
-
-        # 第二轮：把原话、它的调用、以及结果一起给它，让它用一句话汇报。
-        followup = replace(
-            task,
-            id=f"{task.id}-tool",
-            context=tuple(task.context or ())
-            + (f"你刚才要求 {name}，结果如下。用一句话把结果告诉用户。",
-               render_result(name, tool_ok, detail)),
-        )
-        second = tuple(self._stream_agents(followup, plan, available, started))
-        last = second[-1] if second else None
-        second_ok = last is not None and last.kind == "done" and not last.error
-        if not second_ok:
-            # 第二轮失败时**不要丢掉工具已经做了这件事**：拿工具的结果直接当回答，
-            # 比一句「agent 失败了」有用得多 —— 应用其实已经开起来了。
-            spoken = detail or ("做好了" if tool_ok else "没做成")
-            return (
-                AgentChunk(kind="text", text=spoken[:200]),
-                AgentChunk(kind="done"),
-            ), tool_ok
-        # 把调用标记从最终文本里去掉：模型有时会在汇报里把它重复一遍。
+        # 把调用标记从最终文本里去掉：模型有时会在汇报里把它重复一遍，而**用完预算之后**
+        # 那一行不会再被执行 —— 留着它就是让使用者听见一串符号。
         cleaned = tuple(
             replace(chunk, text=strip_calls(chunk.text or "")) if chunk.kind == "text" else chunk
-            for chunk in second
+            for chunk in current
         )
-        return cleaned, second_ok
+        return cleaned, current_ok
 
     def _collect(
         self, plan: DispatchPlan, adapters: Mapping[str, Any]

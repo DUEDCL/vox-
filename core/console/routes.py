@@ -430,6 +430,12 @@ EDITABLE: dict[str, tuple[str, ...]] = {
         "apps.default_music",
         "web.open_enabled",
         "web.open_search_url",
+        # `memory.enabled` = agent 能不能**主动**翻记忆（`memory.recall`，2026-09-05 新增）。
+        #
+        # 放开它不是放开一个出网面：记忆文本在这个工具之前就已经随每一轮请求出网了
+        # （`Dispatcher._recall_context()` 把 facts() + recent_turns() 拼进 Task.context）。
+        # 这个开关决定的是「谁挑哪一条」—— 关掉就退回纯被动召回。是偏好，不是边界。
+        "memory.enabled",
     ),
     "memory.toml": ("memory.recall_limit", "memory.short_keep"),
     # 2026-09-04：微信通道的五项。**它们此前一项都不在这里** —— 而 `weixin.enabled` 正是

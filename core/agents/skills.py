@@ -53,18 +53,44 @@ from typing import Any, Mapping, Sequence
 #: `shell.run` 刻意不在：它要的是一次人工确认，而确认卡是给**使用者说的那句话**准备的界面。
 #: 一个由模型发起、由使用者确认的命令执行，混淆了「谁想跑这条命令」——
 #: 而那正是确认卡要回答的唯一问题。
-REGISTERED: tuple[str, ...] = ("app.open", "web.open", "web.search", "fs.read", "time.now")
+REGISTERED: tuple[str, ...] = (
+    "app.open",
+    "web.open",
+    "web.search",
+    "fs.read",
+    "time.now",
+    "memory.recall",
+)
 
-#: 一轮最多几次工具调用。延迟预算，不是技术限制：每一轮 agent 是 2–20 秒。
-MAX_CALLS = 1
+#: 一轮最多几次工具调用。**2026-09-05 从 1 提到 3。**
+#:
+#: 原来那个 1 写的理由是延迟预算：「每一轮 agent 是 2–20 秒，两次调用就是一分钟」。那个
+#: 算式在换掉 LLM 端点之后不成立了 —— 中转站上 `claude-opus-5` 首字 7.9 秒且不增量下发，
+#: 而百炼 flash 档实测首字 1.5–2.4 秒，三次调用的预算比原来一次还宽。
+#:
+#: 代价是真的：**每次调用都要再问模型一次**，所以 3 次的最坏情况是四次往返。上限存在的
+#: 意义就是这个最坏情况有界 —— 没有上限的话一个把工具结果读错的模型会一直调下去。
+MAX_CALLS = 3
 
 #: 调用标记。U+27E6/U+27E7 不在中文标点里、不在代码里常见、也不会从语音转写里冒出来 ——
 #: 所以它**不可能被误触发**。
 OPEN = "⟦"
 CLOSE = "⟧"
 
+#: **`tool` 那个词是可选的，这是量出来的。**
+#:
+#: 2026-09-05 拿五个模型各跑四个用例（`.vox-ref/model_pick_probe.py`），三个模型
+#: （qwen-flash / qwen-plus / qwen3-max）在**知道格式**的前提下仍然写成 `⟦vox:time.now⟧`
+#: 和 `⟦vox:web.search {"query": …}⟧` —— 少的正是 `tool` 这个词。五个里三个犯同一个错，
+#: 那就不是模型笨，是格式里那个词多余：`vox:` 后面自然接的是工具名。
+#:
+#: 失败的样子还特别贵：模型**以为自己调了**，于是回答里只有那一行标记、没有可念的内容，
+#: 使用者听到的是一句空白或者一串奇怪符号，而日志里既没有工具调用也没有错误。
+#:
+#: 放宽解析不放宽权限：工具名照样要在 `REGISTERED` 里，所以 `⟦vox:result …⟧`
+#: （`render_result` 自己产生的那行）不会被当成一次调用。
 _CALL = re.compile(
-    OPEN + r"\s*vox:tool\s+(?P<tool>[a-z][a-z0-9_.]*)\s*(?P<args>\{.*?\})?\s*" + CLOSE,
+    OPEN + r"\s*vox:\s*(?:tool\s+)?(?P<tool>[a-z][a-z0-9_.]*)\s*(?P<args>\{.*?\})?\s*" + CLOSE,
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -75,6 +101,10 @@ _HOW: Mapping[str, str] = {
     "web.search": '搜网页并拿回摘要。{"query": "sherpa-onnx 版本"}',
     "fs.read": '读一个沙箱内的文件。{"path": "README.md"}',
     "time.now": "查当前时间。不需要参数：{}",
+    "memory.recall": (
+        '翻以前说过的话和记住的偏好。{"query": "买什么"}；'
+        "**使用者提到「上次」「之前」「我说过」而你手上没有那件事时，先查这个再回答**"
+    ),
 }
 
 
@@ -90,11 +120,12 @@ def manifest(available: Sequence[str] = ()) -> str:
         return ""
     lines = [f"- {name}：{_HOW.get(name, '')}" for name in usable]
     return (
-        "你可以让 Vox 替你做这几件事。**要做就只输出一行调用，不要同时写解释**：\n\n"
+        "你可以让 Vox 替你做这几件事。**要做就只输出调用那一行，不要同时写解释**：\n\n"
         f"    {OPEN}vox:tool 工具名 {{\"参数\": \"值\"}}{CLOSE}\n\n"
         + "\n".join(lines)
-        + "\n\n三条规矩：一轮**最多一次**调用；调用那一行之外不要写别的字；"
-        "结果会回给你，那时再用一句话告诉用户结果。做不到的事仍然直接说做不到，不要假装做了。"
+        + f"\n\n四条规矩：一轮最多 {MAX_CALLS} 次调用；**一句话里要做两件事就把两行一起写出来**"
+        "（各一行）；调用之外不要写别的字；结果会回给你，那时再用一句话告诉用户结果。"
+        "做不到的事仍然直接说做不到，不要假装做了。"
     )
 
 

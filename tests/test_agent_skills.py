@@ -117,11 +117,48 @@ def test_ordinary_speech_never_looks_like_a_call(text):
     assert parse_calls(text) == []
 
 
-def test_only_one_call_per_turn():
-    """延迟预算，不是技术限制：每一轮 agent 是 2–20 秒。"""
+def test_the_number_of_calls_per_turn_is_bounded():
+    """上限存在的意义是「最坏情况有界」，不是「只准做一件事」。
+
+    **2026-09-05 从 1 提到 3。** 原来那个 1 写的理由是延迟预算（每轮 agent 2–20 秒），
+    而预算在换掉 LLM 端点之后变了：中转站 `claude-opus-5` 首字 7.9 s 且不增量下发，
+    百炼 flash 档 1.5–2.4 s。「先查时间再打开网易云」这类请求在一次调用的上限下必然
+    只做一半，而使用者听到的是一句把两件事都汇报了的话。
+    """
     two = '⟦vox:tool app.open {"name":"a"}⟧⟦vox:tool web.open {"query":"b"}⟧'
 
-    assert len(parse_calls(two)) == MAX_CALLS == 1
+    assert parse_calls(two) == [("app.open", {"name": "a"}), ("web.open", {"query": "b"})]
+    assert MAX_CALLS >= 2, "多步是这一层现在的立场"
+
+    many = "".join('⟦vox:tool time.now {}⟧' for _ in range(MAX_CALLS + 4))
+    assert len(parse_calls(many)) == MAX_CALLS, "超过上限的部分必须被丢掉，不是被排队"
+
+
+@pytest.mark.parametrize(
+    "text, want",
+    [
+        ('⟦vox:time.now⟧', [("time.now", {})]),
+        ('⟦vox:web.search {"query":"x"}⟧', [("web.search", {"query": "x"})]),
+        ('⟦vox: app.open {"name":"网易云"}⟧', [("app.open", {"name": "网易云"})]),
+    ],
+)
+def test_the_word_tool_is_optional(text, want):
+    """**`tool` 那个词可以省，这是量出来的。**
+
+    2026-09-05 拿五个模型各跑四个用例（`.vox-ref/model_pick_probe.py`），三个
+    （qwen-flash / qwen-plus / qwen3-max）在知道格式的前提下仍然写成 `⟦vox:time.now⟧`
+    —— 少的正是 `tool`。五个里三个犯同一个错，那是格式里那个词多余，不是模型笨。
+
+    失败的样子还特别贵：模型**以为自己调了**，于是回答里只有那一行标记、没有可念的内容，
+    使用者听到一串奇怪符号，而日志里既没有工具调用也没有错误。
+    """
+    assert parse_calls(text) == want
+
+
+def test_a_result_line_is_not_mistaken_for_a_call():
+    """放宽解析不放宽权限：`render_result` 自己产生的那一行以 `vox:result` 开头，
+    而 `result` 不在 `REGISTERED` 里 —— 所以它不会被当成一次调用回头再执行。"""
+    assert parse_calls(render_result("app.open", True, "开好了")) == []
 
 
 def test_nested_arguments_are_dropped():

@@ -111,6 +111,20 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # 回答比一句「打开了，搜不了」糟得多。
         "play": {},
     },
+    "memory": {
+        # `memory.recall` —— 让 agent **主动**翻记忆（`⟦vox:tool memory.recall {"query": …}⟧`）。
+        #
+        # 默认开，而这不是一次新的出网授权：**记忆文本在这个工具之前就已经在出网了** ——
+        # `Dispatcher._recall_context()` 每一轮都把 `facts()` + `recent_turns()` 拼进发给
+        # 云端 LLM 的请求。所以这个开关控制的不是「记忆会不会出网」，是「谁决定查哪一条」。
+        #
+        # 关掉它就退回纯被动召回：按当前这句话去查，查到什么给什么。代价是「我上次说想买的
+        # 那个东西叫什么」这类问题必然答不了 —— 使用者这句话里没有那个东西的名字。
+        #
+        # 只读。**没有 `memory.write`**：给模型一支能往长期记忆里写字的笔，等于让一次转写
+        # 错误变成一条永久的「事实」。写入仍然只走 `write_turn` 与隐式提炼。
+        "enabled": True,
+    },
     "shell": {
         "enabled": False,
         "allow": [],

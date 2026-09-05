@@ -183,19 +183,37 @@ def apply_llm_profile(
             f"模型方案的 llm 缺 {missing} —— 半套配置比不配更难查，所以整条没有套用"
         ]
 
-    notes: list[str] = []
+    key_env = str(llm.get("key_env", "") or "").strip()
     before = (target.get("url"), target.get("model"), target.get("key_env"))
+    after = (base, model, key_env or target.get("key_env"))
+    if before == after:
+        # 已经一致：这一层什么都不做，所以它也没有话要说。凭据在不在位是那条 agent
+        # 自己的事（`check()` 报它），在这里替它报等于同一件事说两遍、而且是从一个
+        # 不负责它的地方说的。
+        return resolved, []
+
+    if key_env and not os.getenv(key_env):
+        # **凭据不在位就整条不套用。** 套用它的后果是每一轮都 401，而 401 在语音里和
+        # 「网断了」「这个模型不好用」听起来完全一样 —— 使用者会去换模型，而缺的是一个
+        # 环境变量。所以这里宁可留在旧端点上：一条慢但能答的路胜过一条快但全错的路。
+        #
+        # 这道闸是「换一个更快的端点」这件事的前提：切端点必然带着切凭据，而新凭据几乎
+        # 一定比配置文件晚到（配置进版本库，凭据在 `.env` 里）。没有它，仓库里改一行
+        # `models.toml` 就等于把使用者的对话弄坏，而现场看不出是哪一步弄坏的。
+        return resolved, [
+            f"模型方案的 llm 要从 {key_env} 读凭据，而这台机器上那个变量是空的 —— 整条**没有**"
+            f"套用，对话仍走 agents.toml 里的 {LLM_AGENT}"
+            f"（model={target.get('model')} url={target.get('url')}）。"
+            f"把那把 key 放进 {key_env} 之后重启即可生效"
+        ]
+
     target["url"] = base
     target["model"] = model
-    key_env = str(llm.get("key_env", "") or "").strip()
     if key_env:
         target["key_env"] = key_env
-    after = (target["url"], target["model"], target.get("key_env"))
-    if before != after:
-        notes.append(
-            f"{LLM_AGENT} 按 config/models.toml 生效：model={after[1]} url={after[0]} key_env={after[2]}"
-        )
-    return resolved, notes
+    return resolved, [
+        f"{LLM_AGENT} 按 config/models.toml 生效：model={after[1]} url={after[0]} key_env={after[2]}"
+    ]
 
 
 def open_agents(

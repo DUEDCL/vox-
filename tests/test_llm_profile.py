@@ -32,6 +32,17 @@ def _agents(**overrides):
     return {"agents": [{"name": "claude", "kind": "cli", "command": "claude"}, entry]}
 
 
+@pytest.fixture(autouse=True)
+def _credential_in_place(monkeypatch):
+    """`FULL` 指名从 `VOX_LLM_KEY` 读凭据，而 `apply_llm_profile` 现在会检查那个变量在不在位。
+
+    不显式设它的话，每条「应当套用」的用例都会落到「凭据不在位」那条分支上 —— 而结果
+    取决于跑测试的那个 shell 有没有加载 `.env`。**一个结果取决于环境变量的测试等于没有
+    基线**（`core/agents/acp.py` 的 `_UTF8_ENV` 是同一个教训），所以这里把前提写明。
+    """
+    monkeypatch.setenv("VOX_LLM_KEY", "probe-value-not-a-real-key")
+
+
 def _target(config):
     return next(entry for entry in config["agents"] if entry["name"] == LLM_AGENT)
 
@@ -88,6 +99,37 @@ def test_half_a_profile_is_not_applied(missing, must_mention):
     assert target["url"] == "https://old.example.com/v1"
     assert target["model"] == "old-model"
     assert notes and must_mention in notes[0]
+
+
+def test_a_profile_whose_credential_is_missing_is_not_applied(monkeypatch):
+    """凭据不在位就整条不套用。
+
+    套用它的后果是每一轮都 401，而 401 在语音里和「网断了」「这个模型不好用」听起来
+    完全一样 —— 使用者会去换模型，而缺的是一个环境变量。这道闸是「换一个更快的端点」
+    的前提：切端点必然带着切凭据，而新凭据几乎一定比配置文件晚到（配置进版本库，
+    凭据在 `.env` 里）。没有它，仓库里改一行 `models.toml` 就等于把使用者的对话弄坏。
+    """
+    monkeypatch.delenv("VOX_LLM_KEY", raising=False)
+
+    config, notes = apply_llm_profile(_agents(), FULL)
+
+    target = _target(config)
+    assert target["url"] == "https://old.example.com/v1"
+    assert target["model"] == "old-model"
+    assert target["key_env"] == "OLD_KEY"
+    assert notes and "VOX_LLM_KEY" in notes[0]
+
+
+def test_an_empty_key_env_still_applies(monkeypatch):
+    """`key_env` 是空串时不查凭据 —— 那是「用 agents.toml 里原来那个变量名」，
+    也是一个不带鉴权的本地网关的正确配置。查一个没被指名的变量等于凭空发明一道闸。"""
+    monkeypatch.delenv("VOX_LLM_KEY", raising=False)
+
+    config, notes = apply_llm_profile(_agents(), dict(FULL, key_env=""))
+
+    assert _target(config)["model"] == "claude-opus-5"
+    assert _target(config)["key_env"] == "OLD_KEY"
+    assert notes
 
 
 def test_a_protocol_the_adapter_cannot_speak_is_refused_not_forced():

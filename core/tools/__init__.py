@@ -18,6 +18,7 @@ from .apps import AppOpenTool
 from .browser import WebOpenTool
 from .clock import TimeNowTool
 from .fs import FsReadTool
+from .memory_recall import MemoryRecallTool
 from .mcp import (
     McpClient,
     McpConfigError,
@@ -58,6 +59,7 @@ def open_tools(
     *,
     on_event: Any = None,
     memory_writer: Any = None,
+    memory_recaller: Any = None,
     search_backend: Any = None,
     mcp: Any = None,
 ) -> ToolRunner:
@@ -70,6 +72,11 @@ def open_tools(
     ``search_backend=None`` means "decide from the config": that is what makes a
     configured SearxNG instance actually reach the tool. Passing one explicitly
     (including a fake, which is how this is tested) overrides the config.
+
+    ``memory_recaller`` 决定 ``memory.recall`` 在不在清单里。**注入而不是自己开**：这个
+    工具开一个自己的 SQLite 连接就等于绕过记忆层那把 `RLock`，而控制台是多线程的
+    （HTTP 工作线程 + pump + 音频回调）。不给就没有这个工具 —— 那和「记忆没接上」是
+    同一件事，不该由工具层假装它接上了。
 
     ``mcp`` is the same idea one step further: ``None`` reads ``config/mcp.toml``
     and starts whatever it enables (nothing, out of the box), ``False`` skips MCP
@@ -111,6 +118,10 @@ def open_tools(
         runner.register(AppOpenTool(resolved))
     if resolved.get("web", {}).get("open_enabled", True):
         runner.register(WebOpenTool(resolved))
+    # 记忆只在接上了的时候才成为一个工具。给一个「查不到任何东西」的 memory.recall 比
+    # 没有它更糟：模型会用它，然后据「记忆里没有」下结论。
+    if memory_recaller is not None and resolved.get("memory", {}).get("enabled", True):
+        runner.register(MemoryRecallTool(memory_recaller, resolved))
     if resolved.get("shell", {}).get("enabled", False):
         runner.register(ShellRunTool(resolved))
     if registry is not None:
@@ -134,6 +145,7 @@ __all__ = [
     "McpRegistry",
     "McpServerConfig",
     "McpTool",
+    "MemoryRecallTool",
     "SearchBackendError",
     "SearxBackend",
     "ShellRunTool",
