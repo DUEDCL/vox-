@@ -103,6 +103,11 @@ _SCHEMA: dict[str, dict[str, Any]] = {
         "num_threads": 2,
         "model": "",
         "key_env": "VOX_ASR_KEY",
+        # 云端识别走哪条线：``"ws"`` WebSocket 流式（默认）· ``"http"`` 整段 POST。
+        # 2026-09-05 实测「说完 → 最终文本」93 ms vs 2734 ms —— 流式路上音频边说边传，
+        # 说完之后只剩最后一块的处理时间。**两条路的模型名不一样**（流式要
+        # `fun-asr-realtime`，整段是 `fun-asr-flash-*`），装配层会按 wire 挑。
+        "wire": "ws",
         # 尾部静音判「说完了」。云端往返本身要几秒，端点上省下的每 100 ms 都落在等待里。
         "silence_s": 0.8,
         # 一段最长多久。到了不等静音也发 —— 念清单、读地址那种没有句末的长句不该卡死整轮。

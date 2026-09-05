@@ -279,11 +279,37 @@ def _open_asr(resolved: dict[str, Any], warnings: list[str]) -> Any:
     """
     provider = str(resolved.get("asr.provider", "sherpa")).strip().lower()
     if provider in ("dashscope", "qwen", "aliyun", "bailian", "cloud"):
+        wire = str(resolved.get("asr.wire", "ws")).strip().lower() or "ws"
+        model = str(resolved.get("asr.model", "")).strip()
+        key_env = str(resolved.get("asr.key_env", "")).strip() or "VOX_ASR_KEY"
+        if wire == "ws":
+            from core.audio.asr_ws import DEFAULT_MODEL as WS_ASR_MODEL
+            from core.audio.asr_ws import DashScopeWsAsrProvider
+
+            # **流式那条路的模型名和整段那条不一样。** 整段用 `fun-asr-flash-2026-06-15`，
+            # 流式要 `fun-asr-realtime` —— 把整段的名字发给流式接口回 `ModelNotFound`。
+            # 所以这里不沿用 `asr.model`（那一行写的是整段那条路的名字），除非它自己就带
+            # `-realtime`。配错的后果是「唤醒了但一个字都没转」，而那和聋掉同形。
+            cloud = DashScopeWsAsrProvider(
+                model=model if "realtime" in model else WS_ASR_MODEL,
+                key_env=key_env,
+                silence_s=float(resolved["asr.silence_s"]),
+                max_utterance_s=float(resolved["asr.max_utterance_s"]),
+                timeout_s=float(resolved["asr.timeout_s"]),
+                vad_model=str(resolved.get("vad_model", "")) or "",
+            )
+            if cloud.available:
+                return cloud
+            warnings.append(
+                f"云端流式识别不可用：{cloud.key_env} 没有值 —— 这一轮退回本机模型"
+                "（它的字表里没有「沃」，专名会听错）。在控制台「密钥」那一栏存进去即可"
+            )
+            return _open_local_asr(resolved, warnings)
         from core.audio.asr_cloud import DashScopeAsrProvider
 
         cloud = DashScopeAsrProvider(
-            model=str(resolved.get("asr.model", "")).strip() or DEFAULT_CLOUD_ASR_MODEL,
-            key_env=str(resolved.get("asr.key_env", "")).strip() or "VOX_ASR_KEY",
+            model=model or DEFAULT_CLOUD_ASR_MODEL,
+            key_env=key_env,
             silence_s=float(resolved["asr.silence_s"]),
             max_utterance_s=float(resolved["asr.max_utterance_s"]),
             timeout_s=float(resolved["asr.timeout_s"]),
@@ -300,6 +326,11 @@ def _open_asr(resolved: dict[str, Any], warnings: list[str]) -> Any:
         provider = "sherpa"
     if provider not in ("sherpa", "local", ""):
         warnings.append(f"未知的 asr.provider {provider!r}，按本机 sherpa 处理")
+    return _open_local_asr(resolved, warnings)
+
+
+def _open_local_asr(resolved: dict[str, Any], warnings: list[str]) -> Any:
+    """本机流式 zipformer。缺模型就返回 ``None``（只唤醒不转写）并说出来。"""
     asr = SherpaStreamingAsrProvider(
         resolved["asr_dir"], num_threads=int(resolved["asr.num_threads"])
     )

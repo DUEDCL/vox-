@@ -359,6 +359,10 @@ EDITABLE: dict[str, tuple[str, ...]] = {
         # 而 `silence_s` 调短一点点就会把句中换气当成句末（表现是「它总打断我」）。
         "asr.provider",
         "asr.model",
+        # `asr.wire` = 云端识别走 WebSocket 流式还是整段 POST（2026-09-05 新增，默认 ws）。
+        # 两条路的结果是同一段文本，差的只有等多久（说完到文本 93 ms vs 2734 ms 实测）——
+        # 性能旋钮，不是边界。出问题时能从页面改回 `"http"` 正是它该放开的理由。
+        "asr.wire",
         "asr.silence_s",
         "asr.max_utterance_s",
         "asr.timeout_s",
