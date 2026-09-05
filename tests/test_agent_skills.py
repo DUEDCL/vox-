@@ -222,7 +222,6 @@ def _dispatcher(adapter, runner):
     router = DefaultRouter((adapter.describe(),))
     return Dispatcher(router, DefaultAggregator(), tool_runner=runner), {"relay": adapter}
 
-
 def test_a_tool_call_is_executed_and_reported_back():
     """完整回路：agent 要求 → 本机执行 → 结果回给它 → 它用一句话汇报。"""
     adapter = ScriptedAdapter([
@@ -276,6 +275,41 @@ def test_a_turn_without_a_call_is_untouched():
     assert runner.calls == []
     assert result.text == "今天多云，二十三度。"
     assert len(adapter.prompts) == 1, "没有调用却跑了第二轮"
+
+
+def test_the_report_round_reaches_the_prewarm_sink_and_the_call_round_does_not():
+    """工具那条路是延迟最差的一条（两次 LLM 往返 + 一次执行），而使用者听到的是**第二轮**。
+
+    所以「让合成提前开始」这个旁路必须接在再问那一轮上。第一轮的文本里带着调用标记 ——
+    它不该被预热（那段文字不会被说出口），而这条断言把两件事一起钉住。
+    """
+    from core.dispatch import DefaultAggregator, DefaultRouter, Dispatcher
+
+    class Chunked(ScriptedAdapter):
+        """按句下发，像真的增量那样。"""
+
+        def stream(self, task):
+            self.prompts.append(task)
+            text = self.replies.pop(0) if self.replies else ""
+            for piece in text.split("|"):
+                yield AgentChunk(kind="text", text=piece)
+            yield AgentChunk(kind="done")
+
+    seen: list[str] = []
+    adapter = Chunked(['⟦vox:tool app.open {"name":"网易云"}⟧', "好，|开好了。|还要别的吗？"])
+    runner = FakeRunner(ToolResult(tool="app.open", ok=True, output="已经打开网易云音乐"))
+    dispatcher = Dispatcher(
+        DefaultRouter((adapter.describe(),)),
+        DefaultAggregator(),
+        tool_runner=runner,
+        on_partial=seen.append,
+    )
+
+    result = dispatcher.dispatch(Task(id="t-1", text="打开网易云"), {"relay": adapter})
+
+    assert result.text == "好，开好了。还要别的吗？"
+    assert seen[0].startswith("⟦vox:"), "第一轮也到了 sink —— 由 sink 自己按标记拒绝"
+    assert seen[-3:] == ["好，", "好，开好了。", "好，开好了。还要别的吗？"]
 
 
 def test_when_the_second_round_fails_the_tool_result_is_still_spoken():

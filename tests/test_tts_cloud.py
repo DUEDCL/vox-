@@ -301,6 +301,97 @@ def test_the_merged_text_is_what_actually_goes_out(monkeypatch):
     assert sent == ["第一句。", "第二。第三。"]
 
 
+# ----------------------------------------------------- 段前空白（预热，2026-09-05）
+
+
+def test_the_first_sentence_can_be_synthesised_before_the_reply_is_finished(monkeypatch):
+    """`_Ahead` 盖住的是**段间**空白，`prewarm()` 盖住的是**段前**空白。
+
+    「说完 → 第一声」里最后一段串行是不必要的：第一句话在 LLM 写完之前就定下来了
+    （文本只往后追加），所以那 0.9 秒的合成可以挪进「LLM 还在写后半段」的时间里。
+
+    断言写成「**播第一段的时候只发过一次请求**」：预热那次就是它，没有重复合成。
+    """
+    monkeypatch.setenv("VOX_DASHSCOPE_KEY", "sk-not-a-real-key")
+
+    class Player:
+        def play(self, samples, sample_rate, **kwargs):
+            del samples, sample_rate, kwargs
+
+        def stop(self) -> None:
+            pass
+
+    transport = FakeTransport()
+    provider = DashScopeTtsProvider(transport=transport, playback=Player())
+
+    assert provider.prewarm("第一句。") is True
+    while len(transport.posted) < 1:  # 预热那个线程
+        time.sleep(0.005)
+
+    provider.speak_segments(["第一句。", "第二句。"])
+
+    assert [payload["input"]["text"] for _url, payload in transport.posted] == ["第一句。", "第二句。"]
+    assert provider.warm_hits == 1 and provider.warm_misses == 0
+
+
+def test_a_prewarmed_sentence_that_no_longer_matches_is_resynthesised(monkeypatch):
+    """**逐字节比对文本才认。** 对不上就重合成一次 —— 播一段和这一轮回答不一样的音频是
+    这个优化唯一能造成的真实伤害，而它听起来完全正常，所以永远查不出来。"""
+    monkeypatch.setenv("VOX_DASHSCOPE_KEY", "sk-not-a-real-key")
+
+    class Player:
+        def play(self, samples, sample_rate, **kwargs):
+            del samples, sample_rate, kwargs
+
+        def stop(self) -> None:
+            pass
+
+    transport = FakeTransport()
+    provider = DashScopeTtsProvider(transport=transport, playback=Player())
+    provider.prewarm("你好。")
+    while len(transport.posted) < 1:
+        time.sleep(0.005)
+
+    provider.speak_segments(["你好。！"])  # split_speech 把只剩标点的一段折了回来
+
+    sent = [payload["input"]["text"] for _url, payload in transport.posted]
+    assert sent == ["你好。", "你好。！"], "对不上就重合成，不能播预热那一段"
+    assert provider.warm_hits == 0 and provider.warm_misses == 1
+
+
+def test_only_one_sentence_is_ever_in_flight_ahead(monkeypatch):
+    """免费额度上的并发限制是真的。第二次 `prewarm()` 必须拒绝而不是再排一个。"""
+    monkeypatch.setenv("VOX_DASHSCOPE_KEY", "sk-not-a-real-key")
+    provider = DashScopeTtsProvider(transport=FakeTransport())
+
+    assert provider.prewarm("第一句。") is True
+    assert provider.prewarm("另一句。") is False
+
+
+def test_a_barge_in_drops_the_prewarmed_sentence(monkeypatch):
+    """留着它的话，下一轮第一句恰好一样时（「好的。」这种）会播出上一轮那次合成的音频。
+
+    那是这个优化最坏的失败形状：听起来完全正常。
+    """
+    monkeypatch.setenv("VOX_DASHSCOPE_KEY", "sk-not-a-real-key")
+    provider = DashScopeTtsProvider(transport=FakeTransport())
+    provider.prewarm("好的。")
+
+    provider.stop()
+
+    assert provider._warm is None
+    assert provider.prewarm("好的。") is False, "stop() 之后不该再排 —— 那一轮已经被打断了"
+
+
+def test_prewarming_without_a_key_is_refused_not_attempted(monkeypatch):
+    """没 key 的时候排一个预热只是在后台线程上多攒一次 401。"""
+    monkeypatch.delenv("VOX_DASHSCOPE_KEY", raising=False)
+    provider = DashScopeTtsProvider(transport=FakeTransport())
+
+    assert provider.prewarm("第一句。") is False
+    assert provider.prewarm("") is False
+
+
 # ------------------------------------------------- 控制台那一侧的四道闸(原因 3/4/5)
 
 

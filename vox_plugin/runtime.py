@@ -37,6 +37,7 @@ from typing import Any, Mapping
 
 from core.agents.contract import AgentChunk, AgentDescriptor, Task
 from core.agents.registry import LLM_AGENT, apply_llm_profile, load_agents_config, open_agents
+from core.agents.skills import OPEN as TOOL_CALL_OPEN
 from core.audio.acks import ACK_MUTE_CAP_S, ACK_MUTE_TAIL_S
 from core.desktop_bridge import DesktopBridge, DesktopBridgeError, find_desktop_binary
 from core.dispatch import DefaultAggregator, DefaultRouter, Dispatcher, DispatchResult
@@ -48,7 +49,7 @@ from core.memory import open_memory
 from core.models_config import active_llm, load_models_config
 from core.state import VoiceState
 from core.tools import open_tools
-from vox_plugin.plugin import VoicePlugin
+from vox_plugin.plugin import VoicePlugin, split_speech
 
 #: Event types the orb answers rather than merely displays.
 _ANSWERED = frozenset({"tool.confirm_required"})
@@ -220,6 +221,11 @@ class VoiceRuntime:
     #: 上一件做完（或被打断）的活的快照。被打断之后问「刚才那个怎么了」是最自然的追问，
     #: 而那时 ``_inflight`` 已经空了 —— 没有这一份，答案只能是「现在没事在做」。
     _last_done: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    #: 这一轮已经把第一句话送去合成了。**每轮至多一次** —— 见 ``_prewarm_speech``。
+    _prewarmed: bool = field(default=False, init=False, repr=False)
+    #: 这一轮要不要预热。``speak=False`` 的调用方（控制台打字、微信）不出声，为它们
+    #: 预热是白花一次合成额度。
+    _prewarm_allowed: bool = field(default=False, init=False, repr=False)
 
     # ------------------------------------------------------------------- wiring
 
@@ -324,6 +330,7 @@ class VoiceRuntime:
                 memory_recaller=self.memory_recaller,
                 on_event=self.on_event,
                 on_detail=self.log,
+                on_partial=self._prewarm_speech,
             )
 
             self.plugin.on_event = self.on_event
@@ -496,6 +503,10 @@ class VoiceRuntime:
             return self._report_progress(text)
         self.plugin.submit_text(text)
         self.turns += 1
+        # 预热是**每轮**的事：上一轮排上过不代表这一轮排上，而 `speak=False` 的调用方
+        # 不出声，为它们合成是白花额度。两个标志都在派发**之前**置好 —— sink 在派发里跑。
+        self._prewarmed = False
+        self._prewarm_allowed = bool(speak)
         task = Task(id=f"t-{self.turns}", text=text, session_id=self.session_id)
         self.log("turn", f"第 {self.turns} 轮：{text[:120]}", turn=self.turns, text=text)
         self._remember_facts(text)
@@ -696,6 +707,55 @@ class VoiceRuntime:
                 "turn",
                 f"接着听下一句（{self.follow_up_seconds():g} 秒内没人说话就收）",
                 follow_up_s=self.follow_up_seconds(),
+            )
+
+    def _prewarm_speech(self, so_far: str) -> None:
+        """第一句话完整的那一刻就把它送去合成，不等 LLM 写完后半段。
+
+        「说完 → 第一声」这个数里最后一段串行是不必要的：现在的顺序是「等 LLM 整轮写完
+        → 切句 → 合成第一段 → 出声」，而**第一句话在 LLM 写完之前就已经定下来了**
+        （文本只往后追加）。把那 0.9 秒的合成挪进「LLM 还在写」的那段时间，它就被盖住了。
+
+        这个优化到 2026-09-05 才有意义：在这之前 LLM 走中转站，那个端点**整轮只下发一个
+        text 块**（实测），所以「增量」在它上面根本不存在。换到百炼之后是 7–8 块真增量。
+
+        ## 三条边界
+
+        **等到 `split_speech` 切出两段才动手。** 一段的时候第一段还会变：`split_speech`
+        会把「只剩标点的一段」折回上一句（`你好。` 后面来一个 `！` 变成 `你好。！`），
+        于是合成好的音频和这一轮真要说的第一段差一个字节，白花一次。两段之后第一段就
+        冻住了 —— 后面追加的字符只会落在第二段之后。
+
+        **看见工具标记就不预热。** 那一轮的回答会被 `_settle_tool_calls` 整个换掉
+        （工具结果回给模型再问一次），预热的是一段不会被说出口的文字。**播错音是不可能
+        的**（`speak_segments` 逐字节比对文本才认），所以代价只是浪费，但那正是不做它的理由。
+
+        **抛出去的异常由 `Dispatcher._watch` 摘掉，这里也自己兜一层。** 预热是旁路：
+        它失败的正确后果是回到原来的顺序，不是让这一轮的回答消失。
+        """
+        if self._prewarmed or not self._prewarm_allowed:
+            return
+        tts = getattr(self.plugin, "tts", None)
+        warm = getattr(tts, "prewarm", None)
+        if not callable(warm):
+            self._prewarmed = True  # 这个 provider 不支持，不必每个 chunk 再问一遍
+            return
+        if TOOL_CALL_OPEN in so_far:
+            return
+        segments = split_speech(so_far)
+        if len(segments) < 2:
+            return
+        self._prewarmed = True
+        try:
+            started = warm(segments[0])
+        except Exception as exc:  # noqa: BLE001 - 旁路，绝不改变这一轮
+            self.log("tts", f"预热没排上：{type(exc).__name__}: {exc}", level="warn")
+            return
+        if started:
+            self.log(
+                "tts",
+                f"第一句已送去合成（{len(segments[0])} 字），LLM 还在写后半段",
+                chars=len(segments[0]),
             )
 
     def _complete_and_watch_tts(self, reply: str, *, speak: bool = True) -> None:

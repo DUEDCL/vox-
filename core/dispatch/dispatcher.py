@@ -147,6 +147,7 @@ class Dispatcher:
         memory_recaller: Any = None,
         on_event: Callable[[dict[str, Any]], None] | None = None,
         on_detail: Callable[..., None] | None = None,
+        on_partial: Callable[[str], None] | None = None,
     ) -> None:
         self.router = router
         self.aggregator = aggregator
@@ -160,6 +161,15 @@ class Dispatcher:
         #: 外部消费者，所以它不带文本和参数；这条只到本机控制台的日志视图，所以它带 ——
         #: 而「``fs.read`` 收到的 path 到底是什么」只有带参数才答得出。
         self._on_detail = on_detail
+        #: 「回答到这里为止是什么」出口，每来一个 text chunk 调一次，参数是**到目前为止
+        #: 拼起来的全文**（不是这一次的增量 —— 调用方要的是「第一句话完整了没有」，而那
+        #: 只能在全文上判）。
+        #:
+        #: 它存在的唯一理由是**让合成提前开始**：`vox_plugin/runtime.py` 接的那一个在第
+        #: 一句话完整的那一刻调 `tts.prewarm()`，于是那 0.9 秒的合成被 LLM 写后半段的时
+        #: 间盖住。所以它是一个**旁路**，不是数据通路 —— 这一轮的回答仍然只由 chunk 决定
+        #: （`DispatchResult.text`），一个抛异常的 sink 只会被摘掉，不会改变任何结果。
+        self._on_partial = on_partial
         #: Event delivery is a side channel and must not change a turn result.
         self.sink_failures = 0
 
@@ -423,7 +433,7 @@ class Dispatcher:
                 reason=reason,
                 ok=False,
             )
-        collected = tuple(self._stream_agents(task, plan, available, started))
+        collected = tuple(self._watch(self._stream_agents(task, plan, available, started)))
         terminal = collected[-1] if collected else None
         ok = terminal is not None and terminal.kind == "done" and not terminal.error
         # agent 要求跑一个工具？跑掉，把结果回给它，再收一次回答。
@@ -459,6 +469,30 @@ class Dispatcher:
             reason=plan.reason,
             ok=ok,
         )
+
+    def _watch(self, chunks: Iterator[AgentChunk]) -> Iterator[AgentChunk]:
+        """原样放行，顺手把「到目前为止的全文」喂给 ``on_partial``。
+
+        `_stream_agents` 已经是增量的了 —— 缺的只是「在 chunk 走向 `tuple()` 的路上看一眼」。
+        所以这一层不改任何 chunk、不吞任何 chunk、不改变顺序。
+
+        **一次失败就摘掉这个 sink（只对这一轮）。** 预热是个优化，它抛异常不该让这一轮的
+        回答消失；而每个 chunk 都重试一个已经坏了的回调只是把一次失败变成几十次。
+        """
+        sink = self._on_partial
+        if sink is None:
+            yield from chunks
+            return
+        buffered = ""
+        for chunk in chunks:
+            if sink is not None and chunk.kind == "text" and chunk.text:
+                buffered += chunk.text
+                try:
+                    sink(buffered)
+                except Exception:  # noqa: BLE001 - 旁路，绝不改变这一轮
+                    self.sink_failures += 1
+                    sink = None
+            yield chunk
 
     def _execute_tool(self, name: str, arguments: Mapping[str, Any]) -> tuple[bool, str]:
         """跑一个 agent 点名的工具。返回 (成功, 给模型看的详情)。
@@ -548,7 +582,11 @@ class Dispatcher:
                 + (f"你刚才要求 {asked}，结果如下。用一句话把结果告诉用户。",)
                 + tuple(results),
             )
-            current = tuple(self._stream_agents(followup, plan, available, started))
+            # **再问那一轮也走 `_watch`。** 工具那条路是延迟最差的一条（两次 LLM 往返 +
+            # 一次工具执行），而**使用者听到的正是这一轮的回答** —— 第一轮的文本里带着调用
+            # 标记，已经被预热那一侧跳过了。`buffered` 每次进 `_watch` 都从空开始，因为
+            # 这一轮的回答会把上一轮的整个换掉。
+            current = tuple(self._watch(self._stream_agents(followup, plan, available, started)))
             last = current[-1] if current else None
             current_ok = last is not None and last.kind == "done" and not last.error
             if not current_ok:

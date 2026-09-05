@@ -87,6 +87,22 @@ class FallbackTts:
     def speak_segments(self, segments: Any, **kwargs: Any) -> Any:
         return self._attempt("speak_segments", segments, **kwargs)
 
+    def prewarm(self, text: str) -> bool:
+        """把「第一句先合成」透传给正在用的那一个。**不走 ``_attempt``。**
+
+        它不该触发降级：预热失败的代价只是回到「等 LLM 写完再合成」这个原来的顺序，而
+        `_attempt` 会把这一次失败 latch 成「本次运行都用本机嗓子」—— 拿一个无害的优化
+        换掉整场对话的音色是完全不成比例的。备用那一把（本机 VITS）没有这个方法，返回
+        ``False`` 即可：调用方只把它当「有没有省到时间」看。
+        """
+        warm = getattr(self.active, "prewarm", None)
+        if not callable(warm):
+            return False
+        try:
+            return bool(warm(text))
+        except Exception:  # noqa: BLE001 - 预热失败就是没预热
+            return False
+
     def stop(self) -> None:
         # 两个都停：切换发生在一次播放中间时，停的必须是真正在响的那一个。
         for provider in (self.primary, self.backup):

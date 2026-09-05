@@ -100,6 +100,7 @@ def build(
     tool_runner: Any = None,
     on_event: Any = None,
     aggregator: Any = None,
+    on_partial: Any = None,
 ) -> tuple[Dispatcher, FakeRouter]:
     router = FakeRouter(plan or DispatchPlan(mode="single", agents=("claude",)))
     dispatcher = Dispatcher(
@@ -108,6 +109,7 @@ def build(
         resolver=resolver,
         tool_runner=tool_runner,
         on_event=on_event,
+        on_partial=on_partial,
     )
     return dispatcher, router
 
@@ -401,6 +403,65 @@ def test_stream_runs_the_tool_path_when_the_intent_is_a_tool():
     out = list(dispatcher.stream(task(), {}))
     assert [chunk.text for chunk in out if chunk.kind == "text"] == ["正文"]
     assert out[-1].kind == "done"
+
+
+# -- on_partial：让合成提前开始（2026-09-05）------------------------------------
+
+
+def test_the_partial_sink_sees_the_answer_grow():
+    """参数是**到目前为止的全文**，不是这一次的增量。
+
+    调用方（`vox_plugin/runtime.py` 的 `_prewarm_speech`）要判的是「第一句话完整了没有」，
+    而那只能在全文上判 —— 逐块给增量的话每个调用方都要自己再攒一份。
+    """
+    seen: list[str] = []
+    adapter = FakeAdapter(
+        AgentChunk(kind="text", text="好，"),
+        AgentChunk(kind="text", text="开好了。"),
+        AgentChunk(kind="text", text="还要别的吗"),
+        done(),
+    )
+    dispatcher, _ = build(on_partial=seen.append)
+
+    result = dispatcher.dispatch(task(), {"claude": adapter})
+
+    assert seen == ["好，", "好，开好了。", "好，开好了。还要别的吗"]
+    assert seen[-1] == result.text, "最后一次必须和这一轮真要说的话逐字节相同"
+
+
+def test_a_partial_sink_that_raises_is_dropped_and_the_turn_is_unharmed():
+    """预热是**旁路**：它抛异常的正确后果是回到「等 LLM 写完再合成」，不是让回答消失。
+
+    摘掉它也是必须的 —— 每个 chunk 都重试一个已经坏了的回调，只是把一次失败变成几十次。
+    """
+    calls: list[str] = []
+
+    def angry(text: str) -> None:
+        calls.append(text)
+        raise RuntimeError("预热坏了")
+
+    adapter = FakeAdapter(
+        AgentChunk(kind="text", text="一"),
+        AgentChunk(kind="text", text="二"),
+        AgentChunk(kind="text", text="三"),
+        done(),
+    )
+    dispatcher, _ = build(on_partial=angry)
+
+    result = dispatcher.dispatch(task(), {"claude": adapter})
+
+    assert result.ok and result.text == "一二三"
+    assert calls == ["一"], "第一次就摘掉，不会喂第二块"
+    assert dispatcher.sink_failures == 1
+
+
+def test_no_partial_sink_changes_nothing():
+    adapter = FakeAdapter(AgentChunk(kind="text", text="正文"), done())
+    dispatcher, _ = build()
+
+    result = dispatcher.dispatch(task(), {"claude": adapter})
+
+    assert result.ok and result.text == "正文"
 
 
 # -- events -------------------------------------------------------------------

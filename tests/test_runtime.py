@@ -1483,3 +1483,154 @@ def test_a_rejected_barge_in_still_left_the_room_quiet():
 
     assert stops, "门没过就连声音都没停 —— 那是修之前的行为"
     assert runtime.wake_stats["rejected"] == 1
+
+
+# -- 让合成提前开始（预热，2026-09-05）-----------------------------------------
+
+
+class WarmTts:
+    """记下 `prewarm` 收到了什么。其余照 `SimpleNamespace` 那几个桩的形状。"""
+
+    def __init__(self, *, accepts: bool = True) -> None:
+        self.warmed: list[str] = []
+        self.spoken: list[list[str]] = []
+        self.accepts = accepts
+
+    def prewarm(self, text: str) -> bool:
+        self.warmed.append(text)
+        return self.accepts
+
+    def speak_segments(self, chunks) -> None:
+        self.spoken.append(list(chunks))
+
+    def is_stopped(self) -> bool:
+        return False
+
+    def stop(self) -> None:
+        pass
+
+
+class StreamingDispatcher:
+    """按块喂 `on_partial`，就像真派发器那样。"""
+
+    def __init__(self, pieces) -> None:
+        self.pieces = list(pieces)
+        self.on_partial = None
+
+    def dispatch(self, task, adapters, *, speaker=None):
+        del task, adapters, speaker
+        buffered = ""
+        for piece in self.pieces:
+            buffered += piece
+            if self.on_partial is not None:
+                self.on_partial(buffered)
+        return DispatchResult(
+            route="agent",
+            chunks=(AgentChunk(kind="text", text=buffered), AgentChunk(kind="done")),
+            ok=True,
+        )
+
+
+def _warm_runtime(tts, pieces):
+    runtime = VoiceRuntime(with_desktop=False, with_memory=False, visible=False)
+    runtime._started = True
+    dispatcher = StreamingDispatcher(pieces)
+    dispatcher.on_partial = runtime._prewarm_speech
+    runtime.dispatcher = dispatcher
+    runtime.adapters = {}
+    runtime.plugin.attach_tts(tts)
+    return runtime
+
+
+def test_the_first_sentence_goes_to_synthesis_before_the_reply_is_finished():
+    """预热的判据不是「快了多少」（计时断言在忙机器上会假红），是**它在回答写完之前
+    就已经拿到第一句话了**，而且拿到的和真要说的第一段逐字节相同。"""
+    tts = WarmTts()
+    runtime = _warm_runtime(tts, ["好，", "开好了。", "还要", "别的吗？"])
+
+    result = runtime.say("打开网易云")
+
+    assert tts.warmed == ["好，开好了。"]
+    assert tts.spoken[0][0] == "好，开好了。", "预热那一段必须就是真要说的第一段"
+    assert result.ok
+
+
+def test_nothing_is_prewarmed_until_the_first_sentence_can_no_longer_change():
+    """一段的时候第一段还会变：`split_speech` 会把「只剩标点的一段」折回上一句
+    （`你好。` 后面来一个 `！` 变成 `你好。！`），于是预热出来的音频差一个字节 —— 白花。"""
+    tts = WarmTts()
+    runtime = _warm_runtime(tts, ["你好。", "！"])
+
+    runtime.say("在吗")
+
+    assert tts.warmed == [], "整段回答只切出一句，预热无从判断第一段已经定下来"
+
+
+def test_a_reply_with_a_tool_call_is_not_prewarmed():
+    """那一轮的回答会被 `_settle_tool_calls` 整个换掉（工具结果回给模型再问一次），
+    预热的是一段不会被说出口的文字。播错音是不可能的（文本逐字节比对），代价只是浪费。"""
+    tts = WarmTts()
+    runtime = _warm_runtime(tts, ["好。", "⟦vox:app.open {\"name\": \"网易云\"}⟧", "开好了。"])
+
+    runtime.say("打开网易云")
+
+    assert tts.warmed == []
+
+
+def test_a_silent_turn_never_spends_a_synthesis():
+    """`speak=False` 的两个调用方（控制台打字、微信）不出声，为它们预热是白花额度。"""
+    tts = WarmTts()
+    runtime = _warm_runtime(tts, ["好，", "开好了。", "还要别的吗？"])
+
+    runtime.say("打开网易云", speak=False)
+
+    assert tts.warmed == []
+
+
+def test_prewarming_happens_at_most_once_per_turn_and_again_next_turn():
+    """每轮至多一次（在途请求最多一个），但**每轮都要试** —— 上一轮排上过不代表这一轮。"""
+    tts = WarmTts()
+    runtime = _warm_runtime(tts, ["一。", "二。", "三。"])
+
+    runtime.say("第一轮")
+    runtime.say("第二轮")
+
+    assert tts.warmed == ["一。", "一。"]
+
+
+def test_a_provider_without_prewarm_is_asked_once_not_every_chunk():
+    """本机那把嗓子没有这个方法。问一次就记住，不必每个 chunk 再 `getattr` 一遍。"""
+    calls = []
+
+    class Counting(SimpleNamespace):
+        def __getattr__(self, name):
+            if name == "prewarm":
+                calls.append(name)
+                raise AttributeError(name)
+            raise AttributeError(name)
+
+    tts = Counting(
+        speak_segments=lambda chunks: None, is_stopped=lambda: False, stop=lambda: None
+    )
+    runtime = _warm_runtime(tts, ["一。", "二。", "三。"])
+
+    result = runtime.say("说点什么")
+
+    assert len(calls) == 1
+    assert result.ok
+
+
+def test_a_prewarm_that_raises_does_not_break_the_turn():
+    """预热是旁路：它失败的正确后果是回到「等 LLM 写完再合成」，不是让这一轮的回答消失。"""
+
+    class Angry(WarmTts):
+        def prewarm(self, text: str) -> bool:
+            raise RuntimeError("排不上")
+
+    tts = Angry()
+    runtime = _warm_runtime(tts, ["好，", "开好了。", "还要别的吗？"])
+
+    result = runtime.say("打开网易云")
+
+    assert result.ok and result.text == "好，开好了。还要别的吗？"
+    assert tts.spoken, "照样出声"

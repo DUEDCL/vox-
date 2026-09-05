@@ -275,6 +275,14 @@ class DashScopeTtsProvider:
     #: 重新搭一次探针。0 = 还没走过 WS 那条路。
     last_first_audio_ms: int = 0
     _stopped: bool = False
+    #: 「第一句话已经在合成了」。`prewarm()` 放进来，`speak_segments` 第一段取走。
+    #: 不是缓存 —— 它只认**下一次**播放的第一段，取走即清。见 `prewarm` 的注释。
+    _warm: Any = None
+    #: 预热赶上了几次 / 排上了但没对上几次。**这是「省到时间了吗」唯一的读数** ——
+    #: 没有它，一个每轮都落空的预热（切句对不上、模型每次都调工具）和一个正常工作的
+    #: 预热在使用者那侧完全同形：都是「有时候快有时候慢」。`describe()` 里报出来。
+    warm_hits: int = 0
+    warm_misses: int = 0
 
     @property
     def available(self) -> bool:
@@ -332,6 +340,8 @@ class DashScopeTtsProvider:
             "sample_rate": int(self.sample_rate),
             "instruction": bool(self.instruction.strip()),
             "last_first_audio_ms": int(self.last_first_audio_ms),
+            "warm_hits": int(self.warm_hits),
+            "warm_misses": int(self.warm_misses),
         }
 
     def synthesize(self, text: str, **_ignored: Any) -> TtsAudio:
@@ -586,18 +596,56 @@ class DashScopeTtsProvider:
             "samples": int(len(audio.samples)),
         }
 
+    def prewarm(self, text: str) -> bool:
+        """趁 LLM 还在写后半段，把**第一句**先送去合成。返回有没有真的排上。
+
+        存在的理由是「说完 → 第一声」这个数里最后一段不必要的串行：现在的顺序是
+        「等 LLM 整轮写完 → 切句 → 合成第一段 → 出声」，而第一句话在 LLM 写完之前
+        就已经定下来了（文本只会往后追加）。把这一段合成挪到 LLM 还在写的时候，
+        它花的那 0.9 秒就被后半段的生成盖住了。
+
+        **和 `_Ahead` 是同一件事的另一半**：那个盖住的是段间空白，这个盖住的是段前空白。
+        在途请求仍然最多一个（`_Ahead` 只在拿到当前段之后才起下一段，而这一段就是当前段）。
+
+        **只认下一次播放的第一段，取走即清。** 做成按文本索引的缓存会引出一个真实的坏
+        形状：同一句话在两轮里出现（「好的。」），第二轮会播出第一轮那次合成的音频 ——
+        听起来完全正常，所以永远不会被发现。
+
+        排不上就返回 ``False``（没 key、被 stop 过、已经有一段在预热），调用方不必判断
+        —— 预热失败的代价只是回到原来的顺序。
+        """
+        body = str(text or "").strip()
+        if not body or self._warm is not None or self._stopped or not self.available:
+            return False
+        try:
+            self._warm = _Ahead(self.synthesize, body)
+        except Exception:  # noqa: BLE001 - 预热失败就是没预热
+            self._warm = None
+            return False
+        return True
+
     def speak_segments(self, segments: Any, **_ignored: Any) -> dict[str, Any]:
         """逐段说，但**下一段在上一段播放期间就合成好**（见 ``_Ahead``）。
 
         ``stop()`` 在段之间生效 —— 打断不该等整段说完。已经预取出来的那一段在打断之后
         **不播**：它花掉的额度收不回来，但让它出声等于「打断之后又说了一句」。
+
+        第一段可能已经由 ``prewarm()`` 在 LLM 还在写的时候排上了。**只有文本逐字节相同
+        才认**：切句是纯函数、文本只往后追加，所以对上是常态；对不上说明预热时读到的
+        前缀被后来的内容改了（`split_speech` 会把只剩标点的一段折回上一句），那时宁愿
+        重合成一次，也不能播一段和这一轮的回答不一样的音频。
         """
         self._stopped = False
         planned = merge_segments(segments)
         # 一次合成是两个往返，各自受 timeout_s 约束；再留一点解码与排队的余量。
         deadline = self.timeout_s * 2 + 5.0
         spoken = 0
-        ahead: _Ahead | None = None
+        warm, self._warm = self._warm, None
+        matched = bool(planned) and warm is not None and warm.text == planned[0]
+        if warm is not None:
+            self.warm_hits += 1 if matched else 0
+            self.warm_misses += 0 if matched else 1
+        ahead: _Ahead | None = warm if matched else None
         for index, text in enumerate(planned):
             if self._stopped:
                 break
@@ -615,6 +663,9 @@ class DashScopeTtsProvider:
 
     def stop(self) -> None:
         self._stopped = True
+        # **预热的那一段跟着丢。** 留着它的话，下一轮第一句恰好一样时（「好的。」这种）
+        # 会播出上一轮那次合成的音频 —— 听起来完全正常，所以永远查不出来。
+        self._warm = None
         if self.playback is not None:
             try:
                 self.playback.stop()
