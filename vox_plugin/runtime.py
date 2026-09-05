@@ -32,6 +32,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Any, Mapping
 
 from core.agents.contract import AgentChunk, AgentDescriptor, Task
@@ -189,6 +190,12 @@ class VoiceRuntime:
     #: 隐式记忆的晋升器（``core/memory/promote.py``）。``None`` = 不自动记 ——
     #: 记忆关掉时它也不该存在，否则会往一个不存在的 store 里写。
     promoter: Any = None
+    #: 提醒的存储（`core/tools/reminders.py`）。**运行时和工具共用同一个对象**，好共用那把
+    #: 锁：工具在派发线程上写，到期检查在 pump 线程上读，而这两个线程一定同时存在。
+    reminders: Any = None
+    #: 上一次查「有没有到期的提醒」是什么时候。**不是每次 pump 都查** —— pump 每 0.5 秒跑
+    #: 一次，而提醒的精度要求远低于那个；2 秒一次读一个几百字节的文件，代价可以忽略。
+    _reminders_checked_at: float = 0.0
     adapters: dict[str, Any] = field(default_factory=dict)
     #: Recognised utterances waiting for a turn. The microphone callback only
     #: ever *enqueues*: running a turn there would block the audio device for
@@ -287,6 +294,9 @@ class VoiceRuntime:
                 # **记忆接上了才有 `memory.recall` 这个工具。** 给一个查不到任何东西的
                 # 记忆工具比没有它更糟：模型会用它，然后据「记忆里没有」下结论。
                 memory_recaller=self.memory_recaller,
+                # 提醒的存储由运行时持有：**到期播报在 pump 那一侧**，而工具只登记。
+                # 一个能自己开口的工具会绕过状态机（球不亮、静音窗不挂、打断不生效）。
+                reminders=self._open_reminders(),
             )
 
             descriptors, self.adapters, agent_warnings = self._open_agents()
@@ -1359,12 +1369,97 @@ class VoiceRuntime:
 
         Blocking belongs here rather than in the callback, so a long answer
         delays only the next turn and never the microphone.
+
+        **到期的提醒也在这里播报。** 这个循环每 0.5 秒跑一次，是唯一一个「常在、且不在音频
+        回调上」的地方 —— 而主动开口必须走和普通回答同一条播报路径（球会亮、静音窗会挂、
+        打断会生效）。放在别处等于让提醒绕过状态机。
         """
+        self._tick_reminders()
         try:
             text = self.utterances.get(timeout=timeout) if timeout else self.utterances.get_nowait()
         except queue.Empty:
             return None
         return self.say(text)
+
+    def _open_reminders(self) -> Any:
+        """提醒的存储。失败就返回 ``None`` —— 那时 `timer.remind` 不注册，而不是注册一个
+        存不下东西的工具（「设好了」然后什么都不会发生是最坏的失败形状）。"""
+        if self.reminders is not None:
+            return self.reminders
+        try:
+            from core.tools.reminders import ReminderStore, default_store_path
+
+            self.reminders = ReminderStore(default_store_path())
+        except Exception as exc:  # noqa: BLE001 - 报出来，不抛
+            self.log("timer", f"提醒存储起不来：{type(exc).__name__}: {exc}", level="warn")
+            self.reminders = None
+        return self.reminders
+
+    def _tick_reminders(self) -> None:
+        """到点了就说出来。**每 2 秒最多查一次**（pump 是 0.5 秒一轮）。
+
+        迟太久的不念只记日志：一个三天前的「记得倒垃圾」念出来只是噪声。而**迟一点的仍然要
+        念** —— 静默丢掉会让使用者以为提醒会来而它永远不来，一次之后他就不再用这个功能了。
+        """
+        store = self.reminders
+        if store is None:
+            return
+        now = time.monotonic()
+        if now - float(self._reminders_checked_at or 0.0) < 2.0:
+            return
+        self._reminders_checked_at = now
+        try:
+            fresh, stale = store.take_due()
+        except Exception as exc:  # noqa: BLE001 - 读不了不该结束 pump
+            self.log("timer", f"读提醒失败：{type(exc).__name__}: {exc}", level="warn")
+            return
+        for row in stale:
+            self.log(
+                "timer",
+                f"有一条提醒迟到太久，没有播报（{row.due_at().strftime('%m-%d %H:%M')}）",
+                level="warn",
+            )
+        for row in fresh:
+            late = (datetime.now() - row.due_at()).total_seconds()
+            prefix = "提醒你：" if late < 90 else f"这是 {int(late // 60)} 分钟前的提醒："
+            try:
+                self.announce(f"{prefix}{row.text}")
+            except Exception as exc:  # noqa: BLE001 - 一条播不出去不该吃掉其余的
+                self.log("timer", f"提醒播报失败：{type(exc).__name__}: {exc}", level="error")
+
+    def announce(self, spoken: str) -> None:
+        """**主动说一句** —— 提醒到点走这条路。
+
+        走完整回合（`submit_text` + `complete_turn`）而不是直接播音频：球要亮、事件序列要齐、
+        运行日志里要看得见。绕过状态机自己发几个事件的「快路径」会让这一次播报在唤醒球和
+        日志里凭空消失，而「它自己说了一句」和「它没反应」必须能分开。
+
+        代价是记忆里多一条「用户轮」，所以那条的文本明确标成 `（提醒到点）` —— 它不是使用者
+        说的话，而把它伪装成使用者说的话会污染「我上次说过什么」。
+
+        **不开连续对话窗口**：没有人在跟它说话，而一个提醒之后开着话筒等 8 秒会把房间里的
+        任何声音当成下一句请求。
+        """
+        body = str(spoken or "").strip()
+        if not body:
+            return
+        # **先把状态机推到 LISTENING。** 空闲时它在 IDLE，而 `submit_text` 只在 LISTENING
+        # 合法 —— 第一版漏了这一步，`announce` 抛 `text can only be submitted while
+        # listening`，而 `_tick_reminders` 把异常吞进日志：提醒**已经从文件里取走了**，
+        # 于是它既没被念出来也不会再来。走 `say()` 用的同一个入口，不是自己搬状态机。
+        self._reach_listening()
+        self.plugin.submit_text(f"（提醒到点）{body}")
+        self.turns += 1
+        self.log("timer", f"主动播报：{body[:120]}", turn=self.turns, route="reminder")
+        self._following_up = False
+        if self.acks is not None or self.plugin.tts is not None:
+            self._mute_input(ACK_MUTE_CAP_S)
+        try:
+            self._complete_and_watch_tts(body)
+        finally:
+            self._mute_input(ACK_MUTE_TAIL_S)
+        self.plugin.end_conversation()
+        self._hide_now()
 
     def _confirm_and_retry(
         self, task: Task, result: DispatchResult, *, speaker: str | None = None

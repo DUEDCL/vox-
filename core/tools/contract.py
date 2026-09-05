@@ -28,6 +28,7 @@ TOOL_NAMES = frozenset(
         "app.open",
         "app.close",
         "system.volume",
+        "timer.remind",
     }
 )
 

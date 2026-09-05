@@ -444,6 +444,11 @@ EDITABLE: dict[str, tuple[str, ...]] = {
         # （`Dispatcher._recall_context()` 把 facts() + recent_turns() 拼进 Task.context）。
         # 这个开关决定的是「谁挑哪一条」—— 关掉就退回纯被动召回。是偏好，不是边界。
         "memory.enabled",
+        # `timer.enabled` = 「二十分钟后提醒我」有没有用（`timer.remind`，2026-09-05 新增）。
+        # **它是唯一让 Vox 主动开口的工具**，所以这个开关的语义比别的重：关掉就退回「只会
+        # 应答」。放开它是因为「要不要让它主动说话」是一条偏好 —— 而想关掉的人多半正想马上
+        # 关掉（比如开会时），去改文件再重启不是那时候能做的事。
+        "timer.enabled",
         # `system.enabled` = 「声音大一点」这句话有没有用（`system.volume`，2026-09-05 新增）。
         # 可逆、无数据损失、后果当场可听见 —— 和 `apps.enabled` 同一档的偏好，不是边界。
         "system.enabled",

@@ -31,6 +31,7 @@ from .mcp import (
     load_mcp_config,
     open_mcp_tools,
 )
+from .reminders import TimerRemindTool
 from .policy import (
     DANGEROUS_PATTERNS,
     SENSITIVE_ENV_MARKERS,
@@ -63,6 +64,7 @@ def open_tools(
     on_event: Any = None,
     memory_writer: Any = None,
     memory_recaller: Any = None,
+    reminders: Any = None,
     search_backend: Any = None,
     mcp: Any = None,
 ) -> ToolRunner:
@@ -134,6 +136,10 @@ def open_tools(
     # 什么」的答案，它不该列出做不到的事。
     if sys.platform == "win32" and resolved.get("system", {}).get("enabled", True):
         runner.register(SystemVolumeTool(resolved))
+    # 提醒只在**存储接上了**的时候才成为一个工具。给一个存不下东西的 `timer.remind` 是最坏
+    # 的失败形状：它会答「好，二十分钟后提醒你」，然后什么都不会发生。
+    if reminders is not None and resolved.get("timer", {}).get("enabled", True):
+        runner.register(TimerRemindTool(resolved, store=reminders))
     if resolved.get("shell", {}).get("enabled", False):
         runner.register(ShellRunTool(resolved))
     if registry is not None:
@@ -163,6 +169,7 @@ __all__ = [
     "SearxBackend",
     "ShellRunTool",
     "SystemVolumeTool",
+    "TimerRemindTool",
     "Tool",
     "ToolPolicy",
     "ToolRequest",

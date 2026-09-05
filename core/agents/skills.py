@@ -62,6 +62,7 @@ REGISTERED: tuple[str, ...] = (
     "time.now",
     "memory.recall",
     "system.volume",
+    "timer.remind",
 )
 
 #: 一轮最多几次工具调用。**2026-09-05 从 1 提到 3。**
@@ -107,6 +108,10 @@ _HOW: Mapping[str, str] = {
     "memory.recall": (
         '翻以前说过的话和记住的偏好。{"query": "买什么"}；'
         "**使用者提到「上次」「之前」「我说过」而你手上没有那件事时，先查这个再回答**"
+    ),
+    "timer.remind": (
+        '提醒。二十分钟后 {"after_minutes": 20, "text": "关火"}；'
+        '某个时刻 {"at": "14:30", "text": "开会"}；看有哪些就传 {}；取消 {"cancel": "关火"}'
     ),
     "system.volume": (
         '音量。大一点 {"delta": 0.1}；小一点 {"delta": -0.1}；'

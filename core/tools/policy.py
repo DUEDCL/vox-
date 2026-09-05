@@ -122,6 +122,15 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # ctypes 绑定），所以关掉它只在 Windows 上有意义。
         "enabled": True,
     },
+    "timer": {
+        # `timer.remind` —— 「二十分钟后提醒我关火」。**这是唯一让 Vox 主动开口的工具**，
+        # 所以它也是唯一会往盘上写使用者说的话的工具（`.vox/reminders.json`，gitignored，
+        # 播报完就删）。记忆库已经是同一个立场，而这里的量小得多、也更短命。
+        #
+        # 关掉它就退回「只会应答」。到期播报在 `pump()` 那一侧走和普通回答同一条路径 ——
+        # 一个能自己开口的工具会绕过状态机（球不亮、静音窗不挂、打断不生效）。
+        "enabled": True,
+    },
     "memory": {
         # `memory.recall` —— 让 agent **主动**翻记忆（`⟦vox:tool memory.recall {"query": …}⟧`）。
         #
