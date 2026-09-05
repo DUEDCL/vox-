@@ -15,6 +15,7 @@ import sys
 from typing import Any, Mapping
 
 from .contract import ORIGINS, TOOL_NAMES, Tool, ToolPolicy, ToolRequest, ToolResult
+from .app_close import AppCloseTool
 from .apps import AppOpenTool
 from .browser import WebOpenTool
 from .clock import TimeNowTool
@@ -118,6 +119,10 @@ def open_tools(
     # web.open_enabled，默认都开 —— 它们不出网、不读文件、不回传。
     if resolved.get("apps", {}).get("enabled", True):
         runner.register(AppOpenTool(resolved))
+        # 关应用和开应用同一个开关：一个只会开不会关的助手在使用路径上是半个。
+        # 非 Windows 上不注册 —— 窗口枚举是 user32 的 ctypes 绑定。
+        if sys.platform == "win32":
+            runner.register(AppCloseTool(resolved))
     if resolved.get("web", {}).get("open_enabled", True):
         runner.register(WebOpenTool(resolved))
     # 记忆只在接上了的时候才成为一个工具。给一个「查不到任何东西」的 memory.recall 比
@@ -143,6 +148,7 @@ __all__ = [
     "ORIGINS",
     "SENSITIVE_ENV_MARKERS",
     "TOOL_NAMES",
+    "AppCloseTool",
     "DefaultToolPolicy",
     "DuckDuckGoBackend",
     "FsReadTool",

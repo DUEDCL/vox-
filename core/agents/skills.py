@@ -55,6 +55,7 @@ from typing import Any, Mapping, Sequence
 #: 而那正是确认卡要回答的唯一问题。
 REGISTERED: tuple[str, ...] = (
     "app.open",
+    "app.close",
     "web.open",
     "web.search",
     "fs.read",
@@ -98,6 +99,7 @@ _CALL = re.compile(
 #: 每个工具怎么用，一句话。给模型看的，所以写的是**它要填什么**而不是实现。
 _HOW: Mapping[str, str] = {
     "app.open": '打开本机应用或网站。{"name": "网易云"}；放歌再带 {"query": "薛之谦"}',
+    "app.close": '关掉一个开着的应用。{"name": "网易云"}；只关它自己看得见的窗口',
     "web.open": '在浏览器里打开一个地址或搜索。{"query": "bilibili.com"}',
     "web.search": '搜网页并拿回摘要。{"query": "sherpa-onnx 版本"}',
     "fs.read": '读一个沙箱内的文件。{"path": "README.md"}',

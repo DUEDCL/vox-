@@ -13,7 +13,7 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 
 #: Built-in tool names. ``shell.run`` is disabled by default in config/tools.toml.
 #:
-#: ``time.now`` / ``app.open`` / ``web.open`` / ``system.volume`` 是「简单的事平台自己做」
+#: ``time.now`` / ``app.open`` / ``app.close`` / ``web.open`` / ``system.volume`` 是「简单的事平台自己做」
 #: 那一类：查时间、打开播放器、打开一个搜索页、调音量 —— 派给 agent 要几秒和一次出网，
 #: 而答案（或那个动作）就在本机。
 TOOL_NAMES = frozenset(
@@ -26,6 +26,7 @@ TOOL_NAMES = frozenset(
         "memory.write",
         "time.now",
         "app.open",
+        "app.close",
         "system.volume",
     }
 )
