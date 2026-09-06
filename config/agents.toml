@@ -14,9 +14,19 @@
 # http 的 token 只从环境变量 VOX_AGENT_HTTP_TOKEN 读(本文件没有放密钥的键);
 # http 的 url 遵循与 EvoX 桥接相同的约束:明文 HTTP 只许回环地址、URL 带凭据一律拒绝。
 #
-# capabilities 目前是自由词表:路由规则在 P6 才定义,此刻它只是给
-# describe() 用的声明,不影响行为。cost 1-5,latency_ms 是自报的预期首字
-# 延迟,两者都只喂给 P6 的路由。
+# capabilities 是自由词表,路由把它当**闸门**用(`task.capabilities <= descriptor.capabilities`)。
+# `local-exec` = 这个后端真的能动这台机器(读写文件、跑命令)。裸的 HTTP 端点没有它 ——
+# relay 此前声明 `code` 而它连文件都读不了,那个假声明让它过了闸并靠"便宜快"胜出,于是
+# 唯一会做事的后端被挤掉。见 docs/adr/008-vox-as-primary-brain.md。
+#
+# **2026-09-01：这道闸门现在生效了。** 在那之前 `vox_plugin/runtime.py` 构造 Task 时不传
+# capabilities,空集是任何集合的子集,所以人人都"有能力" —— 「帮我改一下这个函数」和
+# 「今天天气怎么样」派给同一个后端,而前者那个后端连文件都读不了。现在
+# `core/dispatch/intent.py` 的 `required_capabilities()` 按说法判断这一句要不要一个
+# 真能动机器的后端,命中就带 `code` 去路由,于是 relay(只有 chat/reason)被挡掉。
+# 主脑(ADR 008)将来接进来时**调用方显式给的 capabilities 优先**,推断层不覆盖它。
+#
+# cost 1-5,latency_ms 是自报的预期首字延迟,两者在评分里合计占 70% 权重。
 
 [[agents]]
 name = "claude"
@@ -24,7 +34,30 @@ kind = "cli"
 enabled = true
 command = "claude"
 args = ["-p"]
-capabilities = ["code", "reason", "chat"]
+# 凭据的**变量名**,值仍然只从环境变量读(本文件没有放 token 的键)。
+# 需要这一行的原因是 scrubbed_env() 按标记剔除:`ANTHROPIC_AUTH_TOKEN` 同时含
+# `auth` 和 `token`,`ANTHROPIC_API_KEY` 含 `api_key`,三个标记都在剔除表里,
+# 所以不点名就传不进去。`ANTHROPIC_BASE_URL` 不含任何标记、本来就会被继承,
+# 列它只是把「这套走第三方中转站」写明白。
+#
+# 缺这一行时 CLI 拿到 base_url 但没有 token,中转站回 401,而 CLI 把 401 印成
+# 「Not logged in · Please run /login」—— 那句话读起来像没登录,实际是钥匙没传进来。
+env_passthrough = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"]
+# prompt 走 stdin,不当命令行参数。Windows 上 PATH 里的 `claude` 是个 `.cmd` shim,
+# 而 shim 走 cmd.exe —— cmd.exe 的命令行不能跨行,所以记忆召回一接上(prompt 里就有
+# 换行)子进程只能收到 `Context:` 那一行。第一轮对话正常、第二轮起变成答非所问,
+# 而回合照样报成功。详见 core/agents/cli.py 里 prompt_stdin 那段注释。
+prompt_stdin = true
+# agent 的工作目录。**隔离是刻意的**:裸 CLI 会去读工作目录里的 CLAUDE.md、跑
+# `git status`、随手 glob 到本项目的源码 —— 那些文件和用户那句话通常毫无关系,而它们
+# 会挤掉真正的请求(实测:一句「你好」换回一整段 Vox 项目进度报告)。
+#
+# **2026-09-01 从 ".agent-workspace" 改成仓库之外。** 上一版把它放在仓库**内部**,而那
+# 根本不是一道边界:git 从 cwd 往上找仓库根,于是 `claude` 照样看得见本仓库 ——
+# 实测它的回答里点名了当时正在改的 `cli.py` 与 `environment.py`。
+# `~` 与 `%VAR%` 会被展开,目录不存在会被建出来(见 registry.py 的 `_resolve_cwd`)。
+cwd = "~/.vox/agent-workspace"
+capabilities = ["code", "reason", "chat", "local-exec"]
 cost = 4
 latency_ms = 2500
 timeout_s = 180.0
@@ -41,7 +74,7 @@ kind = "cli"
 enabled = false
 command = "codex"
 args = ["exec"]
-capabilities = ["code", "reason"]
+capabilities = ["code", "reason", "local-exec"]
 cost = 4
 latency_ms = 3000
 timeout_s = 180.0
@@ -49,13 +82,50 @@ timeout_s = 180.0
 [[agents]]
 name = "opencode"
 kind = "cli"
+# 本机实测在 PATH 上(1.2.27)且 `opencode run` 从 stdin 读 prompt。
+#
+# **2026-09-01 关掉。** 不是它坏了 —— 是它从来没被派发过：能力闸门此前不生效
+# （见本文件开头），于是 relay 靠 cost/latency 赢下每一轮，opencode 的历史成绩是
+# 0 成功 0 失败。现在闸门生效了，「写代码」这类请求会落到声明了 `code` 的后端上，
+# 而使用者点名的那个是 claude。留一个从未跑通过的第二 CLI 在里面，只会让
+# 「代码类请求由谁答」变成一个按分数抖动的问题（opencode cost 3 会赢 claude cost 4）。
+# 想用它就把这一行改回 true，并且先单独验一轮。
 enabled = false
 command = "opencode"
 args = ["run"]
-capabilities = ["code", "chat"]
+# 与 claude 同款两条:Windows 上它也是 npm 的 .cmd shim(cmd.exe 命令行不能跨行),
+# 工作目录也必须隔离,而且必须在仓库**之外**(见 claude 那一条的理由)。
+prompt_stdin = true
+cwd = "~/.vox/agent-workspace"
+capabilities = ["code", "chat", "local-exec"]
 cost = 3
 latency_ms = 2500
 timeout_s = 180.0
+
+# 直连一个 OpenAI 兼容端点,不起子进程。比裸 CLI 便宜也快 —— 没有进程启动、没有
+# CLI 自己那套项目扫描,首字延迟就是端点的延迟。token 只从 VOX_AGENT_HTTP_TOKEN 读
+# (本文件没有放密钥的键);url 遵循桥接同款约束:明文 HTTP 只许回环、带凭据的 URL 拒绝。
+[[agents]]
+name = "relay"
+kind = "http"
+enabled = true
+url = "https://api.justwoker.icu/v1"
+model = "claude-opus-5"
+# 去读哪个环境变量拿 bearer token。**名字，不是值** —— 凭据永不进这个文件。
+#
+# 2026-08-31 实测定下来的：这个端点接受 `ANTHROPIC_AUTH_TOKEN`（流式与非流式都回 200），
+# 而 `VOX_AGENT_HTTP_TOKEN` 回 401「无效的令牌」、`VOX_LLM_KEY` 回 401。适配器的默认值是
+# `VOX_AGENT_HTTP_TOKEN`，所以在加这一行之前每一轮对话都失败 —— 而且失败的形状很误导：
+# 流式路径上服务端直接断连，Python 报的是 `URLError: [SSL: UNEXPECTED_EOF_WHILE_READING]`，
+# 看起来像网络/证书问题，实际是凭据不对。
+#
+# 这个键**不可从网页修改**（不在 `AGENT_EDITABLE` 里）：让网页决定读哪个环境变量，
+# 等于让它决定把哪个凭据发到哪个端点。
+key_env = "ANTHROPIC_AUTH_TOKEN"
+capabilities = ["chat", "reason"]
+cost = 2
+latency_ms = 1500
+timeout_s = 120.0
 
 [[agents]]
 name = "evox"

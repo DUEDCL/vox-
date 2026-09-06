@@ -1,0 +1,196 @@
+# 模型方案（多套并存，控制台的「模型配置」那一栏读写本文件）
+#
+# 可用环境变量覆盖本文件位置：VOX_MODELS_CONFIG
+#
+# ## 为什么是「多套方案」而不是三个字段
+#
+# 一套 ASR/TTS/LLM 的组合叫一个 profile。留多套的理由很实际：本机跑一套（离线、
+# 隐私最好、慢），云端跑一套（快、要联网），换服务商时不必把上一套的端点抹掉再
+# 手抄回来 —— 上一版控制台就是三个空输入框，换回去要重新查一遍文档。
+#
+# `active` 指向当前生效的那一套。切换只改这一行。
+#
+# ## 这里永远不写密钥
+#
+# 与 config/agents.toml 同一条规矩：只写**环境变量名**（`key_env`），值一律从环境
+# 变量读。写进本文件的 key 会进版本库、进日志、进事件流 —— 三处都不该有它。
+# 校验层面也会拦：形似密钥的值（长随机串、`sk-` 前缀）直接报错而不是被忽略。
+#
+# ## provider 与 base 的关系
+#
+# `provider` 是 core/console/providers.py 那张预设表里的 slug，填了它就不用写
+# `base`/`proto`（从预设取）。`provider = "custom"` 时三项都要自己写。
+# 预设里的端点**抄自各家文档，本项目没有复验**；控制台上那颗「探一下」按钮才是
+# 判据（它真的发一次 GET {base}/models，401/403 是好结果，404 是路径拼错了）。
+
+active = "local"
+
+# ------------------------------------------------- 当前这一套（唤醒本机，其余上云）
+# **名字 `local` 是历史遗留，内容不是「全本机」。** ADR 008 把红线 1 从「本地优先」改成
+# 「音频本地，算力上云」；ADR 009（2026-09-03）又把识别也搬上云 —— 使用者的指令是「不要再
+# 考虑本地模型了，现在全云端模型」。现在本机只剩**唤醒与声纹**，识别 / 合成 / 推理都在云上。
+# 改 `active` 那一行就能切到别的方案，或者在控制台点「启用这一套」（它会连 voice.toml 一起改）。
+[profiles.local]
+label = "唤醒本机 + 云端识别 / 合成 / 推理"
+
+[profiles.local.asr]
+provider = "custom"
+# **2026-09-05 从 qwen-audio-3.0-asr-flash 换成 fun-asr-flash，理由是量出来的。**
+#
+# 同一段真录音、同一只端点各跑两轮（`.vox-ref/asr_model_race.py`，REAL）：
+#
+# | 模型 | 2.64 s 音频 | 7.15 s 音频 | 写对「沃」 |
+# |---|---|---|---|
+# | `qwen-audio-3.0-asr-flash` | 3609 / 3655 ms | 3797 / 3359 ms | 2/2 |
+# | **`fun-asr-flash-2026-06-15`** | **2250 / 2546 ms** | 3671 / 3500 ms | **2/2** |
+#
+# **短句省 1.1–1.4 秒，长句相当**，而短句是语音助手的常态（「几点了」「打开网易云」）。
+# 准确度这一列必须一起看：一个快 1 秒但把「小沃」写成「小吴」的模型是净损失 —— 那正是
+# 2026-09-03 把识别搬上云的全部理由（本机 14M 模型的字表里没有「沃」）。两个模型都写对了。
+#
+# `qwen3-asr-flash` 试过，**HTTP 400**：它的请求形状与 `qwen-audio-3.0-*` 不同（多模态那套
+# `input_audio` + `parameters.format` 它不认），接它要改 `core/audio/asr_cloud.py` 的 payload。
+#
+# **名字带日期是这一行唯一的隐患**：百炼没给它不带日期的别名，所以这个 tag 下线时会 4xx。
+# 那时的正确动作是重跑上面那个探针挑新的，不是回退到慢的那个。
+model = "fun-asr-flash-2026-06-15"
+# **必须是原生多模态端点，不是 compatible-mode/v1。** 使用者 2026-09-03 报的那个 400
+# 就是这一行写成兼容端点：这一族模型要 `parameters.format`，而 OpenAI 协议里**没有地方放
+# 它**，于是兼容端点恒回 `UNSUPPORTED_FORMAT: format is empty`。
+# 实测原生端点 + `data:audio/wav;base64,…` + `parameters.format` = 200，转写正确。
+base = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation"
+proto = "dashscope"
+key_env = "VOX_ASR_KEY"
+
+# **运行时读的是 config/voice.toml 的 [tts]，不是这里。** 这一栏是控制台上的显示与编辑
+# 面；两处必须一致 —— 而 2026-09-03 起「必须一致」不再靠人记得：控制台点「启用这一套」会把
+# 这里的 model / voice / provider 推进 voice.toml，分岔也会在页面上报出来（key_env 除外，
+# 它决定把哪个凭据发出去，只能改文件）。
+[profiles.local.tts]
+provider = "custom"
+model = "qwen-audio-3.0-tts-plus"
+voice = "longanhuan_v3.6"
+# **原生端点，proto 也是原生的。** 此前这两行写的是 `compatible-mode/v1` + `proto = "openai"`,
+# 而 `core/audio/tts_cloud.py` 打的是 `api/v1/services/audio/tts/SpeechSynthesizer` ——
+# 一个说谎的配置面。ASR 那一栏因为同一个谎回过 400（见上），TTS 这边没炸只是因为运行时
+# 根本不读这两行。
+base = "https://dashscope.aliyuncs.com/api/v1/services/audio/tts"
+proto = "dashscope"
+key_env = "VOX_TTS_KEY"
+
+# 云端推理。**2026-09-05 从中转站的 claude-opus-5 换成百炼的 qwen-plus，理由是量出来的。**
+#
+# 同一句话、同一段系统提示，各跑一次（`.vox-ref/llm_latency_probe.py`，REAL 级）：
+#
+# | 端点 / 模型 | 首字 | 整轮 | text 块 |
+# |---|---|---|---|
+# | 中转站 `claude-opus-5` | **7938 ms** | 7938 ms | **1 条** |
+# | 百炼 `qwen-flash` | 1516 ms | 1641 ms | 7 条 |
+# | 百炼 `qwen-plus` | **1844 ms** | 2297 ms | 8 条 |
+# | 百炼 `qwen3-max` | 1813 ms | 2375 ms | 8 条 |
+#
+# 两件事同时成立：**快 4 倍**，而且**真的增量下发**（中转站把整段攒完一次吐出，所以
+# 「把 LLM 增量喂进 TTS」在它上面一秒都省不到 —— 2026-09-01 就是据此放弃那个优化的）。
+# 中转站的 `/v1/models` 只自报两个模型（`claude-opus-5` 与 `claude-opus-5-thinking`），
+# 其余候选一律 403，所以在那个端点上「换一个更快的模型」这条路根本不存在。
+#
+# 选 plus 不选 flash：工具调用四题两者都是 4/4（`.vox-ref/model_pick_probe.py`），
+# 而 plus 只慢 28 ms（1769 vs 1741 ms 平均首字）—— 那点差价买的是推理余量。
+#
+# **key_env 是新的变量名，值就是这台机器上已有的那把百炼 key**（`VOX_ASR_KEY` /
+# `VOX_TTS_KEY` 里那个 35 字符的）。不直接点名那两个是因为「一个凭据变量只服务一个角色」：
+# 名字叫 ASR 的变量被 LLM 点名之后，换 ASR 服务商就会把对话一起弄坏 —— 那正是
+# `VOX_DASHSCOPE_KEY` 的教训（见下面那段历史）。
+#
+# **这个变量没设的时候不会退步。** `apply_llm_profile` 会检查它在不在位，空的话整条不套用、
+# 对话仍走 `agents.toml` 里的 relay，并在启动警告里说清缺哪个变量。
+[profiles.local.llm]
+provider = "custom"
+model = "qwen-plus"
+base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+proto = "openai"
+# **key_env 指向 `VOX_ASR_KEY`，这是一个刻意的、有代价的决定（2026-09-05 当天改了两次）。**
+#
+# 第一版写的是新变量名 `VOX_QWEN_KEY`，理由是那条铁律「一个凭据变量只服务一个角色」。
+# 结果实测：那个变量在这台机器上是空的，于是 `apply_llm_profile` 正确地拒绝套用，
+# **整个改进一次都没有生效** —— 助手仍然走 7.9 秒首字的中转站，而使用者要做的是「去控制台
+# 存一个 key」。一个需要使用者动手才生效的性能改进，在他动手之前等于不存在。
+#
+# 所以现在指向已经装着百炼 key 的那个变量。**铁律没有被违反**，因为它禁止的是「一个变量被
+# **两个不同服务商**的角色点名」（`VOX_DASHSCOPE_KEY` 那次：TTS 打百炼、LLM 打中转站，
+# 于是为一边填的值让另一边 401）。这里 ASR 与 LLM 打的是**同一个服务商、同一把 key** ——
+# 和那四个中转站变量装同一个值是一样的形状。
+#
+# **代价说清楚，它是真的**：换掉 ASR 服务商时必须同时改这一行，否则对话会跟着一起坏。
+# 换的时候的判据是启动警告 —— `apply_llm_profile` 会报「要从 X 读凭据而那个变量是空的」。
+# 想彻底解耦就把百炼 key 也存进 `VOX_QWEN_KEY` 并把这一行改回去，那条路一个字都没删。
+key_env = "VOX_ASR_KEY"
+
+# ------------------------------------------------------- 退路：中转站上的 claude-opus-5
+# 上一套（2026-09-05 之前的出厂配置）。留着它是因为换回去应当是**改一行 `active`**，
+# 不是去翻 git 历史。代价写在这里：首字 7.9 秒、且不增量下发。
+#
+# **key_env 2026-09-01 从 VOX_DASHSCOPE_KEY 改成 VOX_LLM_KEY。** 一个名字叫 DASHSCOPE 的
+# 变量被这条（端点是中转站）点名，于是为了让聊天能用而往它里面存的是中转站的 key ——
+# 而 config/voice.toml 的 TTS 读的正是那个变量，百炼回 401 InvalidApiKey，表现为
+# 「回答不出声」。一个变量只服务一个角色。
+[profiles.opus]
+label = "退路：中转站 claude-opus-5（慢 4 倍，但不需要百炼 key）"
+
+[profiles.opus.asr]
+provider = "custom"
+model = "fun-asr-flash-2026-06-15"
+base = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation"
+proto = "dashscope"
+key_env = "VOX_ASR_KEY"
+
+[profiles.opus.tts]
+provider = "custom"
+model = "qwen-audio-3.0-tts-plus"
+voice = "longanhuan_v3.6"
+base = "https://dashscope.aliyuncs.com/api/v1/services/audio/tts"
+proto = "dashscope"
+key_env = "VOX_TTS_KEY"
+
+[profiles.opus.llm]
+provider = "custom"
+model = "claude-opus-5"
+base = "https://api.justwoker.icu/v1"
+proto = "openai"
+key_env = "VOX_LLM_KEY"
+
+# ---------------------------------------------------------------- 云端 LLM
+# 语音仍然本机（红线不动），只有 LLM 出网。这是最常用的一套。
+[profiles.cloud-llm]
+label = "本机语音 + 云端 LLM"
+
+[profiles.cloud-llm.asr]
+provider = "sherpa-local"
+model = "zipformer-zh-14M"
+
+[profiles.cloud-llm.tts]
+provider = "sherpa-local"
+model = "vits-zh-single"
+
+[profiles.cloud-llm.llm]
+provider = "deepseek"
+model = "deepseek-chat"
+key_env = "VOX_LLM_KEY"
+
+[profiles.test]
+label = "test"
+
+[profiles.test.asr]
+provider = "sherpa-local"
+model = "zipformer-zh-14M"
+
+[profiles.test.tts]
+provider = "openai"
+model = "vits-zh-single"
+
+[profiles.test.llm]
+provider = "custom"
+model = "claude-opus-5"
+base = "https://api.justwoker.icu/v1"
+proto = "openai"
+key_env = "VOX_LLM_KEY"

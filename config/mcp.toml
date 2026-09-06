@@ -1,0 +1,53 @@
+# MCP（Model Context Protocol）服务器注册表
+#
+# 形状由 contracts/mcp.schema.json 校验。可用环境变量覆盖本文件位置：VOX_MCP_CONFIG
+#
+# **这里永远不写密钥。** 本文件没有放 token 的键（写了会校验失败）。子进程默认拿到
+# 清洗过的环境（凭据形状的变量全部剔除），要给某个 server 传 key 就在
+# env_passthrough 里写**变量名**，值仍然只从环境变量读 —— 与 agents.toml 同一立场。
+#
+# MCP 工具走的是**和语音、和 agent 完全同一道门**（core/tools/policy.py）。
+# 它们不另开路径，因为红线 2 要求「agent 拿不到用户语音拿不到的能力」，
+# 反过来也成立：一个远端工具不该拿到本地工具拿不到的许可。
+#
+# 三层默认关：
+#   1. [mcp] enabled = false —— 总开关，出厂关；
+#   2. 每个 [[servers]] 自己的 enabled —— 出厂关；
+#   3. require_confirmation = true —— 每次调用都要在唤醒球上确认，
+#      除非那个工具名写进了该 server 的 auto_allow。
+#
+# 为什么默认要确认：一个 MCP server 的工具能做的事没有上界（写文件、发网络请求、
+# 改数据库）。`shell.run` 的四层防护是因为「说一句话就能执行命令」；一个远端工具
+# 同样是一句话就能执行别人的代码，所以起点相同。
+
+[mcp]
+# 总开关。关着的时候 mcp.* 工具一个都不注册，policy 也一律拒。
+enabled = false
+
+# 单次 tools/call 超时（秒）。握手另有自己的短超时。
+timeout_s = 30
+
+# 远端返回文本的截断上限（字节）。远端输出是**不可信输入**：它进不了事件流，
+# 也只以截断后的形式进上下文 —— 与 web.search 只留摘要不留正文同一个理由。
+max_output_bytes = 20000
+
+# 每次调用是否需要显式确认。收窄的唯一方式是 server 的 auto_allow 名单。
+require_confirmation = true
+
+# --- 示例条目，全部默认关。打开前请先读那个 server 的文档确认它能做什么。 ---
+
+# [[servers]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+# enabled = false
+# # 空 allow = 该 server 暴露的所有工具都可用（最宽设置）。
+# allow = ["read_file", "list_directory"]
+# # 免确认名单。只读工具放这里是合理的；写工具不要放。
+# auto_allow = ["list_directory"]
+
+# [[servers]]
+# name = "memory"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-memory"]
+# enabled = false

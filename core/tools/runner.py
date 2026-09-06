@@ -17,12 +17,63 @@ Two rules about what leaves this module:
 from __future__ import annotations
 
 import time
+import re
 from typing import Any, Mapping
 
 from core.events import AGENT_SCHEMA_PATH, build_event, validate_event
 
 from .contract import Tool, ToolRequest, ToolResult
 from .policy import DefaultToolPolicy
+
+
+_SAFE_EVENT_REASONS = frozenset(
+    {
+        "path is outside the sandbox",
+        "path is required",
+        "query is required",
+        "command is required",
+        "command is not on the allow-list",
+        "no verified speaker",
+        "confirmation required",
+        "tool is not registered",
+        "unknown tool",
+        "unknown origin",
+        "no search backend is configured",
+        "fs tools are disabled",
+        "web tools are disabled",
+        "shell tools are disabled",
+        "mcp tools are disabled",
+        "tool is not on the allow-list",
+        "tool is not on the server's allow-list",
+        "the remote tool reported an error",
+        "tool failed",
+    }
+)
+_SAFE_EVENT_PATTERNS = (
+    re.compile(r"^exit code -?\d+$"),
+    re.compile(r"^timed out$"),
+    re.compile(r"^search backend failed: [A-Za-z_][A-Za-z0-9_]*$"),
+    re.compile(r"^could not start: [A-Za-z_][A-Za-z0-9_]*$"),
+    re.compile(r"^blocked shape: [a-z ]+$"),
+)
+
+
+def _event_reason(error: str | None) -> str:
+    """Keep tool events diagnostic but never content-bearing.
+
+    Tool implementations are replaceable and may be third-party code. Their
+    ``ToolResult.error`` is useful to the local caller, but it is not safe to
+    fan out to every event sink because it can contain paths, command output,
+    search text, or exception messages.
+    """
+    if not isinstance(error, str):
+        return "tool failed"
+    candidate = error.strip()
+    if candidate in _SAFE_EVENT_REASONS:
+        return candidate
+    if any(pattern.fullmatch(candidate) for pattern in _SAFE_EVENT_PATTERNS):
+        return candidate
+    return "tool failed"
 
 
 class ToolRunner:
@@ -40,9 +91,14 @@ class ToolRunner:
         self.tools: dict[str, Tool] = dict(tools or {})
         self.on_event = on_event
         self.memory_writer = memory_writer
+        #: MCP servers this runner owns, if any. Held so ``close()`` can reap the
+        #: subprocesses: they are children of this process and nothing else is in a
+        #: position to end them.
+        self.mcp: Any = None
         self.executed = 0
         self.refused = 0
         self.confirmations = 0
+        self.sink_failures = 0
         #: Audit rows the memory layer would not accept (its credential filter
         #: applies to tool rows too). Counted, not retried.
         self.audit_dropped = 0
@@ -50,10 +106,26 @@ class ToolRunner:
     def register(self, tool: Tool) -> None:
         self.tools[tool.name] = tool
 
+    def close(self) -> None:
+        """Release the MCP subprocesses. Idempotent; safe with none attached."""
+        registry, self.mcp = self.mcp, None
+        if registry is not None:
+            try:
+                registry.close()
+            except Exception:
+                # Teardown is best-effort. A server that will not die must not
+                # prevent the rest of the runtime from shutting down.
+                pass
+
     def _emit(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         event = validate_event(build_event(event_type, payload), AGENT_SCHEMA_PATH)
         if self.on_event is not None:
-            self.on_event(event)
+            try:
+                self.on_event(event)
+            except Exception:
+                # Event delivery is a side channel; it must not change the tool
+                # decision or make a local tool failure look like a crash.
+                self.sink_failures += 1
         return event
 
     def _audit(self, request: ToolRequest, result: ToolResult) -> None:
@@ -103,7 +175,7 @@ class ToolRunner:
                     {
                         "tool": request.tool,
                         "origin": request.origin,
-                        "reason": verdict.error or "refused",
+                        "reason": _event_reason(verdict.error or "refused"),
                     },
                 )
             self._audit(request, verdict)
@@ -122,7 +194,7 @@ class ToolRunner:
                 {
                     "tool": request.tool,
                     "origin": request.origin,
-                    "reason": result.error,
+                    "reason": _event_reason(result.error),
                 },
             )
             self._audit(request, result)
@@ -149,7 +221,7 @@ class ToolRunner:
                 "origin": request.origin,
                 "ok": result.ok,
                 "duration_ms": elapsed_ms,
-                **({} if result.ok else {"reason": result.error or "failed"}),
+                **({} if result.ok else {"reason": _event_reason(result.error)}),
             },
         )
         self._audit(request, result)
@@ -162,10 +234,13 @@ class ToolRunner:
             "executed": self.executed,
             "refused": self.refused,
             "confirmations": self.confirmations,
+            "sink_failures": self.sink_failures,
             "audit_dropped": self.audit_dropped,
             "audit_attached": self.memory_writer is not None,
         }
         describe = getattr(self.policy, "describe", None)
         if callable(describe):
             report["policy"] = describe()
+        if self.mcp is not None:
+            report["mcp"] = self.mcp.describe()
         return report

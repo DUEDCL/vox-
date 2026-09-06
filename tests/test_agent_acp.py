@@ -18,7 +18,7 @@ import sys
 
 import pytest
 
-from core.agents.acp import AcpAgentAdapter, AcpAgentError
+from core.agents.acp import AcpAgentAdapter, AcpAgentError, _terminate
 from core.agents.contract import Task
 
 
@@ -177,6 +177,25 @@ def test_a_timeout_is_a_failed_chunk():
     assert "timed out" in chunks[-1].error
 
 
+def test_terminate_swallows_a_second_wait_timeout():
+    class StuckProcess:
+        def __init__(self):
+            self.killed = False
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, *, timeout):
+            raise subprocess.TimeoutExpired("stuck", timeout)
+
+    process = StuckProcess()
+    _terminate(process)
+    assert process.killed is True
+
+
 def test_cancel_terminates_an_inflight_turn():
     slow = """
 import json, sys, time
@@ -207,4 +226,3 @@ for line in sys.stdin:
 def test_a_misconfigured_adapter_is_refused_at_construction():
     with pytest.raises(AcpAgentError):
         AcpAgentAdapter(name="mock", command="")
-

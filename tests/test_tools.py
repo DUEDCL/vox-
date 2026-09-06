@@ -88,9 +88,19 @@ def fake_search(query, limit):
 # -- configuration -----------------------------------------------------------
 
 
-def test_shipped_config_keeps_the_shell_shut():
+def test_the_shipped_config_opens_the_shell_behind_three_gates():
+    """**2026-09-03 出厂配置把 shell 打开了** —— 使用者点名要「能直接执行终端命令」。
+
+    所以这里断言的不再是「关着」，而是**开着的那三个条件**：白名单非空且只读、白名单内
+    仍要确认、未验证的说话人进不来。少任何一条，这个 true 就不可接受。
+    危险模式在代码里（不可配置），那一条由 tests/test_tool_security.py 管。
+    """
     config = load_tools_config()
-    assert config["shell"]["enabled"] is False
+
+    assert config["shell"]["enabled"] is True
+    assert config["shell"]["allow"], "开着但白名单是空的"
+    assert config["shell"]["require_confirmation"] is True
+    assert config["shell"]["require_verified_speaker"] is True
     assert config["fs"]["enabled"] is True
 
 
@@ -375,6 +385,47 @@ def test_a_tool_that_raises_is_reported_not_propagated(config):
     assert result.error == "ValueError: boom"
 
 
+def test_a_tool_exception_message_does_not_reach_the_event(config):
+    class Broken:
+        name = "fs.read"
+
+        def describe(self):
+            return {"name": self.name}
+
+        def run(self, request):
+            raise ValueError("secret output and C:/private/file.txt")
+
+    events: list[dict] = []
+    tools = ToolRunner(policy=DefaultToolPolicy(config), on_event=events.append)
+    tools.register(Broken())
+
+    result = tools.run(ToolRequest(tool="fs.read", arguments={"path": "x.md"}))
+
+    assert result.error == "ValueError: secret output and C:/private/file.txt"
+    refused = events[-1]
+    assert refused["type"] == "tool.refused"
+    assert refused["payload"]["reason"] == "tool failed"
+    serialised = json.dumps(events, ensure_ascii=False)
+    assert "secret output" not in serialised
+    assert "C:/private/file.txt" not in serialised
+
+
+def test_event_sink_failure_does_not_change_the_tool_result(config, tmp_path):
+    class SinkFailure:
+        def __call__(self, _event):
+            raise RuntimeError("bridge is gone")
+
+    tools = ToolRunner(policy=DefaultToolPolicy(config), on_event=SinkFailure())
+    tools.register(FsReadTool(config))
+    (tmp_path / "a.md").write_text("hi", encoding="utf-8")
+
+    result = tools.run(ToolRequest(tool="fs.read", arguments={"path": "a.md"}))
+
+    assert result.ok is True
+    assert result.output == "hi"
+    assert tools.sink_failures == 2
+
+
 def test_every_decision_lands_in_the_long_layer(config, tmp_path):
     store = SqliteMemoryStore(":memory:")
     writer = MemoryWriter(store)
@@ -437,8 +488,16 @@ def test_runner_describe_counts_without_naming_arguments(runner, tmp_path):
 
 
 def test_open_tools_leaves_the_shell_unregistered_while_it_is_off(config):
+    """``shell.run`` 不在里面，而「简单的事平台自己做」那几个在。
+
+    断言的是 ``shell.run`` 的缺席和其余的在场，不是一个精确的集合 —— 加一个不碰文件、
+    不出网的工具（``time.now``）不该让这条测试变红，而 ``shell.run`` 溜进来必须。
+    """
     tools = open_tools(config)
-    assert tools.describe()["registered"] == ["fs.read", "web.search"]
+
+    registered = tools.describe()["registered"]
+    assert "shell.run" not in registered
+    assert {"fs.read", "web.search", "time.now", "app.open", "web.open"} <= set(registered)
 
 
 def test_open_tools_registers_the_shell_once_it_is_on(config):
@@ -448,9 +507,14 @@ def test_open_tools_registers_the_shell_once_it_is_on(config):
 
 def test_the_shipped_wiring_reports_what_the_gate_enforces():
     report = open_tools().describe()
-    assert report["policy"]["shell_enabled"] is False
+    # 2026-09-03：出厂配置打开了 shell（见上面那条）。这里要看的是**报告如实**——
+    # 一个说「关着」而其实开着的就绪清单比没有清单更糟。
+    assert report["policy"]["shell_enabled"] is True
+    assert report["policy"]["shell_allow_count"] > 0
     assert report["policy"]["dangerous_patterns"] >= 13
-    assert report["policy"]["warnings"] == []
+    # **开着就要有一条警告。** 这句话读起来像在自责，但它是对的：白名单再窄，
+    # 语音转写听错一句仍然可能落在一条能跑的命令上。就绪清单要印它。
+    assert any("shell.run is enabled" in line for line in report["policy"]["warnings"])
 
 
 def test_importing_the_package_starts_nothing(config):
@@ -458,3 +522,29 @@ def test_importing_the_package_starts_nothing(config):
     tools = open_tools(config)
     assert tools.executed == 0
     assert WebSearchTool(config).describe()["backend_configured"] is False
+
+
+def test_every_registered_tool_can_get_past_the_policy_gate():
+    """**「注册了」不等于「跑得动」，而两者分岔时所有测试都是绿的。**
+
+    2026-09-05 实测：`weather.now` 已经 `register()` 了、已经在 `core/agents/skills.REGISTERED`
+    里、已经在控制台页面上列出来了，而 `contract.TOOL_NAMES`（政策门的入口白名单）里没有它
+    —— 于是每一次调用都回 `unknown tool`，而当时那个工具自己的 12 条测试全绿：它们验的是
+    「在不在清单里」，不是「过不过那道门」。
+
+    这一条是那个缺口的通用护栏：**注册了什么就必须能过门**。加一个新工具而忘了 `TOOL_NAMES`，
+    这里会红，而且红在「加工具」那一次而不是在真机上。
+
+    MCP 那一族除外：它们的名字在运行时才知道，门里有自己的分支（`mcp.` 前缀）。
+    """
+    from core.tools.contract import TOOL_NAMES
+
+    registered = set(open_tools().describe()["registered"])
+    missing = sorted(
+        name for name in registered if not name.startswith("mcp.") and name not in TOOL_NAMES
+    )
+
+    assert missing == [], (
+        "这些工具注册了但政策门不认它们，每次调用都会回 unknown tool —— "
+        "把它们加进 core/tools/contract.py 的 TOOL_NAMES：" + ", ".join(missing)
+    )

@@ -6,6 +6,36 @@ from typing import Any
 
 from .base import ProviderStatus, ProviderUnavailable
 
+#: 解码束宽。**这是纯召回参数，不改判定标准。**
+#:
+#: 唤醒词的假设路径要和普通转写路径竞争束里的位置，束太窄时它在信噪比低的地方会先被剪掉 ——
+#: 表现是「在安静房间里叫得应，有人说话/开着风扇就叫不应」，而每一层都报告自己健康。
+#:
+#: **16 而不是 sherpa-onnx 的默认 4。** 2026-09-01 实测（本人三段真录音 + 加白噪声，
+#: 正样本 5 次机会；负样本是本人念的另一个唤醒词「你好问问」三遍加纯噪声）：
+#:
+#: | beam | 干净 | 20dB | 15dB | 10dB | 5dB | 0dB | -5dB | -10dB | 误唤醒 |
+#: |---|---|---|---|---|---|---|---|---|---|
+#: | **4（旧默认）** | 5/5 | 5/5 | 5/5 | 5/5 | **4/5** | **2/5** | 3/5 | 2/5 | 0 |
+#: | 8 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | **5/5** | 3/5 | 4/5 | 0 |
+#: | **16** | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | **5/5** | 4/5 | 4/5 | 0 |
+#: | 32 | 5/5 | — | — | — | — | 5/5 | 5/5 | 5/5 | 0 |
+#:
+#: 代价基本为零：每块耗时 1.10 ms（beam 4）→ 1.21 ms（beam 16），都是 100 ms 预算的
+#: 1% 左右 —— 这个模型只有 3.3M 参数，固定成本在编码器上，束搜索几乎不花钱。
+#:
+#: **为什么不取 32**：它的召回更好，但「误唤醒 0」这个数字在只有约 25 秒非唤醒词语音的
+#: 样本上统计功效很低，不足以支撑跳到最宽的那一档。想更激进就改 `config/voice.toml` 的
+#: `wake.max_active_paths` —— 一次误唤醒的代价被声纹门吃掉（记一条拒绝，不产生动作），
+#: 所以这个方向是可以试的，只是要自己测。
+DEFAULT_MAX_ACTIVE_PATHS = 16
+
+#: 唤醒词 token 的加分。抬的是「到达关键词的容易程度」，不是「算出来的分算不算通过」。
+DEFAULT_KEYWORDS_SCORE = 1.0
+
+#: 出词前要求多少个静音帧。大了更稳、更慢。
+DEFAULT_TRAILING_BLANKS = 1
+
 
 class SherpaKeywordProvider:
     """Lazy, local Sherpa-ONNX keyword spotter.
@@ -24,6 +54,9 @@ class SherpaKeywordProvider:
         keywords_threshold: float = 0.25,
         num_threads: int = 2,
         provider: str = "cpu",
+        max_active_paths: int = DEFAULT_MAX_ACTIVE_PATHS,
+        keywords_score: float = DEFAULT_KEYWORDS_SCORE,
+        num_trailing_blanks: int = DEFAULT_TRAILING_BLANKS,
     ) -> None:
         self.model_dir = Path(model_dir)
         self.model_suffix = model_suffix
@@ -31,6 +64,9 @@ class SherpaKeywordProvider:
         self.keywords_threshold = keywords_threshold
         self.num_threads = num_threads
         self.execution_provider = provider
+        self.max_active_paths = int(max_active_paths)
+        self.keywords_score = float(keywords_score)
+        self.num_trailing_blanks = int(num_trailing_blanks)
         self._spotter: Any = None
 
     @property
@@ -54,6 +90,9 @@ class SherpaKeywordProvider:
                 keywords_threshold=self.keywords_threshold,
                 num_threads=self.num_threads,
                 provider=self.execution_provider,
+                max_active_paths=self.max_active_paths,
+                keywords_score=self.keywords_score,
+                num_trailing_blanks=self.num_trailing_blanks,
             )
         except Exception as exc:
             self._spotter = None

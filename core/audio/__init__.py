@@ -12,6 +12,14 @@ from __future__ import annotations
 from .asr import AsrResult, SherpaStreamingAsrProvider
 from .base import ProviderStatus, ProviderUnavailable
 from .capture import SounddeviceWakeCapture
+from .config import (
+    VoiceConfigError,
+    default_voice_config,
+    load_voice_config,
+    model_paths,
+    resolve_device,
+    resolve_keywords_file,
+)
 from .kws import SherpaKeywordProvider
 from .playback import SounddevicePlayback
 from .ring import AudioRingBuffer
@@ -42,6 +50,12 @@ __all__ = [
     "SpeakerVerificationProvider",
     "TtsAudio",
     "VerificationResult",
+    "VoiceConfigError",
     "VoxCordAdapter",
+    "default_voice_config",
     "load_speaker_config",
+    "load_voice_config",
+    "model_paths",
+    "resolve_device",
+    "resolve_keywords_file",
 ]

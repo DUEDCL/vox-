@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Vox — 尺寸调参</title>
+<style>
+  /* 这一页是**调参台**，不是设计稿：所有色值仍然只来自 src/style.css，
+     这里只排版控件。滑块调的两个数最后要落回 style.css 的 --orb 与
+     core.ts 的 BALL，所以页面把当前值原样显示出来，照抄即可。 */
+  html,body{height:auto!important;overflow:auto!important;margin:0}
+  body{background:#0b0d12;color:#dfe6ef;
+       font:14px/1.6 'Segoe UI Variable Display','Segoe UI','Microsoft YaHei',sans-serif}
+  .wrap{display:grid;grid-template-columns:300px 1fr;min-height:100vh}
+  .panel{padding:20px;background:#12151c;border-right:1px solid #222835;position:sticky;top:0;align-self:start}
+  .panel h1{margin:0 0 4px;font-size:22px;font-weight:600;letter-spacing:-.01em}
+  .panel p{margin:0 0 18px;font-size:14px;opacity:.62}
+  label{display:block;margin:14px 0 4px;font-size:14px}
+  label b{font-family:'Cascadia Mono',Consolas,monospace;color:#8fd0ff}
+  input[type=range]{width:100%}
+  .out{margin-top:18px;padding:11px 12px;background:#0b0e14;border:1px solid #232a37;
+       font:14px/1.7 'Cascadia Mono',Consolas,monospace;color:#b6e3b0;white-space:pre-wrap}
+  .stage{display:grid;grid-template-rows:1fr 1fr}
+  .band{display:grid;place-items:center;gap:14px;padding:26px}
+  .dark{background:radial-gradient(120% 120% at 20% 10%,#2b3a4a,#131a22 45%,#0a0d12)}
+  .light{background:linear-gradient(135deg,#eef1f5,#cfd8e3 60%,#aab6c4)}
+  .row{display:flex;gap:26px;align-items:center;flex-wrap:wrap;justify-content:center}
+  .cell{display:grid;justify-items:center;gap:8px}
+  .cell figure{margin:0;position:relative}
+  .cell canvas{display:block}
+  .cell code{font:14px 'Cascadia Mono',Consolas,monospace;opacity:.7}
+  .light .cell code{color:#25303c}
+  .states{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .states button{font:14px 'Cascadia Mono',Consolas,monospace;padding:6px 10px;cursor:pointer;
+    background:#1a1f29;color:#cfe2f5;border:1px solid #2b3342}
+  .states button[aria-pressed=true]{background:#2b4a68;border-color:#4b7ba8;color:#fff}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="panel">
+    <h1>尺寸调参</h1>
+    <p>拖到满意，把下面那两行原样发给我，我落进 style.css 与 core.ts。</p>
+
+    <label>布局盒 <b><span id="vOrb">140</span> px</b>（球 + 外发光的总尺寸 = CSS <code>--orb</code>）</label>
+    <input type="range" id="rOrb" min="96" max="340" step="2" value="140">
+
+    <label>球 / 布局盒 <b><span id="vBall">0.857</span></b>（剩下的是外发光的余量 = core.ts <code>BALL</code>）</label>
+    <input type="range" id="rBall" min="0.50" max="1.00" step="0.002" value="0.857">
+
+    <label>音量 amplitude <b><span id="vAmp">0.85</span></b></label>
+    <input type="range" id="rAmp" min="0.12" max="1" step="0.01" value="0.85">
+
+    <div class="states" id="states"></div>
+    <div class="out" id="out"></div>
+  </div>
+
+  <div class="stage">
+    <div class="band dark"><div class="row" id="rowDark"></div></div>
+    <div class="band light"><div class="row" id="rowLight"></div></div>
+  </div>
+</div>
+<script type="module">
+import './src/style.css';
+import { CorollaBreath, bloomLevel, ringLevel, ringRate, bloomSpring } from './src/core.ts';
+
+const STATES = ['idle','listening','thinking','speaking','cancelled','error','gated'];
+let state = 'thinking', lanes = 1, amp = 0.85;
+let orbPx = 140, ballRatio = 0.857;   // 已落定：球 120px + 每边 10px 泛光余量
+
+/* 三个尺寸并排：当前值、当前值 ×0.75、当前值 ×1.25 —— 「最佳大小」很难靠一个
+   孤立的球判断，给两个邻居才看得出它是偏大还是偏小。 */
+const SCALES = [0.75, 1, 1.25];
+
+function build(row) {
+  return SCALES.map((k) => {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    const fig = document.createElement('figure');
+    const box = document.createElement('div');
+    const cv = document.createElement('canvas');
+    box.appendChild(cv);
+    fig.appendChild(box);
+    const tag = document.createElement('code');
+    cell.append(fig, tag);
+    row.appendChild(cell);
+    return { core: new CorollaBreath(cv), box, cv, tag, k,
+             bloom: 0.52, ring: 0, vel: 0 };
+  });
+}
+const cells = [
+  ...build(document.getElementById('rowDark')),
+  ...build(document.getElementById('rowLight')),
+];
+
+const btns = STATES.map((s) => {
+  const b = document.createElement('button');
+  b.type = 'button'; b.textContent = s;
+  b.onclick = () => { state = s; sync(); };
+  document.getElementById('states').appendChild(b);
+  return b;
+});
+
+function palette(box) {
+  const cs = getComputedStyle(box);
+  const pick = (k) => cs.getPropertyValue(k).trim();
+  return { core: pick('--lum-core'), mid: pick('--lum-mid'), far: pick('--lum-far'),
+           alt: pick('--lum-alt'), glass: pick('--glass'), edge: pick('--edge') };
+}
+
+function sync() {
+  const gated = state === 'gated';
+  const st = gated ? 'thinking' : state;
+  for (const c of cells) {
+    const px = Math.round(orbPx * c.k);
+    c.box.dataset.state = st;
+    if (gated) c.box.dataset.confirm = 'true'; else delete c.box.dataset.confirm;
+    c.box.style.width = c.box.style.height = px + 'px';
+    c.cv.style.width = c.cv.style.height = px + 'px';
+    c.core.ballRatio = ballRatio;
+    c.pal = palette(c.box);
+    c.px = px;
+    c.tag.textContent = `${px}px · 球 ${Math.round(px * ballRatio)}px`;
+  }
+  for (const b of btns) b.setAttribute('aria-pressed', String(b.textContent === state));
+  document.getElementById('vOrb').textContent = String(orbPx);
+  document.getElementById('vBall').textContent = ballRatio.toFixed(3);
+  document.getElementById('vAmp').textContent = amp.toFixed(2);
+  document.getElementById('out').textContent =
+    `style.css   --orb: ${orbPx}px;\ncore.ts     const BALL = ${ballRatio.toFixed(4)};\n` +
+    `球的直径     ${(orbPx * ballRatio).toFixed(1)}px\n外发光余量   每边 ${((orbPx * (1 - ballRatio)) / 2).toFixed(1)}px`;
+}
+
+const bind = (id, set) => {
+  const el = document.getElementById(id);
+  el.addEventListener('input', () => { set(parseFloat(el.value)); sync(); });
+};
+bind('rOrb', (v) => { orbPx = v; });
+bind('rBall', (v) => { ballRatio = v; });
+bind('rAmp', (v) => { amp = v; });
+sync();
+
+/* 主循环用与 main.ts **逐字相同**的两条式子（弹簧 + 成环速率），
+   所以这一页看到的转场就是真机上的转场。 */
+let t = 0;
+(function loop() {
+  t += 0.016;
+  for (const c of cells) {
+    const gated = state === 'gated';
+    const f = { state: gated ? 'thinking' : state, t, amplitude: amp, lanes,
+                gated, palette: c.pal, bloom: c.bloom, ring: c.ring, pulse: 0 };
+    const sp = bloomSpring(f.state);
+    c.vel += (bloomLevel(f) - c.bloom) * sp.k - c.vel * sp.d;
+    c.bloom += c.vel;
+    if (c.bloom > 1) { c.bloom = 1; if (c.vel > 0) c.vel = 0; }
+    if (c.bloom < 0) { c.bloom = 0; if (c.vel < 0) c.vel = 0; }
+    const rt = ringLevel(f);
+    c.ring += (rt - c.ring) * ringRate(rt, c.ring);
+    if (Math.abs(rt - c.ring) < 0.004) c.ring = rt;
+    f.bloom = c.bloom; f.ring = c.ring;
+    c.core.resize(c.px);
+    c.core.draw(f);
+  }
+  requestAnimationFrame(loop);
+})();
+window.__SIZE_READY__ = true;
+</script>
+</body>
+</html>

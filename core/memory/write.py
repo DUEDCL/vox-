@@ -121,13 +121,21 @@ class MemoryWriter:
         self.session_id = session_id
         self.short_keep = short_keep
         self.refusals = 0
+        #: Event delivery is a side channel; writes remain local and durable
+        #: even when their sink is unavailable.
+        self.sink_failures = 0
         #: Reason for the most recent refusal. The offending text is *not* kept.
         self.last_refusal: dict[str, Any] | None = None
 
     def _emit(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         event = validate_event(build_event(event_type, payload), AGENT_SCHEMA_PATH)
         if self.on_event is not None:
-            self.on_event(event)
+            try:
+                self.on_event(event)
+            except Exception:
+                # Never let a log/transport failure roll back or hide the
+                # successful memory write.
+                self.sink_failures += 1
         return event
 
     def _refuse(self, scope: str, kind: str, reason: str) -> None:
@@ -360,6 +368,7 @@ class MemoryWriter:
             {
                 "facts_dir": str(self.facts_dir) if self.facts_dir else None,
                 "refusals": self.refusals,
+                "sink_failures": self.sink_failures,
                 "last_refusal": self.last_refusal,
                 "session_id": self.session_id,
             }

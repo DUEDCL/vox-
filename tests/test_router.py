@@ -375,7 +375,15 @@ def test_describe_reports_wiring_without_task_text():
     assert report["agents"] == ["a"]
     assert report["breaker"] is True
     assert report["memory"] is True
-    assert set(report) == {"agents", "weights", "in_flight", "breaker", "memory"}
+    assert set(report) == {
+        "agents",
+        "weights",
+        "in_flight",
+        "breaker",
+        "memory",
+        # 「配了但这台机器上没有」是路由结果的一半原因，所以它必须在读数里。
+        "unavailable",
+    }
 
 
 def test_score_is_pure_and_plan_is_not():
@@ -395,3 +403,89 @@ def test_custom_weights_override_the_defaults():
     )
     (entry,) = router.score(task())
     assert entry.total == 1.0
+
+
+# ------------------------------- 「配了，但这台机器上没有」（2026-09-01）
+
+
+def test_an_agent_the_machine_does_not_have_is_not_routed_to():
+    """``config/agents.toml`` 刻意保留命令不在 PATH 上的条目（丢掉它会让「少一个 agent」
+    和「配错一个 agent」无法区分）。代价是路由会选中一个跑不起来的后端 —— 实测这台机器上
+    `claude` 装在 `%APPDATA%\npm`，那个目录不在 PATH 上。
+
+    保留条目 + 路由时跳过，两件事合起来才对。
+    """
+    router = DefaultRouter([descriptor("cheap", cost=1), descriptor("dear", cost=5)])
+    assert router.plan(task()).agents == ("cheap",)
+
+    router.mark_unavailable("cheap", "'cheap' is not on PATH")
+
+    assert router.plan(task()).agents == ("dear",)
+    # 清单里仍然看得见它 —— 那是「配了但没装」和「没配」的分界。
+    assert "cheap" in router.describe()["agents"]
+    assert router.describe()["unavailable"]["cheap"] == "'cheap' is not on PATH"
+
+
+def test_marking_available_again_restores_routing():
+    """重新检查发现它回来了（用户装上了、或把目录加进 PATH）。"""
+    router = DefaultRouter([descriptor("cheap", cost=1), descriptor("dear", cost=5)])
+    router.mark_unavailable("cheap")
+    assert router.plan(task()).agents == ("dear",)
+
+    router.mark_available("cheap")
+
+    assert router.plan(task()).agents == ("cheap",)
+
+
+def test_the_reason_separates_not_installed_from_tripped():
+    """两种「没得选」要说不同的话：一个要去装，一个等它自愈。合成一句话两种都查不动。"""
+    router = DefaultRouter([descriptor("only")])
+    router.mark_unavailable("only", "'only' is not on PATH")
+
+    plan = router.plan(task())
+
+    assert plan.agents == ()
+    assert "is installed on this machine" in plan.reason
+    assert "is not on PATH" in plan.reason
+
+
+def test_a_capability_blocked_by_availability_says_which_agent_had_it():
+    """**这一条是「能力闸门 + 后端没装」那个组合的唯一线索。**
+
+    闸门把这一句正确地判给了唯一能做的后端，而那个后端这台机器上没有。不说出来的话读到的
+    是「no agent has code」，看起来像配置里少写了一个能力词 —— 而真实情况是 PATH。
+    """
+    router = DefaultRouter(
+        [
+            descriptor("cli", capabilities={"chat", "code"}),
+            descriptor("http", capabilities={"chat"}),
+        ]
+    )
+    router.mark_unavailable("cli", "'cli' is not on PATH")
+
+    plan = router.plan(task(capabilities={"code"}))
+
+    assert plan.agents == ()
+    assert "no available agent has code" in plan.reason
+    assert "cli has it but is 'cli' is not on PATH" in plan.reason
+
+
+def test_unavailability_and_the_breaker_are_independent():
+    """熔断记「它一直失败」（会自愈），这里记「这台机器上没有」（只有重新检查才变）。
+    一个把两者塞进同一个集合的实现会让熔断的半开状态把没装的后端放回来。"""
+
+    class OpenBreaker:
+        def allows(self, agent):
+            return agent != "tripped"
+
+        def record(self, agent, *, ok):
+            pass
+
+    router = DefaultRouter(
+        [descriptor("tripped", cost=1), descriptor("missing", cost=2), descriptor("fine", cost=3)],
+        breaker=OpenBreaker(),
+    )
+    router.mark_unavailable("missing")
+
+    assert router.plan(task()).agents == ("fine",)
+    assert [entry.agent for entry in router.score(task())] == ["fine"]

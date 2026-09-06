@@ -15,9 +15,17 @@ class VoiceState(StrEnum):
     ERROR = "error"
 
 
+#: 允许的迁移。**六个状态本身是冻结的**（见 .claude/CLAUDE.md 与
+#: `contracts/voice-events.schema.json` 的 SHA-256），这张表是它们之间的边。
+#:
+#: `LISTENING -> IDLE` 是 2026-08-30 加的一条边，理由是一个真实缺陷：唤醒之后没人说话时
+#: 聆听会结束（流式识别器静默 2.4 秒就报端点），而此前没有任何一条边能表达「听完了但
+#: 什么都没听到」—— 于是状态机只能停在 LISTENING，唤醒球一直显示「在听」，而采集已经
+#: 回到唤醒模式了。用 CANCELLED 代替是错的：那一步会发 `turn.cancelled`，而这里根本没有
+#: 过一个回合。`SPEAKING -> IDLE` 早就在表里，所以「从非终态回待机」不是新姿态。
 _ALLOWED: dict[VoiceState, set[VoiceState]] = {
     VoiceState.IDLE: {VoiceState.LISTENING},
-    VoiceState.LISTENING: {VoiceState.THINKING, VoiceState.CANCELLED, VoiceState.ERROR},
+    VoiceState.LISTENING: {VoiceState.THINKING, VoiceState.IDLE, VoiceState.CANCELLED, VoiceState.ERROR},
     VoiceState.THINKING: {VoiceState.SPEAKING, VoiceState.CANCELLED, VoiceState.ERROR},
     VoiceState.SPEAKING: {VoiceState.LISTENING, VoiceState.IDLE, VoiceState.CANCELLED, VoiceState.ERROR},
     VoiceState.CANCELLED: {VoiceState.IDLE, VoiceState.LISTENING},

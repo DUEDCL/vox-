@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from core.agents.contract import Task
+from core.agents.environment import describe_host
 from core.agents.http import HttpAgentAdapter, HttpAgentError
 
 
@@ -87,7 +88,33 @@ def test_a_chat_completions_request_is_sent_with_model_and_stream():
         sent = json.loads(payload)
         assert sent["model"] == "claude"
         assert sent["stream"] is True
-        assert sent["messages"][0]["content"] == "讲个笑话"
+        assert sent["messages"][1] == {"role": "user", "content": "讲个笑话"}
+    finally:
+        _stop(server, thread)
+
+
+def test_a_system_message_states_the_real_host_before_the_user_turn():
+    """system message 必须在,而且必须说这台机器真实的操作系统。
+
+    不发它时,模型看到的唯一 system prompt 是**端点自己注入的那份**。实测中转站注入的
+    那份说「操作系统是 linux,当前工作目录是 /」,于是它给 Windows 用户建议 X11 与
+    PulseAudio —— 一段语法正确、事实全错的回答,而 TTS 会把它念出来。
+
+    断言里不写死 "Windows":这个仓库跑在哪台机器上不是测试该规定的事。断言的是
+    **它报的和 platform 报的一致**,那才是「不许猜」这条要求。
+    """
+    body = b'{"choices":[{"message":{"content":"ok"}}]}'
+    server, thread, received = serve(body)
+    try:
+        adapter = HttpAgentAdapter(name="mock", url=f"http://127.0.0.1:{server.server_port}/v1")
+        list(adapter.stream(task("现在几点")))
+        sent = json.loads(received[0][1])
+        system = sent["messages"][0]
+        assert system["role"] == "system"
+        assert describe_host() in system["content"]
+        # 两条它自己猜不到、猜错了就会念出错误答案的事。
+        assert "没有" in system["content"]  # 没有文件系统/终端
+        assert "朗读" in system["content"]  # 回答会被念出来
     finally:
         _stop(server, thread)
 
@@ -152,3 +179,54 @@ def test_cancel_is_safe_on_an_unknown_turn():
     adapter = HttpAgentAdapter(name="mock", url="http://127.0.0.1:1")
     adapter.cancel("never-started")  # must not raise
 
+
+
+def test_the_credential_variable_can_be_named_in_config(monkeypatch):
+    """``key_env`` 指名去读哪个环境变量。**名字，不是值。**
+
+    2026-08-31 实机：relay 的有效凭据在 `ANTHROPIC_AUTH_TOKEN` 里，而适配器只读
+    `VOX_AGENT_HTTP_TOKEN`，于是每一轮对话都被端点拒掉。更糟的是失败的形状 —— 流式路径上
+    服务端直接断连，Python 报 `URLError: [SSL: UNEXPECTED_EOF_WHILE_READING]`，看起来像
+    证书或网络问题，而真实原因是凭据不对。
+    """
+    monkeypatch.setenv("VOX_AGENT_HTTP_TOKEN", "default-one")
+    monkeypatch.setenv("SOME_OTHER_RELAY_KEY", "the-right-one")
+
+    named = HttpAgentAdapter(name="relay", url="https://example.test/v1", key_env="SOME_OTHER_RELAY_KEY")
+    fallback = HttpAgentAdapter(name="relay", url="https://example.test/v1")
+
+    assert named.token == "the-right-one"
+    assert fallback.token == "default-one", "没指名就用默认那个变量"
+
+
+def test_check_reports_the_variable_name_but_never_the_value(monkeypatch):
+    """`token_configured: true` 不够用 —— 两个变量都有值时它对两边都是 true，
+    于是「凭据放错变量了」这件事在读数里看不见。名字必须报出来，值绝不。"""
+    monkeypatch.setenv("SOME_OTHER_RELAY_KEY", "sk-secret-value-here")
+
+    view = HttpAgentAdapter(
+        name="relay", url="https://example.test/v1", key_env="SOME_OTHER_RELAY_KEY"
+    ).check()
+
+    assert view["key_env"] == "SOME_OTHER_RELAY_KEY"
+    assert view["token_configured"] is True
+    assert "sk-secret-value-here" not in json.dumps(view)
+
+
+def test_the_credential_variable_is_not_editable_from_a_web_page():
+    """反向断言，而且它比上面两条重要：让网页决定读哪个环境变量，等于让它决定把哪个凭据
+    发到哪个端点。值走 /api/secret（有白名单），变量**名**留在配置文件里。"""
+    from core.console.routes import AGENT_EDITABLE
+
+    assert "key_env" not in AGENT_EDITABLE
+    assert "url" not in AGENT_EDITABLE
+
+
+def test_the_shipped_relay_names_the_variable_that_actually_works():
+    """`core/config_edit.py` 只改已存在的键，而 registry 只透传 schema 认识的键 ——
+    所以这一行必须真的在文件里。2026-08-31 实测这个端点只接受 ANTHROPIC_AUTH_TOKEN。"""
+    from core.agents.registry import load_agents_config
+
+    config = load_agents_config()
+    relay = next(entry for entry in config["agents"] if entry["name"] == "relay")
+    assert relay["key_env"] == "ANTHROPIC_AUTH_TOKEN"

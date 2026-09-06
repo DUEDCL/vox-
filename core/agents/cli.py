@@ -43,6 +43,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from core.tools.policy import scrubbed_env
 
 from .contract import AgentChunk, AgentDescriptor, Task, render_prompt
+from .environment import speech_brief
 
 #: Substituted into ``args``. Absent, the prompt is appended as the last argument
 #: -- which is what ``claude -p``, ``codex exec`` and ``opencode run`` all want.
@@ -91,6 +92,19 @@ class CliAgentAdapter:
     cwd: str | None = None
     #: Variable names -- not values -- the child is allowed to inherit.
     env_passthrough: tuple[str, ...] = ()
+    #: 把 prompt 从 stdin 送进去，而不是当命令行参数。
+    #:
+    #: Windows 上 npm 装的 CLI 在 PATH 里是一个 ``.cmd`` shim，而 shim 走 cmd.exe ——
+    #: **cmd.exe 的命令行不能跨行**，所以一个带换行的 prompt 会在第一个换行处被截断。
+    #: 记忆召回一接上就有换行（``render_prompt`` 的 ``Context:`` 那几行），于是
+    #: ``claude -p`` 收到的只剩 ``Context:`` 一行，它按一个空请求去回答，而这一回合
+    #: 照样报成功 —— **静默错，不是失败**。第一轮对话（还没有记忆）正常，第二轮起坏，
+    #: 这是最难查的那种形状。
+    #:
+    #: ``_CMD_UNSAFE`` 拒的是 ``"`` 和 ``%``，换行是同一类缺口的漏项；把它也加进拒绝表
+    #: 的结果是「有记忆之后就不能对话」，那不是修复。stdin 绕开整条命令行，换行在管道
+    #: 里没有任何特殊含义。
+    prompt_stdin: bool = False
     max_output_bytes: int = 200_000
     #: Lines that were not valid JSON in ``jsonl`` mode. Banners and progress
     #: noise are expected; counted so diagnostics can show the adapter is being
@@ -110,6 +124,12 @@ class CliAgentAdapter:
         self.args = tuple(self.args)
         self.capabilities = frozenset(self.capabilities)
         self.env_passthrough = tuple(self.env_passthrough)
+        if self.prompt_stdin and any(PROMPT_PLACEHOLDER in arg for arg in self.args):
+            # 两处都放 prompt 等于放了两遍,或者一处是空的 —— 配置错误报出来,
+            # 不要留给运行时去表现成"agent 好像没听懂"。
+            raise CliAgentError(
+                f"agent {self.name!r}: prompt_stdin 与 {PROMPT_PLACEHOLDER} 占位符互斥"
+            )
 
     # -- contract ---------------------------------------------------------
 
@@ -135,7 +155,8 @@ class CliAgentAdapter:
                     kind="done", error="cancelled", elapsed_ms=self._ms(started)
                 )
                 return
-        command, problem = spawn_target(self.build_argv(render_prompt(task)))
+        prompt = self._prompt_for(task)
+        command, problem = spawn_target(self.build_argv(prompt))
         if problem is not None:
             yield AgentChunk(kind="done", error=problem, elapsed_ms=self._ms(started))
             return
@@ -144,7 +165,8 @@ class CliAgentAdapter:
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                stdin=subprocess.DEVNULL,
+                # DEVNULL 仍是默认：一个不需要输入的子进程不该有一根等着它的管道。
+                stdin=subprocess.PIPE if self.prompt_stdin else subprocess.DEVNULL,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -162,6 +184,8 @@ class CliAgentAdapter:
             return
         with self._lock:
             self._live[task.id] = process
+        if self.prompt_stdin:
+            self._feed_prompt(process, prompt)
         try:
             yield from self._pump(task, process, started)
         finally:
@@ -175,9 +199,55 @@ class CliAgentAdapter:
         if process is not None and process.poll() is None:
             _terminate(process)
 
+    @staticmethod
+    def _feed_prompt(process: subprocess.Popen[str], prompt: str) -> None:
+        """把 prompt 写进 stdin，然后**立刻关掉**。
+
+        不关的话子进程会一直等更多输入 —— 一个读到 EOF 才开工的 CLI 会挂到超时，
+        而超时会被报成「这个 agent 很慢」，不是「我们没关管道」。
+
+        写失败静默吞掉：子进程可能已经退出了，那条失败会以带 ``error`` 的终结 chunk
+        到达（这个适配器的失败一律是 chunk 不是异常）；在这里再抛一次只会让同一个故障
+        有两种形状。
+        """
+        stream = process.stdin
+        if stream is None:
+            return
+        try:
+            stream.write(prompt)
+        except OSError:
+            pass
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
     # -- argv and environment ---------------------------------------------
 
+    def _prompt_for(self, task: Task) -> str:
+        """要发给子进程的那段文字：语音提示 + 召回的上下文 + 用户那句话。
+
+        **CLI 后端此前完全不知道这是语音。** 它是本机进程，操作系统和工作目录自己知道，
+        所以 ``environment.py`` 那一整段 system prompt 对它是噪音 —— 但「回答会被念出来」
+        这一件它猜不到。2026-09-01 端到端实测：`claude` 对「帮我改一下这个函数」答了两段
+        约 130 字，念完 30 秒。那不是它的错。
+
+        ``speech_brief()`` 约束的是**汇报**而不是干活（见那里的注释）。放在最前面是因为
+        后面紧跟着 ``Context:`` 那几行召回内容，而指令夹在数据中间容易被忽略。
+
+        **分隔符按通道选。** 走 stdin 时用空行（读起来清楚）；走命令行参数时用一个空格 ——
+        cmd.exe 的命令行不能跨行，而 `.cmd` shim 就走 cmd.exe，所以在那条路上加一个换行
+        等于让 ``%1`` 只剩提示、用户那句话整段消失。这不是假设：`prompt_stdin` 那段注释
+        记的就是同一个坑（记忆召回一接上就有换行，于是第二轮起答非所问而回合照报成功）。
+        """
+        separator = "\n\n" if self.prompt_stdin else " "
+        return f"{speech_brief()}{separator}{render_prompt(task)}"
+
     def build_argv(self, prompt: str) -> list[str]:
+        if self.prompt_stdin:
+            # prompt 走管道,命令行里就不该再有它的副本。
+            return [self.command, *self.args]
         if any(PROMPT_PLACEHOLDER in arg for arg in self.args):
             return [
                 self.command,
@@ -194,19 +264,30 @@ class CliAgentAdapter:
         return env
 
     def check(self) -> dict[str, Any]:
-        """Is the command on PATH? Deliberately outside ``AgentAdapter``.
+        """Is the command reachable? Deliberately outside ``AgentAdapter``.
 
         Availability is host state, not a capability declaration, so it stays out
         of ``AgentDescriptor`` where red line 2 restricts the field types.
+
+        ``path`` 报的是**解析后的绝对路径**，因为 ``which`` 会去 PATH 之外的一个目录找
+        （见它的注释）—— 不报出来的话「它到底跑的是哪个文件」就成了猜测。找不到时的原话
+        点名那个后备目录，否则读的人会去 PATH 里翻一个本来就不该在 PATH 里的东西。
         """
         resolved = which(self.command)
+        if resolved is not None:
+            missing = {}
+        else:
+            extra = ", ".join(_extra_search_dirs()) or "(no fallback dir)"
+            missing = {
+                "reason": f"{self.command!r} 不在 PATH 上，也不在 {extra}",
+            }
         return {
             "name": self.name,
             "kind": "cli",
             "available": resolved is not None,
             "output": self.output,
             "unparsed_lines": self.unparsed,
-            **({"path": resolved} if resolved else {"reason": f"{self.command!r} is not on PATH"}),
+            **({"path": resolved} if resolved else missing),
         }
 
     # -- streaming --------------------------------------------------------
@@ -340,15 +421,47 @@ def _drain(stream: Any, events: queue.Queue[tuple[str, str | None]], tag: str) -
 
 
 def _terminate(process: subprocess.Popen[str]) -> None:
+    """Best-effort termination that never masks the stream's own outcome."""
     try:
         process.terminate()
-        try:
-            process.wait(timeout=_GRACE_S)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=_GRACE_S)
     except (OSError, ValueError):
+        return
+    try:
+        process.wait(timeout=_GRACE_S)
+        return
+    except subprocess.TimeoutExpired:
         pass
+    except (OSError, ValueError):
+        return
+    try:
+        process.kill()
+    except (OSError, ValueError):
+        return
+    try:
+        process.wait(timeout=_GRACE_S)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        # A stubborn child is still a cleanup failure, not a new agent error.
+        pass
+
+
+#: PATH 之外还去看的目录。**只有一条，而且有具体的理由。**
+#:
+#: 2026-09-01 实测这台机器：`claude.cmd` 装在 `%APPDATA%\npm`，而那个目录**既不在用户
+#: PATH 也不在系统 PATH 里**（`[Environment]::GetEnvironmentVariable("Path","User"/"Machine")`
+#: 两个都不含 npm）。npm 在 Windows 上装全局包时不会自己去改 PATH，所以这是默认状态而
+#: 不是这台机器配坏了。
+#:
+#: 后果不是「少一个 agent」：能力闸门会把「帮我改一下这个函数」正确地判给 claude，然后
+#: 这一轮失败或降级到一个动不了机器的后端。而 `check()` 报的原话是
+#: 「'claude' is not on PATH」—— 技术上对，但读的人会去查 PATH，而 PATH 里本来就不该有它。
+#:
+#: 为什么不算扩大攻击面：能写进 `%APPDATA%\npm` 的人已经能改写用户所有的 npm 全局命令，
+#: 包括用户自己在终端里敲的那些。这里只是让 Vox 找到和用户手动敲 `claude` 时**本该**
+#: 找到的同一个文件。解析结果会出现在 `check()` 的 ``path`` 里，所以它不是隐式行为。
+def _extra_search_dirs() -> tuple[str, ...]:
+    """npm 全局 bin。取不到环境变量就返回空 —— 不去猜路径。"""
+    appdata = os.environ.get("APPDATA", "").strip()
+    return (str(Path(appdata) / "npm"),) if appdata else ()
 
 
 def which(command: str) -> str | None:
@@ -358,8 +471,19 @@ def which(command: str) -> str | None:
     on Windows ``shutil.which`` is what applies ``PATHEXT`` -- without it, a
     ``claude`` that exists only as ``claude.cmd`` is reported available by
     ``check()`` and then fails to start.
+
+    PATH 先查，查不到再看 ``_extra_search_dirs()``（见那里的注释）。绝对路径或带目录分隔
+    的命令**不走后备**：调用方已经说清了要哪个文件，再去别处找就是替它改主意。
     """
-    return shutil.which(command, path=os.environ.get("PATH"))
+    found = shutil.which(command, path=os.environ.get("PATH"))
+    if found is not None:
+        return found
+    if os.sep in command or (os.altsep and os.altsep in command):
+        return None
+    extra = _extra_search_dirs()
+    if not extra:
+        return None
+    return shutil.which(command, path=os.pathsep.join(extra))
 
 
 def spawn_target(argv: Sequence[str]) -> tuple[list[str] | str, str | None]:

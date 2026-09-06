@@ -25,11 +25,13 @@ rebuilding this object.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterator, Mapping
 
 from core.agents.contract import AgentChunk, Task
+from core.agents.skills import MAX_CALLS, parse_calls, render_result, strip_calls
 from core.dispatch.contract import (
     Aggregator,
     DispatchPlan,
@@ -39,6 +41,46 @@ from core.dispatch.contract import (
 )
 from core.events import AGENT_SCHEMA_PATH, build_event, validate_event
 from core.tools.contract import ToolRequest
+
+
+#: 一轮对话里最多回去问模型几次。**这不是 `MAX_CALLS` 的复读**：那个数管的是「执行了几个
+#: 工具」，这个管的是「多花了几次 LLM 往返」，而后者才是使用者等待的来源。
+#:
+#: 同一轮里的多个调用一次执行完，所以「查时间 + 开应用」这类独立请求只用掉一次往返，
+#: 而**依赖**前一步结果的第二步会占掉第二次。2 是有意留窄的：语音的耐心以秒计，
+#: 而每一次往返在百炼 flash 档是 1.5–2.4 s（2026-09-05 实测）。
+MAX_TOOL_ROUNDS = 2
+
+
+_SAFE_FAILURE_REASONS = frozenset(
+    {
+        "stream ended without a terminal chunk",
+        "no agents available",
+    }
+)
+_SAFE_FAILURE_PATTERNS = (
+    re.compile(r"^exit -?\d+$"),
+    re.compile(r"^timed out after \d+(?:\.\d+)?s$"),
+    re.compile(r"^output exceeded \d+ characters$"),
+)
+
+
+def _public_failure_reason(error: str | None) -> str:
+    """Return a safe task-event summary, never an agent-provided message.
+
+    Agent stderr and protocol error fields can contain the prompt, a reply, or
+    credentials echoed by a backend. They remain available on the internal
+    ``AgentChunk`` for local handling, but the event stream fans out to
+    logs/transports and may only carry fixed, shape-validated summaries.
+    """
+    if not isinstance(error, str):
+        return "agent reported failure"
+    candidate = error.strip()
+    if candidate in _SAFE_FAILURE_REASONS:
+        return candidate
+    if any(pattern.fullmatch(candidate) for pattern in _SAFE_FAILURE_PATTERNS):
+        return candidate
+    return "agent reported failure"
 
 
 @dataclass(frozen=True)
@@ -73,6 +115,18 @@ class DispatchResult:
         return "".join(chunk.text for chunk in self.chunks if chunk.kind == "text")
 
 
+def _as_mapping(value: Any) -> dict[str, Any]:
+    """安全地把一个可能根本不是 Mapping 的东西变成 dict。
+
+    日志的参数在**调用 ``_detail`` 之前**就求值了，所以这一步不能抛 —— ``_detail`` 内部的
+    try 保护不到它。而调用方给的 ``outcome`` 不一定是真的 ``ToolResult``（测试里是 Mock，
+    ``dict(Mock().audit)`` 会炸）。日志绝不能改变一轮的结果，包括不能因为构造它的参数。
+    """
+    if isinstance(value, Mapping):
+        return dict(value)
+    return {}
+
+
 class Dispatcher:
     """Intent → tool or agents → merged stream.
 
@@ -92,6 +146,8 @@ class Dispatcher:
         tool_runner: Any = None,
         memory_recaller: Any = None,
         on_event: Callable[[dict[str, Any]], None] | None = None,
+        on_detail: Callable[..., None] | None = None,
+        on_partial: Callable[[str], None] | None = None,
     ) -> None:
         self.router = router
         self.aggregator = aggregator
@@ -99,6 +155,32 @@ class Dispatcher:
         self.tool_runner = tool_runner
         self.memory_recaller = memory_recaller
         self._on_event = on_event
+        #: 「给人看的运行细节」出口，签名 ``(source, message, level=..., **fields)``。
+        #:
+        #: 和 ``on_event`` 分工在**扇出面**上，不在详细程度上：事件会到球、到传输、到每个
+        #: 外部消费者，所以它不带文本和参数；这条只到本机控制台的日志视图，所以它带 ——
+        #: 而「``fs.read`` 收到的 path 到底是什么」只有带参数才答得出。
+        self._on_detail = on_detail
+        #: 「回答到这里为止是什么」出口，每来一个 text chunk 调一次，参数是**到目前为止
+        #: 拼起来的全文**（不是这一次的增量 —— 调用方要的是「第一句话完整了没有」，而那
+        #: 只能在全文上判）。
+        #:
+        #: 它存在的唯一理由是**让合成提前开始**：`vox_plugin/runtime.py` 接的那一个在第
+        #: 一句话完整的那一刻调 `tts.prewarm()`，于是那 0.9 秒的合成被 LLM 写后半段的时
+        #: 间盖住。所以它是一个**旁路**，不是数据通路 —— 这一轮的回答仍然只由 chunk 决定
+        #: （`DispatchResult.text`），一个抛异常的 sink 只会被摘掉，不会改变任何结果。
+        self._on_partial = on_partial
+        #: Event delivery is a side channel and must not change a turn result.
+        self.sink_failures = 0
+
+    def _detail(self, source: str, message: str, **fields: Any) -> None:
+        """写一条运行细节。吞掉一切异常 —— 日志失败不能改变一轮的结果。"""
+        if self._on_detail is None:
+            return
+        try:
+            self._on_detail(source, message, **fields)
+        except Exception:  # noqa: BLE001 - a log sink is never load-bearing
+            self.sink_failures += 1
 
     # -- public --------------------------------------------------------------
 
@@ -112,9 +194,20 @@ class Dispatcher:
         """Run one turn to completion. The blocking, materialised path."""
         started = time.monotonic()
         intent = self.resolve(task.text)
+        self._detail(
+            "intent",
+            f"{task.text[:80]} -> {intent.kind}" + (f" / {intent.tool}" if intent.tool else ""),
+            kind=intent.kind,
+            tool=intent.tool or "",
+            arguments=dict(intent.arguments or {}),
+            confidence=intent.confidence,
+            tool_runner=self.tool_runner is not None,
+        )
         if intent.kind == "tool" and self.tool_runner is not None:
             return self._run_tool(task, intent, started, speaker)
-        return self._run_agents(self._recall_context(task), adapters or {}, started)
+        return self._run_agents(
+            self._require_capabilities(self._recall_context(task)), adapters or {}, started
+        )
 
     def stream(
         self,
@@ -136,6 +229,7 @@ class Dispatcher:
             yield from result.chunks
             return
         task = self._recall_context(task)
+        task = self._require_capabilities(task)
         plan = self.router.plan(task)
         available = self._collect(plan, adapters or {})
         if not available:
@@ -269,6 +363,22 @@ class Dispatcher:
                 error=None if outcome.ok else (outcome.error or "tool failed"),
             )
         )
+        # 工具跑完了，把参数和结果记进运行日志 —— 「route=tool ok=false 0ms」这种报告缺的
+        # 就是这两样：哪个 path、被谁拒的。事件契约不带参数（它扇出到每个通道），所以这条
+        # 走日志。
+        self._detail(
+            "tool",
+            f"{intent.tool} {'ok' if outcome.ok else '失败：' + (outcome.error or 'tool failed')}",
+            level="info" if outcome.ok else "error",
+            tool=intent.tool,
+            arguments=dict(intent.arguments or {}),
+            ok=outcome.ok,
+            error=outcome.error or "",
+            needs_confirmation=outcome.needs_confirmation,
+            elapsed_ms=self._ms_since(started),
+            output_chars=len(outcome.output or ""),
+            audit=_as_mapping(getattr(outcome, "audit", None)),
+        )
         return DispatchResult(
             route="tool",
             chunks=tuple(chunks),
@@ -290,6 +400,30 @@ class Dispatcher:
     ) -> DispatchResult:
         plan = self.router.plan(task)
         available = self._collect(plan, adapters)
+        if not available and task.capabilities:
+            # **能力闸门降级。** 闸门把这一句判给了唯一能做的后端，而那个后端这台机器上
+            # 没装（实测：`claude` 在 `%APPDATA%\npm`，那个目录不在 PATH 上）。此前的行为
+            # 是整轮失败，使用者听到的是「agent 报告失败」—— 一句既不回答问题也不说明
+            # 原因的话。
+            #
+            # 退一步用**能力不设限**的计划：那个后端答不了「帮我改这个函数」，但它的
+            # system prompt 明确要求它说「这个我做不到」（core/agents/environment.py），
+            # 而那是一个诚实且有用的回答。理由写进 reason，日志里能查到是降级来的。
+            relaxed = replace(task, capabilities=frozenset())
+            fallback = self.router.plan(relaxed)
+            available = self._collect(fallback, adapters)
+            if available:
+                self._detail(
+                    "agent",
+                    f"能力降级：{plan.reason} → 改用 {', '.join(fallback.agents)}",
+                    level="warn",
+                    wanted=sorted(task.capabilities),
+                    blocked_reason=plan.reason,
+                    agents=list(fallback.agents),
+                )
+                task, plan = relaxed, replace(
+                    fallback, reason=f"{fallback.reason}（降级：{plan.reason}）"
+                )
         if not available:
             reason = plan.reason or "no agents available"
             return DispatchResult(
@@ -299,9 +433,34 @@ class Dispatcher:
                 reason=reason,
                 ok=False,
             )
-        collected = tuple(self._stream_agents(task, plan, available, started))
+        collected = tuple(self._watch(self._stream_agents(task, plan, available, started)))
         terminal = collected[-1] if collected else None
         ok = terminal is not None and terminal.kind == "done" and not terminal.error
+        # agent 要求跑一个工具？跑掉，把结果回给它，再收一次回答。
+        if ok:
+            collected, ok = self._settle_tool_calls(task, plan, available, started, collected, ok)
+            terminal = collected[-1] if collected else terminal
+        backends = self._backends(available)
+        self._detail(
+            "agent",
+            f"{plan.mode} → {', '.join(backends)}"
+            + ("" if ok else f"（失败：{terminal.error if terminal else 'no chunks'}）"),
+            level="info" if ok else "error",
+            mode=plan.mode,
+            agents=[name for name, _ in available],
+            # 「谁答的」要能查。见 ``_backends``。
+            backends=backends,
+            # 为什么是它答的：闸门要求了什么、评分是多少。一个不带这两样的路由记录
+            # 回答不了「为什么不是另一个」。
+            capabilities=sorted(task.capabilities),
+            reason=plan.reason,
+            ok=ok,
+            error=(terminal.error if terminal else "") or "",
+            elapsed_ms=self._ms_since(started),
+            # 有多少个 chunk 到了：一个「成功但零 chunk」的回合看起来和正常的一样。
+            chunks=len(collected),
+            context_lines=len(task.context or ()),
+        )
         return DispatchResult(
             route="agent",
             chunks=collected,
@@ -310,6 +469,145 @@ class Dispatcher:
             reason=plan.reason,
             ok=ok,
         )
+
+    def _watch(self, chunks: Iterator[AgentChunk]) -> Iterator[AgentChunk]:
+        """原样放行，顺手把「到目前为止的全文」喂给 ``on_partial``。
+
+        `_stream_agents` 已经是增量的了 —— 缺的只是「在 chunk 走向 `tuple()` 的路上看一眼」。
+        所以这一层不改任何 chunk、不吞任何 chunk、不改变顺序。
+
+        **一次失败就摘掉这个 sink（只对这一轮）。** 预热是个优化，它抛异常不该让这一轮的
+        回答消失；而每个 chunk 都重试一个已经坏了的回调只是把一次失败变成几十次。
+        """
+        sink = self._on_partial
+        if sink is None:
+            yield from chunks
+            return
+        buffered = ""
+        for chunk in chunks:
+            if sink is not None and chunk.kind == "text" and chunk.text:
+                buffered += chunk.text
+                try:
+                    sink(buffered)
+                except Exception:  # noqa: BLE001 - 旁路，绝不改变这一轮
+                    self.sink_failures += 1
+                    sink = None
+            yield chunk
+
+    def _execute_tool(self, name: str, arguments: Mapping[str, Any]) -> tuple[bool, str]:
+        """跑一个 agent 点名的工具。返回 (成功, 给模型看的详情)。
+
+        **来源是 agent，说话人不传。** 一个由模型发起的请求不该继承使用者的声纹身份 ——
+        那正是 `shell.run` 的 `require_verified_speaker` 要挡住的东西。执行走的是和语音
+        快路径同一套闸门，所以这里只决定「谁在发起」，不决定「什么能被执行」。
+        """
+        request = ToolRequest(tool=name, arguments=dict(arguments), origin="agent")
+        try:
+            outcome = self.tool_runner.run(request)  # type: ignore[union-attr]
+        except Exception as exc:  # noqa: BLE001 - 工具炸了也要把话说完
+            tool_ok, detail = False, f"{type(exc).__name__}: {exc}"
+        else:
+            tool_ok = bool(outcome.ok)
+            detail = (outcome.output or outcome.error or "").strip()
+        self._detail(
+            "agent",
+            f"agent 要求 {name} → {'成功' if tool_ok else '失败'}",
+            level="info" if tool_ok else "warn",
+            tool=name,
+            arguments=dict(arguments),
+            ok=tool_ok,
+            detail=detail[:200],
+        )
+        return tool_ok, detail
+
+    def _settle_tool_calls(
+        self,
+        task: Task,
+        plan: Any,
+        available: tuple[tuple[str, Any], ...],
+        started: float,
+        collected: tuple[AgentChunk, ...],
+        ok: bool,
+    ) -> tuple[tuple[AgentChunk, ...], bool]:
+        """agent 说要跑一个工具 —— 跑掉，把结果回给它，再收一次回答。
+
+        ## 为什么需要这一整段
+
+        使用者实测：他说「帮我打开网易云音乐」（ASR 听成「试了给我打开…」），正则没命中，
+        落到 agent，agent 回 **「好，正在打开网易云音乐。」然后什么都没发生。** 那不是模型在
+        撒谎 —— 请求能到它那里，而能力不在它手上，说得像做过了是它最容易的出路。这一段把
+        能力交给它。
+
+        ## 三条边界
+
+        1. **只解析，不放行。** 执行走 `self.tool_runner`，也就是和语音快路径**同一套闸门**
+           （沙箱、白名单、危险模式、`shell.run` 的确认与声纹）。所以这个功能扩大的是
+           「谁能发起」，不是「什么能被执行」—— 而 `shell.run` 根本不在 agent 看得到的清单里。
+        2. **多步，但有界**（`MAX_CALLS` 次执行 / `MAX_TOOL_ROUNDS` 次再问）。**2026-09-05
+           从「一轮一次」改过来** —— 原来那个 1 的理由是延迟预算，而预算在换掉 LLM 端点之后
+           变了（中转站 `claude-opus-5` 首字 7.9 s 且不增量下发；百炼 flash 档 1.5–2.4 s）。
+           「先查时间再打开网易云」这类请求在一次调用的上限下必然只做一半，而使用者听到的是
+           一句把两件事都汇报了的话 —— 说得像做过了，正是这一整段要修的毛病。
+        3. **同一轮里的多个调用一次执行完再问。** 独立的两件事因此只多花一次往返；而**依赖**
+           前一步结果的第二步模型自己会分轮说出来（它第一轮只写得出第一个）。反过来做
+           （每步都回去问一次）会让独立的两件事也各花一次往返。
+        4. **失败要回给它。** 拿不到「失败」这一位，它会把「拒绝了」当成「做完了」然后向用户
+           汇报成功 —— 那正是这一段要修的毛病，不能在这里重新引入。
+
+        没有工具调用（绝大多数轮）时原样返回，一次多余的对象构造都不做。
+        """
+        if self.tool_runner is None:
+            return collected, ok
+        current, current_ok = collected, ok
+        budget = MAX_CALLS
+        last_detail = ""
+        last_tool_ok = False
+        did_run = False
+        for step in range(MAX_TOOL_ROUNDS):
+            text = "".join(chunk.text or "" for chunk in current if chunk.kind == "text")
+            calls = parse_calls(text)[:budget]
+            if not calls:
+                break
+            results: list[str] = []
+            for name, arguments in calls:
+                last_tool_ok, last_detail = self._execute_tool(name, arguments)
+                results.append(render_result(name, last_tool_ok, last_detail))
+                did_run = True
+            budget -= len(calls)
+            asked = "、".join(name for name, _ in calls)
+            followup = replace(
+                task,
+                id=f"{task.id}-tool{step + 1}" if step else f"{task.id}-tool",
+                context=tuple(task.context or ())
+                + (f"你刚才要求 {asked}，结果如下。用一句话把结果告诉用户。",)
+                + tuple(results),
+            )
+            # **再问那一轮也走 `_watch`。** 工具那条路是延迟最差的一条（两次 LLM 往返 +
+            # 一次工具执行），而**使用者听到的正是这一轮的回答** —— 第一轮的文本里带着调用
+            # 标记，已经被预热那一侧跳过了。`buffered` 每次进 `_watch` 都从空开始，因为
+            # 这一轮的回答会把上一轮的整个换掉。
+            current = tuple(self._watch(self._stream_agents(followup, plan, available, started)))
+            last = current[-1] if current else None
+            current_ok = last is not None and last.kind == "done" and not last.error
+            if not current_ok:
+                # 再问那一轮失败时**不要丢掉工具已经做了这件事**：拿工具的结果直接当回答，
+                # 比一句「agent 失败了」有用得多 —— 应用其实已经开起来了。
+                spoken = last_detail or ("做好了" if last_tool_ok else "没做成")
+                return (
+                    AgentChunk(kind="text", text=spoken[:200]),
+                    AgentChunk(kind="done"),
+                ), last_tool_ok
+            if budget <= 0:
+                break
+        if not did_run:
+            return collected, ok
+        # 把调用标记从最终文本里去掉：模型有时会在汇报里把它重复一遍，而**用完预算之后**
+        # 那一行不会再被执行 —— 留着它就是让使用者听见一串符号。
+        cleaned = tuple(
+            replace(chunk, text=strip_calls(chunk.text or "")) if chunk.kind == "text" else chunk
+            for chunk in current
+        )
+        return cleaned, current_ok
 
     def _collect(
         self, plan: DispatchPlan, adapters: Mapping[str, Any]
@@ -345,6 +643,66 @@ class Dispatcher:
             releaser(name)
         except Exception:  # noqa: BLE001 - bookkeeping must not fail a turn
             pass
+
+    def _require_capabilities(self, task: Task) -> Task:
+        """把「这句话要什么后端」填进 task，让路由的能力闸门真的生效。
+
+        **这一步此前不存在，而它的缺席让能力声明成了装饰。** 5 维评分里 cost 与 latency
+        占 70%，所以一个裸 HTTP 端点必然赢过要起进程的 CLI（实测 relay 0.866、
+        claude 0.602）。能力在 ``DefaultRouter.score`` 里是闸门不是权重，可是没有人给
+        ``Task.capabilities`` 填过东西 —— 空集是任何集合的子集，人人都「有能力」。后果是
+        「帮我改一下这个函数」和「今天天气怎么样」派给同一个后端，而前者那个后端连文件都
+        读不了：它会写出一段看起来正确、其实没人执行的步骤。
+
+        **调用方给的赢。** 显式带 capabilities 的 task 不被改写：那是主脑（ADR 008）将来
+        要用的入口，一个会覆盖调用方判断的推断层会让那条路无法测试。
+
+        解析器没有 ``capabilities`` 方法时什么都不做 —— 这是可选协议，注入一个只实现
+        ``resolve`` 的解析器仍然合法。
+        """
+        if task.capabilities:
+            return task
+        wanted = getattr(self.resolver, "capabilities", None)
+        if not callable(wanted):
+            return task
+        try:
+            needed = frozenset(wanted(task.text))
+        except Exception:  # noqa: BLE001 - 分类失败就按「谁都行」走，不能让一轮失败
+            return task
+        if not needed:
+            return task
+        return replace(task, capabilities=needed)
+
+    @staticmethod
+    def _backends(available: tuple[tuple[str, Any], Any]) -> list[str]:
+        """每个被派发的后端的一句话：agent / kind / model / 端点或命令。
+
+        **给运行日志用，不给事件用。** 事件扇出到球、到传输、到每个消费者，所以它只带
+        名字与计数；这一行只到本机控制台的日志视图，而「到底是哪个模型答的」只有带上
+        model 与端点才答得出 —— 使用者报「所有聊天都进了 Claude Code」时，没有任何一处
+        读数能证实或否证它，这就是那次的账。
+
+        ``check()`` 是适配器自报的形状（``http`` 报 model + endpoint，``cli`` 报 command），
+        它**不打网络**。永不带凭据：适配器只报 ``token_configured`` 与 ``key_env`` 名字。
+        """
+        rows: list[str] = []
+        for name, adapter in available:
+            detail = ""
+            try:
+                status = adapter.check()
+            except Exception:  # noqa: BLE001 - 诊断路径不能自己炸
+                status = None
+            if isinstance(status, Mapping):
+                parts = [str(status.get("kind") or "")]
+                for key in ("model", "endpoint", "command"):
+                    value = str(status.get(key) or "").strip()
+                    if value:
+                        parts.append(f"{key}={value}")
+                if status.get("available") is False:
+                    parts.append("unavailable")
+                detail = " ".join(part for part in parts if part)
+            rows.append(f"{name}({detail})" if detail else name)
+        return rows
 
     def _stream_agents(
         self,
@@ -414,7 +772,9 @@ class Dispatcher:
                 # Why it failed, never what was said. A stream that ends with no
                 # terminating chunk is its own failure mode, distinct from one
                 # that reported an error.
-                payload["error"] = failed_error or "stream ended without a terminal chunk"
+                payload["error"] = _public_failure_reason(
+                    failed_error or "stream ended without a terminal chunk"
+                )
             self._emit("task.done" if ok else "task.failed", payload)
 
     def _cancel_all(
@@ -456,7 +816,12 @@ class Dispatcher:
         """
         event = validate_event(build_event(event_type, dict(detail)), AGENT_SCHEMA_PATH)
         if self._on_event is not None:
-            self._on_event(event)
+            try:
+                self._on_event(event)
+            except Exception:
+                # Do not turn a healthy agent response into a dispatch error
+                # because the desktop/logging transport went away.
+                self.sink_failures += 1
         return event
 
     @staticmethod

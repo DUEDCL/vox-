@@ -13,6 +13,12 @@ What it proves when it works:
   4. the transcription drives a real turn through the dispatcher,
   5. the answer is spoken back, and a second wake word cuts it off (barge-in).
 
+The stack comes from ``vox_plugin/voice_stack.py`` -- the same assembly
+``scripts/run_voice.py`` uses -- so model paths live in one place and the verified
+speaker arrives from the gate rather than from a constant. This script used to
+pass ``speaker="owner"``, which meant ``shell.run``'s one credential was a string
+literal even while the gate was running.
+
 Nothing here is asserted automatically. Print, listen, and record what you saw
 in docs/research/prototype-results.md with the level it actually earned.
 """
@@ -28,18 +34,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.audio import (
-    SherpaKeywordProvider,
-    SherpaStreamingAsrProvider,
-    SherpaTtsProvider,
-    SounddeviceWakeCapture,
-    SpeakerVerificationProvider,
-)
+from core.audio import load_voice_config
 from vox_plugin.runtime import VoiceRuntime
-
-KWS_DIR = ROOT / "models" / "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
-ASR_DIR = ROOT / "models" / "sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23"
-TTS_DIR = ROOT / "models" / "vits-melo-tts-zh_en"
+from vox_plugin.voice_stack import open_voice_stack
 
 
 def main() -> int:
@@ -54,37 +51,39 @@ def main() -> int:
     parser.add_argument("--silent", action="store_true", help="do not speak the answer")
     args = parser.parse_args()
 
-    runtime = VoiceRuntime(speaker=None if args.no_gate else "owner", with_desktop=False)
+    config = load_voice_config()
+    stack = open_voice_stack(
+        config,
+        require_verification=False if args.no_gate else None,
+        with_tts=False if args.silent else None,
+        device=args.device,
+    )
+    for warning in stack.warnings:
+        print(f"warning: {warning}")
+    for row in stack.readiness():
+        print(f"{'ok  ' if row['ready'] else '--  '}{row['item']:<8} {row['detail']}")
+
+    runtime = VoiceRuntime(with_desktop=False)
     report = runtime.start()
     print(f"tools:  {sorted(report.tools)}")
     print(f"agents: {sorted(report.agents)}")
     for warning in report.warnings:
         print(f"warning: {warning}")
 
-    if not args.silent:
-        tts = SherpaTtsProvider(TTS_DIR)
-        status = tts.load()
+    if stack.tts is not None:
+        status = stack.tts.load()
         print(f"tts:    {status.available} ({status.details})")
         if status.available:
-            runtime.plugin.attach_tts(tts)
+            runtime.plugin.attach_tts(stack.tts)
 
-    asr = SherpaStreamingAsrProvider(ASR_DIR)
-    verifier = None if args.no_gate else SpeakerVerificationProvider.from_config()
-    capture = SounddeviceWakeCapture(
-        SherpaKeywordProvider(KWS_DIR),
-        on_wake=lambda keyword, score: None,
-        device=args.device,
-        verifier=verifier,
-        require_verification=not args.no_gate,
-        asr_provider=asr,
-    )
-    runtime.attach_microphone(capture)
+    runtime.attach_microphone(stack.capture)
 
     try:
-        capture.start()
+        stack.capture.start()
     except Exception as exc:
         print(f"cannot open the microphone: {type(exc).__name__}: {exc}")
         runtime.close()
+        stack.close()
         return 1
 
     print("")
@@ -98,12 +97,19 @@ def main() -> int:
             if result is None:
                 continue
             turns += 1
-            print(f"[{turns}] route={result.route} ok={result.ok} -> {result.text or result.reason}")
+            # ``verified_by`` is the gate's own answer, printed so the writeup can
+            # state whether the turn ran as an authorised speaker or as nobody.
+            print(
+                f"[{turns}] route={result.route} ok={result.ok} "
+                f"verified_by={runtime.effective_speaker!r} "
+                f"-> {result.text or result.reason}"
+            )
     except KeyboardInterrupt:
         print("stopped")
     finally:
-        capture.stop()
+        stack.capture.stop()
         runtime.close()
+        stack.close()
 
     print("")
     print(f"turns: {turns}")
@@ -114,4 +120,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

@@ -1,3 +1,11 @@
 sherpa-onnx==1.13.4
 sounddevice==0.5.5
 soundfile==0.14.0
+# 只在**生成**自定义唤醒词表时用到（中文 -> 拼音声母/韵母）。跑现成词表的机器不需要它：
+# core/audio/keywords.py 在函数里 import，缺包时只有「改唤醒词」这一个动作会报错。
+pypinyin==0.55.0
+# 只在**微信扫码登录**那一步用到（把要被扫的那个 URL 渲成 SVG）。纯 Python、无 C 扩展、
+# 不联网。放在服务端渲而不是让页面去 CDN 拉一个 JS 二维码库：那等于把登录流程交给第三方，
+# 而那一页上过的是使用者的微信账号。缺包时只有「扫码登录」这一个动作报错，
+# core/channels/weixin_login.py 在函数里 import 并给出安装命令。
+segno==1.6.6

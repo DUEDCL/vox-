@@ -1,15 +1,72 @@
-/* Vox — 唤醒球
-   视觉源自 kkclaw(MIT) 的流体玻璃配方，六态语义为本项目自有。
-   字体全部走 Windows 内置，零下载、零云依赖。 */
+/* Vox — 花冠呼吸(Corolla Breath)的颜色与版面
+
+   第九代。这一版的三处改动全部来自参考素材的**逐帧度量**(270 帧全量提取,
+   脚本与读数见 docs/design/AI_STATES.md 第 1.4 节),不是审美偏好:
+
+   ① **前表面反光 `.gloss` 已删。** 径向亮度剖面在 r=0.91 只剩峰值的 3.9%、
+      r=1.00 是 0.4%,边界上没有任何亮描边;亮度峰值角一轮里扫过 0–354°,
+      定角镜面高光同样不存在。球的边界改由 core.ts 的液面轮廓 + 流动带承担。
+      `--glass`/`--edge` 因此也压到近黑(实测外圈 #070c17–#090c18)。
+
+   ② **色值改为按素材实测取样。** 提取方式:亮度 >18 且饱和 >0.20 的像素按 10°
+      分箱,取三个互隔 ≥40° 的峰,每峰的代表色 = 该箱内饱和度前 30% 的均值。
+      三簇的权重极不均(主簇 1.0–3.4、次簇 0.3–0.9、弱簇 0.05–0.4),所以
+      core.ts 的花瓣配色按 [far,far,mid,far,alt] 轮转而不是三色均分。
+      每态取哪一段由该态的 `bloomLevel()` 落在素材的哪个 agg 段决定 —— 见下表。
+      **使用者三次要求直接取用素材配色并声明素材已买断**,ANTI_SLOP 原先对
+      紫粉蓝的禁令在本产品因此不再声称成立(记在 DD-026)。
+
+   ③ **两处不参与取样**:`error` 保持朱红、`gated` 保持琥珀。它们是安全语义 ——
+      「出错」与「等你确认」不许读作正常态,而素材整轮只有一种外观。
+
+   素材 agg 段 → 三簇代表色(供核对,**不要在别处再抄一份**):
+     0.10–0.25  #7176b7 / #522675 / #4a1b37   → cancelled (bloom .26)
+     0.40–0.55  #5f75bd / #4795ce / #692f4f   → idle      (bloom .52)
+     0.55–0.70  #4ea0d6 / #b79eda / #cc90b3   → thinking  (bloom .70)
+     0.70–0.85  #57a8dd / #b888db / #d094b8   → speaking  (bloom .83)
+     0.85–1.00  #3d91c2 / #9075b6 / #bc5ea2   → listening (bloom .90)
+
+   光的几何、模糊、液面轮廓与流动带在 src/core.ts 用 Canvas 2D 画(FR-6.5);
+   CSS 负责球外的光与版面。颜色的唯一来源在本文件,core.ts 在切态时读一次。
+   字体全部走 Windows 内置,零下载、零云依赖。 */
 
 :root{
   color-scheme: dark;
   --amplitude: .35;
-  --phase: 0;
-  --orb: 148px;
+  /* `--orb` 现在是「球 + 外发光」的总尺寸:core.ts 把球画在内圈 1/1.44 上,
+     外圈的余量用来画沿液面轮廓的光晕(CSS 的 box-shadow 只能给圆角矩形)。
+     208 × (1/1.44) ≈ 144px 的球 —— 与上一代 148px 的球基本同大。 */
+  /* 球 120px + 每边 10px 泛光余量 = 140px。`--orb` 是「球 + 外发光」的总尺寸,
+     球半径的比例在 core.ts 的 `BALL`(=120/140)。 */
+  --orb: 140px;
   --ui: 'Segoe UI Variable Display', 'Segoe UI', 'Microsoft YaHei', sans-serif;
   --mono: 'Cascadia Mono', Consolas, 'Courier New', monospace;
+  /* 闸门色。它同时是球上那道闸与确认卡顶那条斜纹带 —— 两处说的是同一件事 */
   --amber: #ffb454;
+  /* 玻璃体与壁:**六态都不换**。实测素材外圈是 #070c17–#090c18(近黑),
+     所以这两个值压得比上一版低很多 —— 上一版的 rgba(34,34,51,.34) 在球外圈
+     堆出一圈能看出来的暗环,而素材的边界上什么都没有。留一点是给浅色桌面的:
+     球是透明置顶窗口,全透明会让它在白底上消失。 */
+  /* **球的底色是产品约束，不是素材保真。** 球是透明置顶窗口，会叠在白色壁纸上，
+     而花冠用 `lighter` 加色合成 —— 加色在白底上几乎不产生对比（白 + 光 = 白）。
+     浅色桌面上唯一能产生对比的是**减色**，所以球必须自带一层暗。
+     素材是黑底视频，它那条「r=0.91 只剩峰值 3.9%」的径向剖面约束的是**光**，
+     不是这一层：上一版拿那条剖面把 `--glass` 压到 .055（有效 alpha 约 0.03），
+     结果去掉对照页那圈生产并不存在的 box-shadow 白雾之后实测 —— 浅色桌面上
+     `idle` / `cancelled` / `gated` 三态接近不可见，而 `idle` 是默认态。
+     .055 → **.16**。深色桌面上这一层几乎不可见（暗叠暗），所以代价只在浅底一侧收。
+     `--glass` 必须**大于** `--edge`：core.ts 的 `body()` 要求这一层单调衰减，
+     反过来放会在边界附近堆出一圈 alpha 峰值 —— 那就是上一代被删掉的那圈暗环。 */
+  --glass: rgba(12,17,38,.16);
+  --edge: rgba(7,12,23,.10);
+  /* 以下等于 idle,六态各自覆盖。三色按素材的三个色相簇取样,权重不均 ——
+     core.ts 按 [far,far,mid,far,alt] 轮转,不是三色均分 */
+  --lum-core: #f1f1f5;
+  --lum-mid: #4795ce;
+  --lum-far: #5f75bd;
+  --lum-alt: #692f4f;
+  --glow: rgba(95,117,189,.15);
+  --glow-far: rgba(95,117,189,.06);
 }
 
 *{ box-sizing:border-box; }
@@ -28,7 +85,7 @@ body{
 #app{
   display:grid;
   grid-template-rows:auto 1fr;
-  /* 单列且允许收缩：否则列宽被球撑成 148px，面板拿不到 max-width */
+  /* 单列且允许收缩:否则列宽被球撑成 148px,面板拿不到 max-width */
   grid-template-columns:minmax(0,1fr);
   justify-items:stretch;
   width:100%; height:100%;
@@ -37,359 +94,205 @@ body{
 }
 
 #orbzone{
-  display:grid; justify-items:center; gap:4px;
+  display:grid; justify-items:center; gap:6px;
   justify-self:center;
-  /* 折叠态把球压在窗口上部，展开态面板长在下面，球不动 */
 }
+/* 状态读数:等宽疏排,像刻在筒身上的标签 —— 通用 UI 字体在这里就是「AI 生成」的长相。
+   letter-spacing 会在末字符后多留一格,text-indent 把它补回来,标签才真的居中。
+   **不设 `text-transform:uppercase`**:读数统一中文(DD-017),而中文没有大小写 ——
+   留着它只会在混排英文时突然全大写。 */
+/* 状态读数（文字）已删。使用者要求「去掉一切文字描述和方框」，而这一条也早就是
+   设计承诺之一：**状态不靠文字**（FR-6.6 要求静止一帧靠形态可辨）。读数原来是
+   等宽疏排的中文，它只是补充；删掉之后 aria-label 仍然带状态名，屏幕阅读器不受影响。 */
+#status{ display:none; }
 
-#status{
-  margin:0;
-  font-size:12px; font-weight:600;
-  letter-spacing:.1em;
-  color:#fff;
-  text-shadow:0 1px 8px #000, 0 0 20px #0009;
-  opacity:.85;
-  transition:opacity .3s ease;
-}
-
-/* ============ 球体 ============ */
+/* ============ 球体 ============
+   #orb 的布局盒必须保持 orb×orb 且不被子元素改动:
+   命中区由前端量 offsetWidth/offsetLeft 上报给 Rust,布局盒一变命中就漂。 */
 #orb{
   position:relative;
   width:var(--orb); height:var(--orb);
   border:0; padding:0;
-  border-radius:50%;
-  background:transparent;
+  /* **不设 `border-radius:50%`。** 使用者要求删掉所有标准圆的几何元素:
+     球的形状由 core.ts 的液面轮廓单独承担,DOM 侧再画一个精确圆等于在液面外面
+     套一个硬边的圆罩。布局盒仍然是 orb×orb(命中区靠它),只是不再有圆形描边。 */
   cursor:pointer;
-  isolation:isolate;
   will-change:transform;
   -webkit-app-region:no-drag;
+  /* 腔体外的光只能由 CSS 给:canvas 的位图边界就是球的边界。
+     两层发光都用显式变量而不是 color-mix() —— 老 WebView2 上 color-mix 会整条失效,
+     而失效的是「球在发光」这件事本身。 */
+  /* 外发光已移到 canvas(见 #core):box-shadow 只会给圆角矩形,而边界是液面。 */
 }
+
+/* 球的内衬。**中心几乎不着色、最外圈也不再压暗**:上一版在 92% 处压到 rgba(4,11,9,.5),
+   渲染出来就是一圈能看出来的暗环 —— 而素材实测边界上什么都没有(r=1.00 只剩峰值
+   的 0.4%)。现在只留一层极淡的中心底色,给浅色桌面一点定位,边界完全交给
+   core.ts 的液面轮廓。`isolation` 建立混合上下文,让球内的混合不去和桌面混。
+   同时匹配对照页的 `.orb`,理由见六态节关于 preview.html 的说明。 */
+/* 内衬删掉。原来那条 `radial-gradient(circle ...)` 是一个**精确圆**的暗底,
+   在浅色桌面上它就是球的可见边界 —— 而这一代的边界必须是液面轮廓。
+   `isolation` 保留:它建立混合上下文,让球内的混合不去和桌面混。
+   浅底可读性改由 core.ts 的 body() 承担(它已经沿液面轮廓填充)。 */
+#orb, .orb{
+  isolation:isolate;
+  /* **必须显式透明。** `#orb` 是一个 `<button>`,浏览器给按钮的默认背景是
+     `buttonface`(灰色)。上一版靠那条 `radial-gradient` 顶掉了它,删掉渐变之后
+     默认灰底就露出来了 —— 实机截图上是一个**灰色方块**罩在球外面。
+     删一个视觉元素时要连带检查它是否正在压住某个 UA 默认值。 */
+  background:transparent;
+}
+/* 焦点圈是**可访问性**要求(WCAG 2.4.7),不属于「装饰性的标准圆」——
+   它只在键盘聚焦时出现、由浏览器绘制,而且没有它键盘用户就看不出焦点在哪。
+   `border-radius:50%` 删掉之后 outline 是矩形的,这反而更清楚:它是焦点指示器,
+   不是球的一部分。 */
 #orb:focus-visible{
-  outline:2px solid #9be9ff;
+  outline:2px solid var(--lum-core);
   outline-offset:6px;
 }
 
-/* 层 1：流体内芯。overflow:hidden 是整个错觉的容器 */
-.inner-fluid{
-  position:absolute; inset:6px;
-  border-radius:50%;
-  overflow:hidden;
-  z-index:1;
-  background:linear-gradient(135deg,#ffb3b3,#fed6e3);
-  transition:filter .35s ease, background .35s ease;
-}
-.fluid-blob, .fluid-blob-2{ position:absolute; display:block; }
-.fluid-blob{
-  width:130%; height:130%; top:-15%; left:-15%;
-  background:
-    radial-gradient(circle at 30% 30%, rgba(235,87,87,.85), transparent 40%),
-    radial-gradient(circle at 70% 65%, rgba(255,154,108,.8), transparent 40%);
-  animation:fluidSpin 8s linear infinite;
-  transition:background .35s ease;
-}
-.fluid-blob-2{
-  width:110%; height:110%; top:-5%; left:-5%;
-  background:
-    radial-gradient(circle at 60% 30%, rgba(255,200,150,.4), transparent 35%),
-    radial-gradient(circle at 35% 70%, rgba(220,60,60,.3), transparent 35%);
-  animation:fluidSpinR 12s linear infinite;
-  transition:background .35s ease;
-}
-/* scale 相位刻意错开，两层亮斑永不重复相遇 */
-@keyframes fluidSpin{
-  0%{ transform:rotate(0deg) scale(1); }
-  50%{ transform:rotate(180deg) scale(1.08); }
-  100%{ transform:rotate(360deg) scale(1); }
-}
-@keyframes fluidSpinR{
-  0%{ transform:rotate(360deg) scale(1.05); }
-  50%{ transform:rotate(180deg) scale(.95); }
-  100%{ transform:rotate(0deg) scale(1.05); }
-}
-
-/* 层 2：玻璃壳。两条反向 inset 阴影亮度差 4 倍 —— 球感全部来自这里 */
-.glass-shell{
-  position:absolute; inset:0;
-  border-radius:50%;
-  z-index:2;
-  background:radial-gradient(circle at 30% 30%, rgba(255,255,255,.12), rgba(255,255,255,.03));
-  box-shadow:
-    inset -3px -3px 14px rgba(255,255,255,.08),
-    inset  3px  3px 14px rgba(255,255,255,.35),
-    0 0 40px rgba(255,107,74,.25),
-    0 0 80px rgba(255,107,74,.10);
-  border:1px solid rgba(255,255,255,.25);
-  transition:box-shadow 1s cubic-bezier(.4,0,.2,1), border 1s cubic-bezier(.4,0,.2,1);
-}
-/* 两处不对称高光：偏心、旋转反号、亮度差 2.75 倍 */
-.glass-shell::before,
-.glass-shell::after{
-  content:''; position:absolute;
-  border-radius:50%;
-  filter:blur(2px);
-  transition:opacity 1s cubic-bezier(.4,0,.2,1);
-}
-.glass-shell::before{
-  top:12%; left:18%; width:28%; height:14%;
-  background:rgba(255,255,255,.55);
-  transform:rotate(-40deg);
-}
-.glass-shell::after{
-  bottom:22%; right:20%; width:16%; height:10%;
-  background:rgba(255,255,255,.2);
-  transform:rotate(25deg);
-}
-
-/* 层 3：眼睛。宽/高/圆角三个数就是一个表情 */
-.eyes{
-  position:absolute; z-index:3;
-  top:16%; left:10%; width:80%; height:50%;
-  display:flex; align-items:center; justify-content:center;
-  gap:26px;
-  pointer-events:none;   /* 绝不能吃掉球的点击 */
-  overflow:visible;
-}
-.eye{
+/* 玻璃体与光团。canvas 铺满球,位图尺寸由 core.ts 按 DPR 开。
+   **不裁圆。** 原来这里有 `border-radius:50%` 给 canvas 做圆形裁切,那正是
+   「标准圆」的最后一处:液面轮廓在某些相位会略微超出内切圆,被这一刀切平之后
+   边界又变成了一段精确圆弧。裁切改由 core.ts 的 `contour()` 自己做。 */
+#core{
+  position:absolute;
+  /* 画布**不溢出**布局盒。外发光画在画布内圈的余量里(core.ts 的 `BALL`),
+     所以球的直径是布局盒的 1/1.44 —— 换句话说 `--orb` 是「球 + 光晕」的总尺寸。
+     试过让画布用 `inset:-22%` 溢出按钮:光晕形状对了,但窗口尺寸由前端量布局盒
+     反推,溢出的那一圈被窗口边缘**切成直角**,实机上球被切掉右下角。
+     余量放在画布之内就没有任何耦合:窗口、命中区、布局全都不用改。 */
+  inset:0;
+  width:100%; height:100%;
   display:block;
-  width:24px; height:42px;
-  background:#fff;
-  border-radius:13px;
-  box-shadow:0 0 10px rgba(255,255,255,.9), 0 0 22px rgba(255,255,255,.4);
-  transform-origin:center center;
-  transition:
-    width .18s cubic-bezier(.25,1,.5,1),
-    height .18s cubic-bezier(.25,1,.5,1),
-    border-radius .18s cubic-bezier(.25,1,.5,1),
-    transform .18s cubic-bezier(.25,1,.5,1),
-    background .3s ease;
+  pointer-events:none;   /* 绝不能吃掉球的点击 */
+  z-index:1;
 }
 
-/* 腮红 */
-.blush{
-  position:absolute; z-index:3;
-  width:31px; height:18px; border-radius:50%;
-  background:rgba(255,130,130,.25);
-  filter:blur(5px);
-  pointer-events:none;
-  opacity:.8;
-  transition:background .8s cubic-bezier(.33,0,.2,1), opacity .6s ease;
-}
-.blush-l{ top:58%; left:8%; }
-.blush-r{ top:58%; right:8%; }
+/* ============ 前表面反光:没有了 ============
+   `.gloss` 已删(第九代)。它是「一层玻璃壳,光在壳里面」这个读法的全部来源,
+   而参考素材实测**没有壳**:径向亮度剖面在 r=0.91 只剩峰值的 3.9%、r=1.00 是 0.4%,
+   边界上既没有亮描边也没有镜面斑;亮度峰值角一轮里扫过 0–354°,定角高光不存在。
+   球的边界现在由 core.ts 的两项承担,两项都是量出来的:
+     · 液面轮廓 `contourRadii()` —— 角向标准差 = 半径的 1.7%(素材去掉一次谐波后的值)
+     · 流动带 `film()` —— r=0.72 那条软带,亮度沿圈缓慢流动(素材剖面在 0.66→0.78 回升)
 
-/* listening 的三道环 */
-.rings{
-  position:absolute; inset:-14px; z-index:0;
-  opacity:0; pointer-events:none;
-  transition:opacity .45s ease;
-}
-.ring{
-  position:absolute; inset:0; border-radius:50%;
-  border:1px solid rgba(150,240,255,.32);
-}
-.ring:nth-child(1){ inset:2%;  animation:ringSpin 9s linear infinite; }
-.ring:nth-child(2){ inset:8%;  animation:ringSpin 13s linear infinite reverse; border-color:rgba(150,240,255,.22); }
-.ring:nth-child(3){ inset:14%; animation:ringSpin 17s linear infinite; border-color:rgba(150,240,255,.14); }
-@keyframes ringSpin{
-  0%{ transform:rotate(0deg) scale(1); }
-  50%{ transform:rotate(180deg) scale(1.03); }
-  100%{ transform:rotate(360deg) scale(1); }
-}
-#app[data-state=listening] .rings{ opacity:1; }
+   ============ 面孔:也没有 ============
+   光团整个画在 canvas 里(CSS 画不了「聚合度/合拢度/液面轮廓联动 + 高斯模糊」)。
+   状态语言 = 聚合度 + 花瓣数 + 合拢度 + 分裂朵数 + 单侧拉扯 + 有无白热核,
+   不是任何一处的宽/高/圆角。 */
 
-/* 粒子 */
-.particles{ position:absolute; inset:0; pointer-events:none; z-index:10; }
-.particle{
-  position:absolute; top:50%; left:50%;
-  border-radius:50%; background:#fff;
-  animation:particleFly .45s cubic-bezier(.2,.8,.4,1) forwards;
-}
-@keyframes particleFly{
-  0%{ opacity:.9; transform:translate(-50%,-50%) translate(0,0) scale(1); }
-  100%{ opacity:0; transform:translate(-50%,-50%) translate(var(--px),var(--py)) scale(.3); }
-}
 
-/* 点击挤压 —— overshoot 曲线 */
+/* 点击挤压 —— 指数缓动,单向减速。上一版用 cubic-bezier(.34,1.56,.64,1) 的
+   overshoot(弹跳)曲线,那是 2018 年前后的语汇,而真实物体是平滑减速的;
+   关键帧里的 1.15/.9/1.05 三次回弹同时删掉,只留一次压缩再回位。 */
 @keyframes squish{
   0%{ transform:scale(1,1); }
-  25%{ transform:scale(1.15,.85); }
-  50%{ transform:scale(.9,1.1); }
-  75%{ transform:scale(1.05,.95); }
+  30%{ transform:scale(1.07,.93); }
   100%{ transform:scale(1,1); }
 }
-#orb.squishing{ animation:squish .35s cubic-bezier(.34,1.56,.64,1); }
+#orb.squishing{ animation:squish .3s cubic-bezier(.16,1,.3,1); }
 
-#orb:hover .inner-fluid{ filter:brightness(1.05); }
-#orb:hover .eye{ transform:scale(1.08); }
-
-/* ============ 六态 ============ */
-/* 与 core/state.py 的 VoiceState 一一对应，六个值不多不少 */
-
-/* --- idle --- */
-#app[data-state=idle] .inner-fluid{ background:linear-gradient(135deg,#ffb3b3,#fed6e3); }
-#app[data-state=idle] .fluid-blob{ animation-duration:8s; }
-#app[data-state=idle] .fluid-blob-2{ animation-duration:12s; }
-#app[data-state=idle] .eye{ width:24px; height:42px; border-radius:13px; }
-#app[data-state=idle] .blush{ background:rgba(255,120,120,.22); opacity:.5; }
-#app[data-state=idle] #status{ opacity:.6; }
-
-/* --- listening：青蓝，音量驱动 glow --- */
-#app[data-state=listening] .inner-fluid{ background:linear-gradient(135deg,#7fd8e0,#c9f0f5); }
-#app[data-state=listening] .fluid-blob{
-  background:
-    radial-gradient(circle at 30% 30%, rgba(0,151,167,.85), transparent 40%),
-    radial-gradient(circle at 70% 65%, rgba(38,166,154,.8), transparent 40%);
-  animation-duration:6s;
-}
-#app[data-state=listening] .fluid-blob-2{
-  background:
-    radial-gradient(circle at 60% 30%, rgba(178,235,242,.4), transparent 35%),
-    radial-gradient(circle at 35% 70%, rgba(0,105,120,.3), transparent 35%);
-  animation-duration:9s;
-}
-#app[data-state=listening] .glass-shell{
-  box-shadow:
-    inset -3px -3px 14px rgba(255,255,255,.08),
-    inset  3px  3px 14px rgba(255,255,255,.4),
-    0 0 calc(44px + var(--amplitude) * 26px) rgba(0,151,167,.34),
-    0 0 calc(88px + var(--amplitude) * 40px) rgba(38,166,154,.16);
-  border-color:rgba(150,240,255,.42);
-}
-#app[data-state=listening] .eye{ width:28px; height:46px; border-radius:15px; }
-#app[data-state=listening] .blush{ opacity:0; }
-
-/* --- thinking：紫。blob2 反常提速到 6s 制造内部搅动 --- */
-#app[data-state=thinking] .inner-fluid{
-  background:linear-gradient(135deg,#d1c4e9,#ede7f6);
-  animation:thinkHue 2.2s ease-in-out infinite;
-}
-@keyframes thinkHue{
-  0%,100%{ filter:hue-rotate(0deg); }
-  50%{ filter:hue-rotate(24deg); }
-}
-#app[data-state=thinking] .fluid-blob{
-  background:
-    radial-gradient(circle at 30% 30%, rgba(103,58,183,.85), transparent 40%),
-    radial-gradient(circle at 70% 65%, rgba(123,104,238,.8), transparent 40%);
-  animation-duration:12s;
-}
-#app[data-state=thinking] .fluid-blob-2{
-  background:
-    radial-gradient(circle at 60% 30%, rgba(179,157,219,.45), transparent 35%),
-    radial-gradient(circle at 35% 70%, rgba(94,53,177,.35), transparent 35%);
-  animation-duration:6s;
-}
-#app[data-state=thinking] .glass-shell{
-  box-shadow:
-    inset -3px -3px 14px rgba(255,255,255,.08),
-    inset  3px  3px 14px rgba(255,255,255,.32),
-    0 0 40px rgba(123,104,238,.3),
-    0 0 80px rgba(103,58,183,.15);
-  border-color:rgba(196,166,255,.36);
-}
-#app[data-state=thinking] .eye{
-  width:22px; height:37px; border-radius:11px;
-  transform:translateY(-6px);
-}
-#app[data-state=thinking] .blush{ opacity:0; }
-
-/* --- speaking：品红，眼高随音量 --- */
-#app[data-state=speaking] .inner-fluid{ background:linear-gradient(135deg,#f8bbd0,#fce4ec); }
-#app[data-state=speaking] .fluid-blob{
-  background:
-    radial-gradient(circle at 30% 30%, rgba(233,30,99,.85), transparent 40%),
-    radial-gradient(circle at 70% 65%, rgba(255,105,180,.8), transparent 40%);
-  animation-duration:4s;
-}
-#app[data-state=speaking] .fluid-blob-2{
-  background:
-    radial-gradient(circle at 60% 30%, rgba(255,182,193,.4), transparent 35%),
-    radial-gradient(circle at 35% 70%, rgba(219,68,85,.3), transparent 35%);
-  animation-duration:7s;
-}
-#app[data-state=speaking] .glass-shell{
-  box-shadow:
-    inset -3px -3px 14px rgba(255,255,255,.08),
-    inset  3px  3px 14px rgba(255,255,255,.35),
-    0 0 40px rgba(255,105,180,.3),
-    0 0 80px rgba(233,30,99,.15);
-  border-color:rgba(255,190,220,.38);
-}
-#app[data-state=speaking] .eye{
-  width:22px;
-  height:calc(37px + var(--amplitude) * 12px);
-  border-radius:11px;
-}
-#app[data-state=speaking] .blush{ background:rgba(255,120,120,.4); opacity:.8; }
-
-/* --- cancelled：中性灰，仍在慢转(20s)，眼睛钝钝地半闭 --- */
-#app[data-state=cancelled] .inner-fluid{ background:linear-gradient(135deg,#c8c8c8,#dcdcdc); }
-#app[data-state=cancelled] .fluid-blob{
-  background:
-    radial-gradient(circle at 30% 30%, rgba(160,160,160,.85), transparent 40%),
-    radial-gradient(circle at 70% 65%, rgba(180,180,180,.8), transparent 40%);
-  animation-duration:20s;
-}
-#app[data-state=cancelled] .fluid-blob-2{
-  background:
-    radial-gradient(circle at 60% 30%, rgba(200,200,200,.4), transparent 35%),
-    radial-gradient(circle at 35% 70%, rgba(140,140,140,.3), transparent 35%);
-  animation-duration:26s;
-}
-#app[data-state=cancelled] .glass-shell{
-  box-shadow:
-    inset -3px -3px 14px rgba(255,255,255,.06),
-    inset  3px  3px 14px rgba(255,255,255,.2),
-    0 0 20px rgba(160,160,160,.15),
-    0 0 40px rgba(160,160,160,.05);
-  border-color:rgba(255,255,255,.14);
-}
-#app[data-state=cancelled] .glass-shell::before{ opacity:.35; }
-#app[data-state=cancelled] .glass-shell::after{ opacity:.2; }
-#app[data-state=cancelled] .eye{ width:24px; height:22px; border-radius:11px; }
-#app[data-state=cancelled] .blush{ opacity:0; }
+/* 进入 cancelled:腔体一缩并褪色。进入 error:横向抖一下 */
 @keyframes cancelCollapse{
   0%{ transform:scale(1); filter:saturate(1); }
-  45%{ transform:scale(.88); filter:saturate(.18); }
-  100%{ transform:scale(.93); filter:saturate(.18); }
+  45%{ transform:scale(.88); filter:saturate(.2); }
+  100%{ transform:scale(.94); filter:saturate(.2); }
 }
-#orb.collapsing .inner-fluid{ animation:cancelCollapse .34s ease-out forwards; }
-
-/* --- error：饱和红，唯一完全停转的状态，眼睛交叉 --- */
-#app[data-state=error] .inner-fluid{ background:linear-gradient(135deg,#ef5350,#e53935); }
-#app[data-state=error] .fluid-blob{
-  background:
-    radial-gradient(circle at 30% 30%, rgba(211,47,47,.9), transparent 40%),
-    radial-gradient(circle at 70% 65%, rgba(244,67,54,.85), transparent 40%);
-  animation-play-state:paused;
-}
-#app[data-state=error] .fluid-blob-2{
-  background:
-    radial-gradient(circle at 60% 30%, rgba(255,138,128,.45), transparent 35%),
-    radial-gradient(circle at 35% 70%, rgba(183,28,28,.4), transparent 35%);
-  animation-play-state:paused;
-}
-#app[data-state=error] .glass-shell{
-  box-shadow:
-    inset -3px -3px 14px rgba(255,255,255,.08),
-    inset  3px  3px 14px rgba(255,255,255,.3),
-    0 0 50px rgba(244,67,54,.4),
-    0 0 100px rgba(211,47,47,.2);
-  border:2px solid rgba(255,110,92,.72);
-}
-#app[data-state=error] .eye{
-  width:26px; height:7px; border-radius:4px;
-  background:#ffd9d4;
-}
-#app[data-state=error] #eyeL{ transform:rotate(30deg); }
-#app[data-state=error] #eyeR{ transform:rotate(-30deg); }
-#app[data-state=error] .blush{ opacity:0; }
+#orb.collapsing #core{ animation:cancelCollapse .34s ease-out forwards; }
 @keyframes errShake{
   10%,90%{ transform:translateX(-2.5px); }
   30%,70%{ transform:translateX(3.5px); }
   50%{ transform:translateX(-1.5px); }
 }
 #orb.shaking{ animation:errShake .46s cubic-bezier(.36,.07,.19,.97); }
+
+#orb:hover #core{ filter:brightness(1.12); }
+
+/* ============ 六态 ============
+   与 core/state.py 的 VoiceState 一一对应,六个值不多不少。
+   每态换的**只有光**:三个色相簇 + 球外的两层发光。玻璃体与壁不在这里 ——
+   它们在 :root 定义一次,恒定的是容器,变的是光。
+   形态(聚合度、花瓣数、合拢度、液面轮廓、单侧拉扯)在 core.ts,所以静止一帧
+   也能分辨态(FR-6.6)。
+
+   **每态取素材哪一段,由该态的 bloomLevel() 决定** —— 这是「配色直接取自素材」
+   的落法:素材的颜色随聚合度移动(越聚合越偏青且整体变亮,散开相收成单一深蓝紫),
+   所以把状态按它自己的聚合度对进素材的 agg 段,颜色关系才和素材一致,
+   而不是给每态随便挑一个好看的色。
+
+   变量声明块**故意不带 #app 前缀**:开发用的对照页(preview.html / compare.html /
+   replay.html)因此能把同一套颜色套在任意容器上,颜色仍然只有这一个来源。 */
+
+/* idle:bloom .52 → 素材 agg 0.40–0.55。钢蓝 + 天青 + 暗酒红。通电待机,不是熄了 */
+[data-state=idle]{
+  --lum-core:#f1f1f5; --lum-mid:#4795ce; --lum-far:#5f75bd; --lum-alt:#692f4f;
+  --glow:rgba(95,117,189,.15); --glow-far:rgba(95,117,189,.06);
+}
+#app[data-state=idle] #status{ opacity:.55; }
+
+/* listening:bloom .90 → 素材 agg 0.85–1.00。整轮能量最高的一段;
+   取样出来主簇反而偏深(高聚合相大量像素过曝成白,饱和度前 30% 的剩下的是深蓝),
+   亮度由 bloom 与 lit 承担,不靠把色值调亮 */
+[data-state=listening]{
+  --lum-core:#f4f4fa; --lum-mid:#9075b6; --lum-far:#3d91c2; --lum-alt:#bc5ea2;
+  --glow:rgba(61,145,194,.26); --glow-far:rgba(144,117,182,.14);
+}
+#app[data-state=listening] #status{ color:#cfe9fb; }
+
+/* thinking：**六片同色靖紫 #6c7ce8**（使用者第二轮定的）。此前是青→磁沿环渐变，
+   使用者要求「换成统一颜色」。这一态唯一一处刻意离开素材的
+   地方**：使用者要「大胆配色」，落法定为**青 → 磁 沿环渐变** —— 环上第 i 个元素按
+   它在环上的位置在两个端点色之间取值，整圈转起来颜色跟着走，所以「球内有明显变色的
+   亮片」这句话是由**位置**而不是由时间承担的。
+   两个端点：`--lum-far` = 青（环起点）、`--lum-alt` = 磁（环终点）；
+   `--lum-mid` 是两者的中段，只在过渡途中（ring<1）参与轮转。
+   约束仍在：`error` 的朱红与 `gated` 的琥珀不碰，所以这两个端点都避开红与琥珀。 */
+[data-state=thinking]{
+  --lum-core:#f2f4ff; --lum-mid:#8f7fd8; --lum-far:#6c7ce8; --lum-alt:#8a7ce8;
+  --glow:rgba(108,124,232,.24); --glow-far:rgba(108,124,232,.11);
+}
+#app[data-state=thinking] #status{ color:#c8e6fa; }
+
+/* speaking:bloom .83 → 素材 agg 0.70–0.85 */
+[data-state=speaking]{
+  --lum-core:#f4f4f9; --lum-mid:#b888db; --lum-far:#57a8dd; --lum-alt:#d094b8;
+  --glow:rgba(87,168,221,.24); --glow-far:rgba(184,136,219,.12);
+}
+#app[data-state=speaking] #status{ color:#f0dcf2; }
+
+/* cancelled:bloom .26 → 素材 agg 0.10–0.25。**刻意取这一段而不是 0.25–0.40**:
+   0.25–0.40 段的主簇是亮薰衣草 #a7a6e9,而「光垮了」必须暗下去。
+   0.10–0.25 段是素材自己的暗相(#7176b7 / #522675 / #4a1b37),既取自素材又够暗。
+   `--lum-core` 也压成主簇色:这一态 coreGlow() 返回 0,本来就没有白热核 */
+[data-state=cancelled]{
+  --lum-core:#7176b7; --lum-mid:#522675; --lum-far:#7176b7; --lum-alt:#4a1b37;
+  --glow:rgba(113,118,183,.10); --glow-far:rgba(113,118,183,.03);
+}
+#app[data-state=cancelled] #status{ color:#a9abc4; opacity:.65; }
+
+/* error:朱红 + 橙 + 暗红。**不参与素材取样** —— 素材整轮只有一种外观,没有
+   「出错」这一相;而把异常涂成正常态的蓝紫,等于在界面上少说一件事。
+   形态上它也是唯一 skew 非零的一态(一侧被拉长)+ 横向抖一下 */
+[data-state=error]{
+  --lum-core:#fff0ea; --lum-mid:#ff6f4a; --lum-far:#c03818; --lum-alt:#e05028;
+  --glow:rgba(255,111,74,.26); --glow-far:rgba(192,56,24,.13);
+}
+#app[data-state=error] #status{ color:#ffc4b4; }
+
+/* ============ 闸门态:有命令待确认 ============
+   写在六态之后所以能盖住它们。琥珀而非红色:「需要你确认」不是「出错了」,
+   两者必须能分辨。
+
+   **它是这个柔光世界里唯一硬的东西**:core.ts 见到 gated 就画单层、不模糊、
+   butt 端点的一道厚闸,壁另发整圈琥珀光。一团弥散的光表达不了「拦住」,而闸
+   必须表达它 —— 所以它反着来,并因此在余光里最抢眼。语义正好要求它最抢眼。
+   三层都设成同一个琥珀:闸就该单色,不浪漫。 */
+[data-confirm=true]{
+  --lum-core:var(--amber); --lum-mid:var(--amber); --lum-far:var(--amber); --lum-alt:var(--amber);
+  --glow:rgba(255,180,84,.26); --glow-far:rgba(255,180,84,.12);
+}
+#app[data-confirm=true] #status{ color:#ffd9a8; opacity:1; }
 
 /* ============ 展开面板 ============ */
 #panel{
@@ -401,86 +304,92 @@ body{
   align-content:start;
   opacity:0;
   transform:translateY(-6px);
-  transition:opacity .28s ease, transform .28s cubic-bezier(.25,1,.5,1);
+  transition:opacity .28s ease, transform .28s cubic-bezier(.16,1,.3,1);
   min-height:0;
 }
 #app[data-expanded=true] #panel{ display:grid; }
 #app[data-expanded=true][data-panel-in=true] #panel{ opacity:1; transform:translateY(0); }
 
+/* 回复流。**顶部那条光带与球同源**:中心最亮、向两端淡出,是一条光而不是一条
+   边框,而且它吃 `--lum-mid`/`--lum-core` —— 回复正在流出时球是 speaking,这条线
+   就是暖金的,两处是同一个信号源。面板此前是一张通用的深色玻璃卡(10px 圆角 +
+   一圈白边),球有身份而面板没有,同一产品里两种视觉语言按缺陷处理(宪法第 7 条)。
+   圆角从 10px 收到 2px:这不是一张卡片,是一块读数窗。 */
 #reply{
-  font-size:13px; line-height:1.65;
-  color:#eef2f5;
-  background:rgba(12,14,18,.72);
-  -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);
-  border:1px solid rgba(255,255,255,.10);
-  border-radius:10px;
-  padding:11px 13px;
+  font-size:12.5px; line-height:1.7;
+  color:#e9eef3;
+  /* **一张卡都不剩，连那条光带也删了。** 深色玻璃底、圆角、backdrop 先删；
+     顶部那条 2px 的光带留到上一轮 —— 使用者在桌面上看到的「那条白线」就是它。
+     它横跨面板整宽，在透明窗口上读作一条凭空浮在壁纸上的线，而线一律不许出现。
+     现在回复只有文字与文字自己的投影。 */
+  background:none;
+  padding:11px 13px 11px;
   max-height:150px;
   overflow-y:auto;
   overflow-wrap:anywhere;
   white-space:pre-wrap;
   text-shadow:0 1px 6px #000a;
   scrollbar-width:thin;
-  scrollbar-color:rgba(255,255,255,.22) transparent;
+  scrollbar-color:rgba(255,255,255,.2) transparent;
 }
 #reply:empty{ display:none; }
 #reply::-webkit-scrollbar{ width:6px; }
-#reply::-webkit-scrollbar-thumb{ background:rgba(255,255,255,.22); border-radius:3px; }
+#reply::-webkit-scrollbar-thumb{ background:rgba(255,255,255,.2); border-radius:0; }
 
+/* 光标跟随态色:回复正在流出时它和球是同一个信号源 */
 .caret{
   display:inline-block;
   width:7px; height:1.05em;
   vertical-align:-2px;
   margin-left:2px;
-  background:#7fd8e0;
+  background:var(--lum-core);
   animation:caretBlink 1.05s steps(1) infinite;
 }
 @keyframes caretBlink{ 0%,49%{opacity:1} 50%,100%{opacity:0} }
-
 /* ---- 工具确认卡(FR-6.13) ----
-   琥珀色而非红色：「需要你确认」不是「出错了」，必须与 error 态可分辨 */
+   本产品唯一一个「点错了会有后果」的界面,所以它不能长成一张通知卡。
+   顶部那条**琥珀斜纹带**借的是道闸与警示带:现实世界里「此处需要许可才能通过」
+   就是这个长相,而且它与球的琥珀闸门同色,两处说的是同一件事。
+   上一版是 10px 圆角 + `border-left:3px solid var(--amber)` —— 单侧粗色边框被
+   impeccable 检测器判为「AI 生成 UI 最好认的标记」,已删,不给例外。 */
 #confirm{
-  background:rgba(28,20,8,.86);
+  background:rgba(24,17,6,.9);
   -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);
-  border:1px solid rgba(255,180,84,.44);
-  border-left:3px solid var(--amber);
-  border-radius:10px;
+  border:1px solid rgba(255,180,84,.4);
+  border-radius:2px;
   padding:10px 12px 11px;
   display:grid; gap:7px;
-  box-shadow:0 6px 22px #000a;
+  box-shadow:0 6px 22px #000b;
 }
 #confirm[hidden]{ display:none; }
+/* 斜纹闸带。负 margin 让它贴到卡的三边 —— 一道闸横跨整个通路,不是卡里的一个装饰条 */
+#confirm::before{
+  content:'';
+  height:7px;
+  margin:-10px -12px 2px;
+  background:repeating-linear-gradient(-45deg,
+    var(--amber) 0 5px, rgba(0,0,0,.62) 5px 10px);
+  opacity:.9;
+}
 
 .confirm-head{
   margin:0;
-  display:flex; align-items:center; gap:7px;
-  font-size:12px; font-weight:650;
-  color:#ffd9a8; letter-spacing:.03em;
-}
-.confirm-icon{
-  width:13px; height:13px; flex:none;
-  border-radius:50%;
-  border:1.5px solid var(--amber);
-  position:relative;
-}
-.confirm-icon::after{
-  content:''; position:absolute;
-  left:50%; top:2px; width:1.5px; height:5px;
-  margin-left:-.75px;
-  background:var(--amber); border-radius:1px;
-  box-shadow:0 6.5px 0 0 var(--amber);
+  font-family:var(--mono);
+  font-size:10.5px; font-weight:600;
+  letter-spacing:.18em;
+  color:#ffd9a8;
 }
 
-/* 命令原文：完整显示，不截断、不省略号、不 line-clamp。
-   长命令靠换行与滚动，全文始终在 DOM 里。 */
+/* 命令原文:完整显示,不截断、不省略号、不 line-clamp。
+   长命令靠换行与滚动,全文始终在 DOM 里。 */
 #confirm-cmd{
   margin:0;
   font-family:var(--mono);
   font-size:11.5px; line-height:1.55;
   color:#ffe8c8;
-  background:rgba(0,0,0,.42);
+  background:rgba(0,0,0,.5);
   border:1px solid rgba(255,180,84,.2);
-  border-radius:6px;
+  border-radius:2px;
   padding:7px 9px;
   white-space:pre-wrap;
   overflow-wrap:anywhere;
@@ -492,8 +401,7 @@ body{
 }
 #confirm-cmd:focus-visible{ outline:2px solid var(--amber); outline-offset:1px; }
 #confirm-cmd::-webkit-scrollbar{ width:6px; }
-#confirm-cmd::-webkit-scrollbar-thumb{ background:rgba(255,180,84,.35); border-radius:3px; }
-
+#confirm-cmd::-webkit-scrollbar-thumb{ background:rgba(255,180,84,.35); border-radius:0; }
 #confirm-reason{
   margin:0;
   font-size:11px; line-height:1.5;
@@ -505,13 +413,14 @@ body{
   display:flex; gap:7px; justify-content:flex-end;
 }
 .confirm-actions button{
-  font-family:inherit; font-size:11.5px; font-weight:600;
+  font-family:var(--mono); font-size:11px; font-weight:600;
+  letter-spacing:.12em;
   padding:5px 14px;
-  border-radius:6px;
+  border-radius:2px;
   cursor:pointer;
   transition:background .16s, border-color .16s, transform .1s;
 }
-.confirm-actions button:active{ transform:scale(.96); }
+.confirm-actions button:active{ transform:scale(.97); }
 .confirm-actions button:focus-visible{
   outline:2px solid #fff;
   outline-offset:2px;
@@ -529,12 +438,14 @@ body{
 }
 #confirm-allow:hover{ background:rgba(255,180,84,.3); }
 
-/* ============ 降级(FR-6.6)：静态帧仍要能分出六态 ============ */
+/* ============ 降级(FR-6.6) ============
+   静止的一帧仍要能分出六态 —— 这由光团的弧长、段数、相位、厚度、半径、层数
+   六项联合保证,不是靠动画。所以这里只需停掉动画:core.ts 见到 reduce 就只画
+   一帧代表帧,不再进 rAF。常驻的呼吸与眨眼节律本来就已经删掉了。 */
 @media (prefers-reduced-motion: reduce){
-  .fluid-blob, .fluid-blob-2, .ring, .inner-fluid, .caret{
-    animation-play-state:paused !important;
-  }
+  .caret{ animation-play-state:paused !important; }
   #orb.squishing, #orb.shaking{ animation:none !important; }
+  #orb.collapsing #core{ animation:none !important; }
+  #orb{ transition:none; }
   #panel{ transition:none; }
 }
-

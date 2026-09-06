@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Vox MCP Server Registry",
+  "description": "Shape of config/mcp.toml once parsed by tomllib. MCP servers are external subprocesses that expose arbitrary tools, so this contract exists before the client does -- the same order policy.py came before any tool that needed it. There is deliberately no key for a credential: a secret reaches a server only by naming an environment variable in env_passthrough, and the value is still read from the environment.",
+  "type": "object",
+  "required": ["mcp"],
+  "properties": {
+    "mcp": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {"type": "boolean", "description": "Master switch. Ships false: an MCP server can do anything its tools can do, so it is opt-in twice (here and per server)."},
+        "timeout_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 600},
+        "max_output_bytes": {"type": "integer", "minimum": 256, "maximum": 200000},
+        "require_confirmation": {"type": "boolean", "description": "Whether a remote tool needs an explicit user confirmation before each run. Ships true; a per-server auto_allow list is the only way to narrow it."}
+      },
+      "additionalProperties": false
+    },
+    "servers": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/server"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "server": {
+      "type": "object",
+      "required": ["name", "command"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$", "description": "Lowercase slug. It becomes part of the tool name (mcp.<name>.<tool>), so the character set is restricted rather than free text."},
+        "command": {"type": "string", "minLength": 1},
+        "args": {"type": "array", "items": {"type": "string"}},
+        "cwd": {"type": "string", "minLength": 1},
+        "enabled": {"type": "boolean"},
+        "env_passthrough": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "allow": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Remote tool names this server may expose. Empty means all of them, which is the widest setting and is why it is worth writing down."},
+        "auto_allow": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Remote tool names that run without a per-call confirmation. Empty means every call is confirmed."},
+        "timeout_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 600}
+      },
+      "additionalProperties": false
+    }
+  }
+}

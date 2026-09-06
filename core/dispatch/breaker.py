@@ -87,6 +87,9 @@ class CircuitBreaker:
         self.cooldown_s = float(cooldown_s)
         self._clock = clock if clock is not None else time.monotonic
         self._on_event = on_event
+        #: Event delivery is a side channel; count failures without changing
+        #: the breaker decision or leaking the sink exception to the caller.
+        self.sink_failures = 0
         self._agents: dict[str, BreakerState] = {}
 
     # -- state ---------------------------------------------------------------
@@ -215,13 +218,20 @@ class CircuitBreaker:
         event = validate_event(build_event(event_type, payload), AGENT_SCHEMA_PATH)
         if self._on_event is None:
             return
-        self._on_event(event)
+        try:
+            self._on_event(event)
+        except Exception:
+            # A logging/transport sink must not make a health transition look
+            # like a failed probe. The validated envelope is still returned to
+            # the caller only through the sink, so retain just the count here.
+            self.sink_failures += 1
 
     def describe(self) -> dict[str, Any]:
         """Health of every agent the breaker has seen. No task text, ever."""
         return {
             "threshold": self.threshold,
             "cooldown_s": self.cooldown_s,
+            "sink_failures": self.sink_failures,
             "agents": {
                 name: {
                     "state": self._refresh(entry).state,

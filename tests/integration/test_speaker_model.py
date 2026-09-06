@@ -24,9 +24,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from core.audio import SpeakerVerificationProvider
+from core.audio.speaker import DEFAULT_MODEL_NAME
 
 ROOT = Path(__file__).resolve().parents[2]
-MODEL = ROOT / "models" / "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
+# 跟着出厂默认走，不写死文件名 —— 2026-08-29 换过一次模型（ERes2Net → CAM++），
+# 写死的那一版会在换型当天变红，而它想测的是「当前默认那个模型有判别力」。
+MODEL = ROOT / "models" / DEFAULT_MODEL_NAME
 WAVS = ROOT / "models" / "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01" / "test_wavs"
 
 # Grouping derived from the measured cosine matrix, not from any label shipped
@@ -55,7 +58,9 @@ def provider(tmp_path):
 
 
 def test_the_model_loads_and_reports_its_dimension(provider):
-    assert provider.dim == 512
+    # 维度不写死:CAM++ 是 192,ERes2Net 是 512。断言的是「报得出一个正的维度」,
+    # 那才是这条测试想说的事(模型真加载起来了)。
+    assert provider.dim > 0
     assert provider.describe()["available"] is True
 
 
@@ -92,7 +97,7 @@ def test_embeddings_separate_speakers(provider):
 def test_enrolled_speaker_is_admitted_and_others_are_refused(provider):
     samples, sample_rate = _read(0)
     result = provider.enroll("owner", [samples], sample_rate=sample_rate)
-    assert result.dim == 512
+    assert result.dim == provider.dim
 
     for index in (1, 2):
         accepted = provider.verify(_read(index)[0], sample_rate=sample_rate)
@@ -103,7 +108,9 @@ def test_enrolled_speaker_is_admitted_and_others_are_refused(provider):
         refused = provider.verify(_read(index)[0], sample_rate=sample_rate)
         assert not refused.accepted, f"wav {index} is a different speaker: {refused}"
         assert refused.speaker is None
-        assert "below threshold" in refused.reason
+        # 原因是中文，而且带上「差多少」：0.448 和 -0.022 是完全不同的两件事
+        # （条件不够好 vs 不是这个人），只写 below threshold 把两者混成一句话。
+        assert "相似度" in refused.reason and "阈值" in refused.reason
 
 
 def test_appending_samples_keeps_the_earlier_enrollment(provider):

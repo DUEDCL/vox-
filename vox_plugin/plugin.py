@@ -1,12 +1,59 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from core.events import build_event
 from core.state import VoiceState, VoiceStateMachine
+
+
+_PUNCT_ONLY_RE = re.compile(r"^[\s。！？；…!?;,.，、]+$")
+
+
+def split_speech(text: str) -> list[str]:
+    """Split a reply into speakable sentences for the TTS queue.
+
+    The orchestrator owns the split (ADR 001 puts the queue outside model
+    inference): each segment becomes one ``tts.chunk`` event and one unit of
+    playback, so audio starts after the *first* sentence renders instead of
+    after the whole reply. Sentence enders are CJK 。！？；… plus ! ? ; ; and
+    newline, and an ASCII dot -- except between digits, so 「3.14」 stays one
+    utterance.
+
+    ponytail: abbreviations like e.g. still split; prosody cost only, add a
+    table if real replies ever hit it.
+    """
+    segments: list[str] = []
+    start = 0
+    length = len(text)
+    for index, char in enumerate(text):
+        if char not in "。！？；…!?;;\n":
+            if char != ".":
+                continue
+            # A dot between digits is a decimal point, not a sentence end.
+            digit_before = index > 0 and text[index - 1].isdigit()
+            digit_after = index + 1 < length and text[index + 1].isdigit()
+            if digit_before and digit_after:
+                continue
+        segment = text[start : index + 1].strip()
+        if segment:
+            segments.append(segment)
+        start = index + 1
+    tail = text[start:].strip()
+    if tail:
+        segments.append(tail)
+    # A lone trailing punctuation run reads worse than it speaks:
+    # fold it into the sentence it belongs to.
+    merged: list[str] = []
+    for segment in segments:
+        if merged and _PUNCT_ONLY_RE.match(segment):
+            merged[-1] += segment
+        else:
+            merged.append(segment)
+    return merged
 
 
 @dataclass
@@ -28,6 +75,17 @@ class VoicePlugin:
     last_reply: str | None = None
     rejections: int = 0
     last_rejection: dict | None = None
+    #: Who the voiceprint gate verified on the most recent accepted wake, as
+    #: reported by ``capture.on_verified``. ``None`` is the honest default and it
+    #: means ``shell.run`` is refused.
+    #:
+    #: This is the one piece of state the plugin is allowed to hold about identity
+    #: and it is *received*, never invented -- the capture layer runs the gate, so
+    #: it is the only layer that knows. It deliberately does not travel in any
+    #: event: events fan out to every log and transport, and a speaker name is
+    #: personal data with no diagnostic value that ``score`` does not already
+    #: carry.
+    verified_speaker: str | None = None
     memory_writer: Any = None
     memory_recaller: Any = None
     tools: Any = None
@@ -41,6 +99,12 @@ class VoicePlugin:
     #: the event stream is the telemetry. Failures are counted, not propagated.
     on_event: Any = None
     sink_failures: int = 0
+    #: 合成在 ``complete_turn`` 里失败过几次，以及最后一次的原因。**不是遥测** ——
+    #: 运行时每轮比一次这个计数并把增量写进运行日志（error 级）。存在的理由见
+    #: ``complete_turn`` 里那段注释：吞掉合成失败又不留痕，就是「助手不出声而哪里都
+    #: 查不到」的成因。
+    tts_failures: int = 0
+    last_tts_error: str = ""
 
     def _emit(self, event: dict) -> dict:
         """Record, then fan out. Every event in this class goes through here."""
@@ -114,6 +178,35 @@ class VoicePlugin:
         wake_event = self._event("wake.detected", {"keyword": keyword, "score": score})
         return [wake_event, state_event]
 
+    def listening_expired(self, seconds: float = 0.0) -> list[dict]:
+        """聆听结束了，什么都没听到 -> 退回待机。
+
+        **这一步存在的理由是一个说谎的状态。** 唤醒之后没人开口时，采集侧的聆听会结束
+        （流式识别器静默 2.4 秒就报一次端点），而此前没有任何一条路把这件事告诉状态机 ——
+        于是它停在 LISTENING，唤醒球一直显示「在听」，而麦克风其实已经回到唤醒模式了。
+
+        不用 ``cancel()``：那一步会发 ``turn.cancelled``，而这里根本没有过一个回合。
+        不在 LISTENING 时是**空操作**（不抛）—— 这个调用来自音频线程，而人可能刚好在
+        超时的同一刻说了话、回合已经开始了；那种情况下什么都不该做。
+        """
+        if self.machine.state != VoiceState.LISTENING:
+            return []
+        return [self._state_event(VoiceState.IDLE, f"listening expired after {seconds:g}s")]
+
+    def end_conversation(self, reason: str = "user ended the conversation") -> list[dict]:
+        """使用者说了「退下吧」-> 退回待机，**这一轮之后不再等下一句**。
+
+        和 ``listening_expired`` 的区别只有一个字：那一条是「没人说话，到点了」，这一条是
+        「说话的人明确说了结束」。合成一条会让日志和事件流分不出「它自己走的」和「我让它
+        走的」—— 而那两件事在排查「它怎么不听了」时是完全不同的线索。
+
+        不用 ``cancel()``：那一步发 ``turn.cancelled``，而这里那一轮是**正常说完的**。
+        不在 LISTENING 时是空操作（不抛），理由和 ``listening_expired`` 同一条。
+        """
+        if self.machine.state != VoiceState.LISTENING:
+            return []
+        return [self._state_event(VoiceState.IDLE, reason)]
+
     def wake_rejected(self, keyword: str, reason: str, score: float = 0.0) -> dict:
         """Record a wake hit the speaker gate refused.
 
@@ -149,21 +242,49 @@ class VoicePlugin:
             self.last_reply = result.get("reply")
         return events
 
-    def complete_turn(self, reply: str) -> list[dict]:
-        """Finish the pending turn: reply -> speech -> back to listening."""
+    def complete_turn(self, reply: str, *, speak: bool = True) -> list[dict]:
+        """Finish the pending turn: reply -> speech -> back to listening.
+
+        The reply is spoken as a queue of sentences (see ``split_speech``):
+        one ``tts.chunk`` per sentence, audio starting once the first one
+        renders. A barge-in mid-turn drops the not-yet-spoken remainder;
+        memory stores the full reply either way.
+
+        ``speak=False`` 走完**同样的事件序列**但不出声。控制台的打字聊天用它：那一页上
+        「要不要念出来」是个勾选框，而 `speak_segments` 是阻塞的 —— 不给这个开关的话，
+        一句 40 字的回答要等 10 秒才在聊天框里出现（音频播完才返回）。事件序列不变是
+        刻意的：`tts.chunk` 仍然发，唤醒球照常显示这一轮说了什么，少的只有声音。
+        """
         if self.machine.state != VoiceState.THINKING:
             raise RuntimeError("turn can only complete while thinking")
-        events = [
-            self._event("llm.delta", {"text": reply}),
-            self._event("tts.chunk", {"index": 0, "text": reply}),
-        ]
+        chunks = split_speech(reply) or [reply]
+        events = [self._event("llm.delta", {"text": reply})]
+        for index, chunk in enumerate(chunks):
+            events.append(self._event("tts.chunk", {"index": index, "text": chunk}))
         events.append(self._state_event(VoiceState.SPEAKING, "tts playback"))
-        if self.tts is not None:
+        if self.tts is not None and speak:
             # Audio is the enhancement; a TTS failure must not end the turn.
+            #
+            # **但它必须留痕。** 这里此前是 `except Exception: pass` —— 一个字都不留。
+            # 2026-09-02 真机上的后果：云端合成回 HTTP 401（key 被另一份覆盖），于是每一轮
+            # 都在这里被吞掉，使用者看到的是「助手一句话都不出声」，而日志、事件、就绪清单
+            # 三处都没有任何线索。对语音助手来说不出声与没听见同形，所以最需要的那条线索
+            # 正是这里删掉的那一条。仍然不重抛（一次合成失败不该结束回合）。
             try:
-                self.tts.speak(reply)
-            except Exception:
-                pass
+                batch = getattr(self.tts, "speak_segments", None)
+                if callable(batch):
+                    batch(chunks)
+                else:
+                    # Legacy engines only know single utterances; drain them
+                    # here and honour a cancellation marker between sentences.
+                    stopped = getattr(self.tts, "is_stopped", None)
+                    for chunk in chunks:
+                        if callable(stopped) and stopped():
+                            break
+                        self.tts.speak(chunk)
+            except Exception as exc:  # noqa: BLE001 - 记下来，不结束这一轮
+                self.tts_failures += 1
+                self.last_tts_error = f"{type(exc).__name__}: {exc}"
         events.append(self._event("turn.done", {}))
         events.append(self._state_event(VoiceState.LISTENING, "continuous conversation"))
         self._remember(reply, role="assistant")
@@ -222,7 +343,14 @@ class VoicePlugin:
         self.tts = tts
         return {"tts_attached": tts is not None}
 
-    def attach_capture(self, capture: Any = None, *, on_recognized: Any = None) -> dict:
+    def attach_capture(
+        self,
+        capture: Any = None,
+        *,
+        on_recognized: Any = None,
+        on_wake: Any = None,
+        on_reject: Any = None,
+    ) -> dict:
         """Wire a microphone capture in and point its callbacks here.
 
         The capture's ``on_wake`` / ``on_reject`` are (re)pointed at this plugin,
@@ -230,19 +358,46 @@ class VoicePlugin:
         caller still chooses the capture (KWS provider, verifier, device); the
         plugin only owns the state machine the hits drive.
 
+        ``on_verified`` is pointed at ``set_verified_speaker``, which is how the
+        gate's answer to *who spoke* arrives. Before this existed the identity
+        stopped at the capture layer and callers filled in a constant, so
+        ``shell.run``'s one credential was a string literal. Detaching (passing
+        ``None``) clears it, because a runtime with no microphone has no verified
+        speaker.
+
         ``on_recognized`` is where transcribed speech lands. It defaults to
         ``submit_text``, which walks the state machine and the memory write but
         does **not** dispatch -- a caller that wants the whole turn (dispatch,
         answer, TTS) passes its own, which is what ``VoiceRuntime`` does with
         ``say``. Defaulting to the dispatching path instead would make the
         plugin depend on a dispatcher it deliberately does not own.
+        ``on_wake`` 同理：默认就是 ``wake_detected``（状态机该走的那一步），调用方要在命中
+        之后**额外**做点什么（弹出唤醒球、应一声）就传自己的包装，在里面调 ``wake_detected``。
+        把「显示窗口」和「播确认音」放进这个类会让状态机知道桌面和扬声器的存在，而那是
+        ``VoiceRuntime`` 的知识。``on_reject`` 与 ``on_wake`` 对称，理由相同：一次被声纹
+        拒绝的唤醒是使用者最需要看见的事件（它和「根本没命中」长得一样而根因不同），
+        而「把它记到哪」是调用方的知识。
         """
         self.audio_capture = capture
         if capture is not None:
-            capture.on_wake = self.wake_detected
-            capture.on_reject = self.wake_rejected
+            capture.on_wake = on_wake or self.wake_detected
+            capture.on_reject = on_reject or self.wake_rejected
             capture.on_recognized = on_recognized or self.submit_text
+            capture.on_verified = self.set_verified_speaker
+        else:
+            self.verified_speaker = None
         return {"capture_attached": capture is not None}
+
+    def set_verified_speaker(self, speaker: str | None) -> None:
+        """Record the gate's verdict. Assignment only -- it must not be able to fail.
+
+        The capture layer calls this with ``None`` at the start of every wake
+        attempt and with a name only on acceptance, so this method never needs to
+        reason about staleness. Keeping it a plain assignment is what makes that
+        guarantee hold: anything that could raise here would leave the previous
+        speaker's identity standing on the failure path.
+        """
+        self.verified_speaker = speaker or None
 
     def run_tool(
         self,

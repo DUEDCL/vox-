@@ -77,3 +77,92 @@ def test_bridge_requires_turn_id_in_send_response():
     finally:
         server.shutdown()
         thread.join()
+
+
+# -- connect-phase retry -------------------------------------------------------
+
+
+import socket  # noqa: E402 - test-scoped import keeps the table above stable
+from urllib.error import HTTPError, URLError  # noqa: E402
+
+
+class FakeResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        return json.dumps({"turn_id": "turn-1"}).encode()
+
+
+def _patch_urlopen(monkeypatch, outcomes):
+    """Replace urlopen with a scripted list of raises/returns."""
+    calls = {"count": 0}
+    def fake_urlopen(request, timeout=None):
+        index = calls["count"]
+        calls["count"] += 1
+        outcome = outcomes[min(index, len(outcomes) - 1)]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+    monkeypatch.setattr("core.session_bridge.urlopen", fake_urlopen)
+    return calls
+
+
+def refused():
+    return URLError(ConnectionRefusedError("target machine refused"))
+
+
+def test_connection_refused_is_retried_then_recovers(monkeypatch):
+    transport = LocalEvoXTransport("http://localhost:9", "secret", attempts=3, retry_backoff_s=0.0)
+    calls = _patch_urlopen(monkeypatch, [refused(), FakeResponse()])
+
+    assert transport.send("hello")["turn_id"] == "turn-1"
+    assert calls["count"] == 2
+
+
+def test_dns_failure_is_also_connect_phase(monkeypatch):
+    transport = LocalEvoXTransport("http://localhost:9", "secret", attempts=2, retry_backoff_s=0.0)
+    calls = _patch_urlopen(monkeypatch, [URLError(socket.gaierror(-2, "name")), FakeResponse()])
+
+    assert transport.send("hello")["turn_id"] == "turn-1"
+    assert calls["count"] == 2
+
+
+def test_exhausted_connect_retries_raise_bridge_error(monkeypatch):
+    transport = LocalEvoXTransport("http://localhost:9", "secret", attempts=3, retry_backoff_s=0.0)
+    calls = _patch_urlopen(monkeypatch, [refused()])
+
+    with pytest.raises(BridgeError):
+        transport.send("hello")
+    assert calls["count"] == 3
+
+
+def test_timeout_is_never_retried_even_with_budget(monkeypatch):
+    transport = LocalEvoXTransport("http://localhost:9", "secret", attempts=5, retry_backoff_s=0.0)
+    calls = _patch_urlopen(monkeypatch, [TimeoutError("read timed out")])
+
+    with pytest.raises(BridgeError, match="bridge failed"):
+        transport.send("hello")
+    assert calls["count"] == 1  # the turn may have executed; no re-send
+
+
+def test_http_error_is_never_retried(monkeypatch):
+    transport = LocalEvoXTransport("http://localhost:9", "secret", attempts=4, retry_backoff_s=0.0)
+    calls = _patch_urlopen(monkeypatch, [HTTPError("http://x", 503, "boom", None, None)])
+
+    with pytest.raises(BridgeError):
+        transport.send("hello")
+    assert calls["count"] == 1
+
+
+def test_default_single_attempt_keeps_historical_behaviour(monkeypatch):
+    transport = LocalEvoXTransport("http://localhost:9", "secret")
+    assert transport.attempts == 1
+    calls = _patch_urlopen(monkeypatch, [refused()])
+
+    with pytest.raises(BridgeError):
+        transport.send("hello")
+    assert calls["count"] == 1

@@ -60,12 +60,16 @@ python -m venv .venv
 | Silero VAD | `models/silero_vad.onnx` | 2.3 MB | 端点检测 |
 | MeloTTS VITS | `models/vits-melo-tts-zh_en/` | 183 MB | 中英合成 |
 | (未清理归档) | `models/kws.tar.bz2` + `tts.tar.bz2` | 192 MB | 可删除 |
-| 声纹 3D-Speaker ERes2Net | `models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx` | 37.8 MB | 声纹准入(**已下载**,dim 512) |
+| 声纹 3D-Speaker CAM++ | `models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx` | 27 MB | 声纹准入(**已下载**,dim 192,2026-08-29 起的默认) |
+| 声纹 3D-Speaker ERes2Net | `models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx` | 37.8 MB | 上一代(dim 512),已被取代,留着可回退 |
 
 Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3`
-声纹模型 SHA-256:`1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b`(39,593,761 字节,embedding dim **512**,2026-08-02 下载并自检)
+声纹模型(CAM++,当前默认)SHA-256:`f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11`(28,281,138 字节,embedding dim **192**)
+声纹模型(ERes2Net,已取代)SHA-256:`1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b`(39,593,761 字节,embedding dim **512**,2026-08-02 下载并自检)
 
-声纹模型来源(核实等级:**官方文档确认**,k2-fsa.github.io):`https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx`。release tag 里 `recongition` 的拼写是官方笔误,不是本文档写错。
+两个模型在同一个 release tag 下。来源(核实等级:**官方文档确认**,k2-fsa.github.io):`https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx`。release tag 里 `recongition` 的拼写是官方笔误,不是本文档写错。
+
+**换型会让既有注册全部作废**:512 维向量对 192 维模型没有意义。`_restore()` 把它们记进 `stale_profiles` 并由 `describe()` 报出来 —— 那件事必须可见,否则症状(「一个人都没注册」)和「文件丢了」长得完全一样。选 CAM++ 的依据是实测判别力而不是上游宣称:见 `THIRD_PARTY_NOTICES.md` 与 `core/audio/speaker.py` 模块头那张表。
 
 模型-测试的分工是有意设计的:**`tests/test_speaker.py` 与 `tests/test_speaker_privacy.py` 的 30 个用例全部不依赖此模型** —— 需要守的性质(fail-closed、音频不落盘、`describe()` 不含向量)恰恰是模型缺失时必须成立的那些。只有 `tests/integration/test_speaker_model.py` 需要权重,模型缺失时它 skip 而不是 fail。
 
@@ -152,17 +156,31 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 
 | 目的 | 命令 | 等级 | 预期 |
 |---|---|---|---|
-| Python 全量 | `.venv\Scripts\python.exe -m pytest tests -q` | AUTO | 300 passed, 3 skipped |
+| Python 全量 | `.venv\Scripts\python.exe -m pytest tests -q` | AUTO | **1009 passed, 3 skipped**（2026-08-28，干净 shell） |
+| **控制台** | `.venv\Scripts\python.exe -m pytest tests/test_console.py -q` | AUTO | **103 passed**（回环、token、白名单、路径穿越、凭据拒绝、模型端点与探测） |
+| **模型方案** | `.venv\Scripts\python.exe -m pytest tests/test_models_config.py -q` | AUTO | **60 passed**（未知键、密钥形状、回环 URL、写入保留注释与行尾、预设值不落盘） |
+| **控制台渲染取证** | `preview_start console` → snapshot → console_logs → screenshot | SIM | 九区块齐、**无 JS 错误** |
+| **MCP** | `.venv\Scripts\python.exe -m pytest tests/test_mcp.py -q` | SIM | **51 passed**（进程内假 server） |
+| **搜索后端** | `.venv\Scripts\python.exe -m pytest tests/test_search_backends.py -q` | AUTO | **35 passed**（不打真网络） |
+| **配置编辑** | `.venv\Scripts\python.exe -m pytest tests/test_config_edit.py -q` | AUTO | **33 passed**（注释保留、行尾保留、校验失败不落盘） |
+| **语音配置** | `.venv\Scripts\python.exe -m pytest tests/test_voice_config.py -q` | AUTO | **20 passed**（未知键报错） |
+| **语音装配** | `.venv\Scripts\python.exe -m pytest tests/test_voice_assembly.py -q` | AUTO | **16 passed**（**缺声纹不降级**） |
+| **声纹身份接线** | `.venv\Scripts\python.exe -m pytest tests/test_speaker_identity.py -q` | AUTO | **15 passed**（全部倒向 fail-closed） |
+| **记忆并发** | `.venv\Scripts\python.exe -m pytest tests/test_memory_threads.py -q` | AUTO | **7 passed**（真线程，真 SQLite 文件） |
 | 工具与安全门 | `.venv\Scripts\python.exe -m pytest tests/test_tools.py tests/test_tool_security.py -q` | AUTO | 123 passed, 1 skipped(skip 是符号链接) |
-| 工具/记忆与语音路径接线 | `.venv\Scripts\python.exe -m pytest tests/test_memory.py tests/test_plugin_tools.py -q` | AUTO | 86 passed |
-| 记忆 | `.venv\Scripts\python.exe -m pytest tests/test_memory.py -q` | AUTO | 62 passed(**无需模型**) |
-| 声纹(免模型) | `.venv\Scripts\python.exe -m pytest tests/test_speaker.py tests/test_speaker_privacy.py -q` | AUTO | 30 passed(**无需模型**) |
+| 工具/记忆与语音路径接线 | `.venv\Scripts\python.exe -m pytest tests/test_memory.py tests/test_plugin_tools.py -q` | AUTO | 87 passed |
+| 记忆 | `.venv\Scripts\python.exe -m pytest tests/test_memory.py -q` | AUTO | 65 passed(**无需模型**) |
+| 声纹(免模型) | `.venv\Scripts\python.exe -m pytest tests/test_speaker.py tests/test_speaker_privacy.py tests/test_speaker_hardening.py -q` | AUTO | **44 passed**（**无需模型**） |
 | 声纹(真实模型) | `.venv\Scripts\python.exe -m pytest tests/integration/test_speaker_model.py -q` | AUTO | 5 passed(缺模型时 5 skipped) |
-| 声纹录入 | `.venv\Scripts\python.exe scripts/enroll_speaker.py --name <名字>` | REAL-MIC | 写入向量,不写音频 |
+| 声纹录入(命令行) | `.venv\Scripts\python.exe scripts/enroll_speaker.py --name <名字>` | REAL-MIC | 写入向量,不写音频 |
+| 声纹录入(控制台) | `run_console.py` → 声纹区录 3 段 | REAL-MIC | 逐段报时长与 RMS，`audio_saved: false` |
 | 声纹注册状态 | `.venv\Scripts\python.exe scripts/enroll_speaker.py --name x --list-only` | AUTO | 只出名字与样本数 |
 | 事件契约(语音) | `.venv\Scripts\python.exe -m pytest tests/test_events.py tests/test_event_schema.py -q` | AUTO | 9 passed |
 | 事件契约(平台 + 注册) | `.venv\Scripts\python.exe -m pytest tests/test_agent_event_schema.py -q` | AUTO | 34 passed |
-| 集成 | `.venv\Scripts\python.exe -m pytest tests/integration -q` | AUTO+SIM | 10 passed(缺模型时 3 passed, 7 skipped) |
+| 集成 | `.venv\Scripts\python.exe -m pytest tests/integration -q` | AUTO+SIM | 缺模型时部分 skip |
+| **就绪清单** | `.venv\Scripts\python.exe scripts/run_voice.py --check` | AUTO | 逐项 ok/-- 加补齐提示 |
+| **REAL-AGENT 探测** | `.venv\Scripts\python.exe scripts/acceptance/probe_agents.py` | REAL-AGENT | 三等级不混淆 |
+| **资源画像** | `.venv\Scripts\python.exe scripts/acceptance/resource_profile.py --minutes 30` | REAL-WIN | CSV + 摘要，**只报数字不给结论** |
 | 语音冒烟 | `.venv\Scripts\python.exe scripts/smoke_voice.py` | SIM | 打印生命周期事件 |
 | 端到端模拟 | `.venv\Scripts\python.exe scripts/e2e_simulated.py` | SIM | `E2E SIMULATED OK` |
 | t10 栈验证(证据生成) | `.venv\Scripts\python.exe scripts/acceptance/t10_voice_stack_validation.py` | AUTO+SIM | `t10 OK` |
@@ -301,9 +319,9 @@ Silero VAD SHA-256:`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d87
 | 无观测时的成功率 | ✅ `rate` 是 `None` 而不是 `0.0` |
 | 记忆接进语音路径 | ✅ 两侧轮次都入库并带 `role:*`;不 attach 就不产生数据库文件;writer 抛异常不打断回合 |
 | `/memory/` 是否锚定 | ✅ 前导斜杠已加,并有测试解析 `.gitignore` 双向断言 —— 不带斜杠时 `git check-ignore` 实测把 `core/memory/store.py` 也算进忽略 |
-| 用例数 / 耗时 | 62 passed in 0.69 s(`tests/test_memory.py`) |
+| 用例数 / 耗时 | 65 passed in 0.89 s(`tests/test_memory.py`,含 Task 008 的 2 条 sink 用例) |
 
-**跨进程重启未验。** 上面的 Markdown 往返全部发生在一个进程内。「关掉程序重开,事实还在」是第 25 项待验收,等级 REAL,不是 AUTO 能关的。
+**跨进程持久性:双进程自动化已过(2026-08-24)。** `scripts/acceptance/verify_memory_persistence.py` 以两个真实子进程验证:A 进程写入的事实 B 进程可召回,带外手改 Markdown 经 `sync_facts()` 折回后召回只见新文案(`tests/integration/test_memory_cross_process.py` 随全量钉住)。等级 AUTO_MULTI_PROCESS。「人在场重启真实应用亲眼确认」仍是 REAL 待验收项,不因本条视为关闭。
 
 ### 5.8 工具与安全门(AUTO,2026-08-02,P4)
 

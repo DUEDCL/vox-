@@ -37,6 +37,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -50,6 +51,12 @@ DEFAULT_CONFIRM_TIMEOUT_S = 60.0
 #: Set to make the child window visible from the start; the orb's own default is
 #: hidden so that a launch nobody asked for does not paint on the desktop.
 VISIBLE_ENV = "VOX_WAKE_VISIBLE"
+
+#: 电平最快多久发一次。音频回调 10 次/秒，球不需要比这更快 —— 而管道写入是同步的。
+LEVEL_MIN_GAP_S = 0.08
+
+#: 电平变化小于这个数就不发。安静时读数在 0.001 上下抖，那些行只会让球在原地颤。
+LEVEL_MIN_DELTA = 0.03
 
 #: Where a built desktop binary is looked for, relative to the workspace root.
 #: Order is deliberate: a release build wins over a debug one, because a stale
@@ -104,11 +111,21 @@ class DesktopBridge:
         visible: bool = True,
         confirm_timeout_s: float = DEFAULT_CONFIRM_TIMEOUT_S,
         on_incoming: Callable[[Mapping[str, Any]], None] | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> None:
         self.command = tuple(command) if command is not None else None
         self.visible = visible
         self.confirm_timeout_s = confirm_timeout_s
         self.on_incoming = on_incoming
+        #: 额外交给球那个子进程的环境变量。球的外观（渲染层 / 尺寸 / 出不出文字）就是
+        #: 这么传的：Rust 侧 `setup` 读自己的 env 拼进 URL query。**由配置文件填，不是
+        #: 由人填** —— 在这个参数之前控制台只能生成一行让人复制到启动环境里，而那等于
+        #: 这项配置不存在（见 `core/audio/config.py::orb_environment`）。
+        #:
+        #: 手动设过的同名变量仍然赢：这里只写调用方点名要设的那些，而
+        #: ``orb_environment`` 对默认值不产出条目。调试时 `VOX_ORB_SIZE=240 python …`
+        #: 那条路因此还在。
+        self.environment = dict(environment or {})
         self.process: subprocess.Popen[str] | None = None
         self.sent = 0
         #: Write failures and rejected envelopes, counted rather than raised.
@@ -117,44 +134,141 @@ class DesktopBridge:
         self._lock = threading.Lock()
         self._pending: dict[str, tuple[threading.Event, list[bool]]] = {}
         self._reader: threading.Thread | None = None
+        # 每次子进程会话都有独立代数，避免旧 reader 在重启后污染新会话。
+        self._generation = 0
         self._closed = False
+        #: 球现在看不看得见。``set_level`` 读它 —— 给一个不存在的窗口发电平是纯浪费。
+        self._visible = bool(visible)
+        #: 上一次发出去的电平和时刻，限流用。
+        self._level = -1.0
+        self._level_at = 0.0
 
     # ---------------------------------------------------------------- lifecycle
 
     def start(self) -> None:
         """Spawn the orb and begin reading its answers.
 
-        ``VOX_WAKE_VISIBLE`` is passed through the child's environment rather
-        than a command-line flag, because that is the switch ``main.rs`` already
-        reads -- adding a second way to say the same thing invites the two to
-        disagree.
+        ``start`` is idempotent while a child is alive, but a bridge may be
+        restarted after ``close`` or after the child exits.  The generation
+        token makes an old reader harmless if it finishes after that restart.
         """
-        if self.process is not None:
-            return
-        command = self.command or self._default_command()
         env = dict(os.environ)
+        # 已经在环境里设过的赢：手动 `VOX_ORB_SIZE=240 python scripts/run_console.py`
+        # 是调参用的那条路，配置文件不该把它顶掉。
+        for name, value in self.environment.items():
+            env.setdefault(name, value)
         if self.visible:
             env[VISIBLE_ENV] = "1"
         else:
             env.pop(VISIBLE_ENV, None)
+
+        old_process: subprocess.Popen[str] | None = None
+        process: subprocess.Popen[str] | None = None
+        start_error: BaseException | None = None
+        stale_entries: list[tuple[threading.Event, list[bool]]] = []
+        with self._lock:
+            current = self.process
+            if current is not None and current.poll() is None:
+                return
+            # A dead process may still have a reader blocked in the pipe.
+            # Detach and invalidate that session before creating the next one.
+            old_process = current
+            self.process = None
+            self._reader = None
+            stale_entries = list(self._pending.values())
+            self._pending.clear()
+            self.ready.clear()
+            self._generation += 1
+            generation = self._generation
+            self._closed = False
+            try:
+                command = self.command or self._default_command()
+                process = subprocess.Popen(  # noqa: S603 - argv list, no shell
+                    list(command),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    env=env,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                )
+                reader = threading.Thread(
+                    target=self._read_loop,
+                    args=(process, generation),
+                    name="vox-desktop-bridge",
+                    daemon=True,
+                )
+                self.process = process
+                self._reader = reader
+                reader.start()
+            except (DesktopBridgeError, OSError, RuntimeError) as exc:
+                self.process = None
+                self._reader = None
+                self.ready.clear()
+                self._generation += 1
+                failed_process = process
+                process = None
+                start_error = exc
+            else:
+                failed_process = None
+
+        self._release_pending(stale_entries, approved=False)
+        # ``poll()`` already reaped an exited child.  Do not close its stdout
+        # from this thread: a stale reader may still be blocked because a
+        # descendant inherited the pipe, and TextIOWrapper.close() can wait for
+        # that reader.  The reader owns and closes the stream in its finally.
+        if old_process is not None and old_process.poll() is None:
+            self._stop_process(old_process, close_stdout=False)
+        if start_error is not None:
+            if failed_process is not None:
+                self._stop_process(failed_process)
+            if isinstance(start_error, DesktopBridgeError):
+                raise start_error
+            if isinstance(start_error, OSError):
+                raise DesktopBridgeError(
+                    f"cannot start the desktop orb: {start_error}"
+                ) from start_error
+            raise DesktopBridgeError("cannot start the desktop orb reader") from start_error
+
+    @staticmethod
+    def _stop_process(
+        process: subprocess.Popen[str], *, close_stdout: bool = True
+    ) -> None:
+        """Best-effort child cleanup used by both close and restart recovery.
+
+        A reader thread owns stdout once it has started. Closing that stream
+        from another thread can block when a descendant inherited the pipe, so
+        active readers leave it for ``_read_loop``'s ``finally``.
+        """
         try:
-            self.process = subprocess.Popen(  # noqa: S603 - argv list, no shell
-                list(command),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                env=env,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-            )
-        except OSError as exc:
-            raise DesktopBridgeError(f"cannot start the desktop orb: {exc}") from exc
-        self._reader = threading.Thread(
-            target=self._read_loop, name="vox-desktop-bridge", daemon=True
-        )
-        self._reader.start()
+            if process.stdin is not None:
+                process.stdin.close()
+        except (OSError, ValueError):
+            pass
+        try:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                    try:
+                        process.wait(timeout=3)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                if close_stdout and process.stdout is not None:
+                    process.stdout.close()
+            except (OSError, ValueError):
+                pass
 
     def _default_command(self) -> tuple[str, ...]:
         binary = find_desktop_binary()
@@ -171,24 +285,29 @@ class DesktopBridge:
 
     def close(self) -> None:
         """Stop the child, then refuse every confirmation still waiting."""
-        if self._closed:
-            return
-        self._closed = True
-        process, self.process = self.process, None
+        with self._lock:
+            if self._closed and self.process is None and not self._pending:
+                self.ready.clear()
+                return
+            self._closed = True
+            process, self.process = self.process, None
+            self._reader = None
+            self._generation += 1
+            self.ready.clear()
+            entries = list(self._pending.values())
+            self._pending.clear()
+        self._release_pending(entries, approved=False)
         if process is not None:
-            for closer in (process.stdin, process.stdout):
-                try:
-                    if closer is not None:
-                        closer.close()
-                except OSError:
-                    pass
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-        self._settle_all(False)
+            self._stop_process(process, close_stdout=False)
+
+    @staticmethod
+    def _release_pending(
+        entries: list[tuple[threading.Event, list[bool]]], *, approved: bool
+    ) -> None:
+        for gate, slot in entries:
+            if not slot:
+                slot.append(approved is True)
+            gate.set()
 
     def __enter__(self) -> DesktopBridge:
         self.start()
@@ -219,21 +338,21 @@ class DesktopBridge:
         return self._write({"kind": "event", "event": validated})
 
     def _write(self, message: Mapping[str, Any]) -> bool:
-        process = self.process
-        if process is None or process.stdin is None or process.poll() is not None:
-            self.dropped += 1
-            return False
-        line = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
-        try:
-            with self._lock:
+        with self._lock:
+            process = self.process
+            if process is None or process.stdin is None or process.poll() is not None:
+                self.dropped += 1
+                return False
+            line = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+            try:
                 process.stdin.write(line + "\n")
                 process.stdin.flush()
-        except (OSError, ValueError):
-            # A closed orb is a normal end, not a failure of the turn.
-            self.dropped += 1
-            return False
-        self.sent += 1
-        return True
+            except (OSError, ValueError):
+                # A closed orb is a normal end, not a failure of the turn.
+                self.dropped += 1
+                return False
+            self.sent += 1
+            return True
 
     def set_visible(self, visible: bool) -> bool:
         """Show or hide the orb. Hiding settles pending confirmations as refused.
@@ -241,9 +360,61 @@ class DesktopBridge:
         The frontend already refuses on its side when the card goes away; doing
         it here too means the caller is released even if the orb never answers.
         """
+        self._visible = bool(visible)
         if not visible:
             self._settle_all(False)
+            # 收球时把电平的记忆清掉：下一次弹出来时第一帧要按真实电平画，
+            # 而不是按十分钟前那一下。
+            self._level = -1.0
         return self._write({"kind": "visible", "visible": bool(visible)})
+
+    def set_level(self, level: float) -> bool:
+        """把**真实麦克风电平**发给球。限流在这一层，不在音频回调里。
+
+        为什么需要它：在这之前球的振幅只在换状态时被设一次，所以「在听」那一态是个匀速的
+        呼吸 —— 球一直在动，但它动的不是你说的话。使用者的原话是「在听阶段并没有跟随真实
+        音量和语句进行运动」。
+
+        三条限流，都在这里而不是在调用方：
+
+        1. **静音窗式的最小间隔**（``LEVEL_MIN_GAP_S``）—— 音频回调 10 次/秒，而球最多需要
+           这个频率；管道写入是同步的，一条 60 字节的 JSON 行乘 10 不值得省，但乘 100 就要了。
+        2. **最小变化量**（``LEVEL_MIN_DELTA``）—— 安静时电平在 0.001 上下抖，那些行发过去
+           只会让球在原地颤。
+        3. **球看不见就不发** —— 待机时桌面上没有球（`orb.visible = false`），给一个不存在的
+           窗口发 100 行/10 秒是纯浪费。
+
+        返回是否真的写出去了，所以「为什么球不动」有一个可读的答案：调用方能数它。
+        """
+        try:
+            value = max(0.0, min(1.0, float(level)))
+        except (TypeError, ValueError):
+            return False
+        if not self._visible:
+            return False
+        now = time.monotonic()
+        if now - self._level_at < LEVEL_MIN_GAP_S:
+            return False
+        if abs(value - self._level) < LEVEL_MIN_DELTA and value not in (0.0, 1.0):
+            return False
+        self._level = value
+        self._level_at = now
+        # 只保留三位小数：管道里那两位之后的数字对一个 148px 的球没有任何可见影响，
+        # 而它们让每一行长出十几个字节。
+        return self._write({"kind": "level", "level": round(value, 3)})
+
+    def set_tray(self, *, state: str, paused: bool) -> bool:
+        """把当前状态与暂停开关同步给托盘菜单。
+
+        为什么不让 Rust 从事件流里自己读：那一侧**刻意不解析事件正文**（类型分派在前端，
+        见 `desktop/src-tauri/src/main.rs` 的 `script_for_line`），而托盘要显示的是状态名。
+        单独一种 ``kind`` 让 Rust 只认一个很小的、已知的形状，不必去理解平台契约。
+
+        也不走前端：托盘菜单在 Rust 侧建（不扩大 IPC 面），前端根本够不到它。
+        """
+        return self._write(
+            {"kind": "tray", "state": str(state), "paused": bool(paused)}
+        )
 
     # ------------------------------------------------------------------- inward
 
@@ -279,30 +450,41 @@ class DesktopBridge:
     def _settle(self, event_id: str, approved: bool) -> None:
         with self._lock:
             entry = self._pending.get(event_id)
-        if entry is None:
-            return
-        gate, slot = entry
-        slot.append(approved is True)
+            if entry is None:
+                return
+            gate, slot = entry
+            if slot:
+                return
+            slot.append(approved is True)
         gate.set()
 
     def _settle_all(self, approved: bool) -> None:
         with self._lock:
             entries = list(self._pending.values())
             self._pending.clear()
-        for gate, slot in entries:
-            slot.append(approved is True)
-            gate.set()
+        self._release_pending(entries, approved=approved)
 
-    def _read_loop(self) -> None:
-        """One JSON object per line from the orb. Unparseable lines are ignored.
+    def _finish_reader(
+        self, process: subprocess.Popen[str], generation: int
+    ) -> None:
+        with self._lock:
+            if self.process is not process or self._generation != generation:
+                return
+            self.process = None
+            self._reader = None
+            self.ready.clear()
+            entries = list(self._pending.values())
+            self._pending.clear()
+        self._release_pending(entries, approved=False)
+        self._stop_process(process, close_stdout=False)
 
-        The loop ends when the pipe does, and closing settles the pending set --
-        an orb that died with a card open must not leave the caller waiting for
-        an answer that can no longer arrive.
-        """
-        process = self.process
-        stream = process.stdout if process is not None else None
+    def _read_loop(
+        self, process: subprocess.Popen[str], generation: int
+    ) -> None:
+        """Read one JSON object per line and fail closed when the pipe ends."""
+        stream = process.stdout
         if stream is None:
+            self._finish_reader(process, generation)
             return
         try:
             for line in stream:
@@ -315,17 +497,39 @@ class DesktopBridge:
                     continue
                 if not isinstance(message, Mapping):
                     continue
-                self._handle(message)
+                try:
+                    self._handle(message, process, generation)
+                except Exception:
+                    # A malformed/hostile child message must not kill cleanup.
+                    continue
         except (OSError, ValueError):
             pass
         finally:
-            self._settle_all(False)
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+            self._finish_reader(process, generation)
 
-    def _handle(self, message: Mapping[str, Any]) -> None:
-        kind = message.get("kind")
-        if kind == "ready":
-            self.ready.set()
-        elif kind == "confirm":
+    def _handle(
+        self,
+        message: Mapping[str, Any],
+        process: subprocess.Popen[str],
+        generation: int,
+    ) -> None:
+        with self._lock:
+            if self.process is not process or self._generation != generation:
+                return
+            kind = message.get("kind")
+            if kind == "ready":
+                # Keep the identity check and Event.set() under one lock.  This
+                # prevents close() from clearing ready and then losing a race
+                # to a stale reader that was already handling a line.
+                self.ready.set()
+                should_settle = False
+            else:
+                should_settle = kind == "confirm"
+        if should_settle:
             self._settle(str(message.get("id") or ""), message.get("approved") is True)
         if self.on_incoming is not None:
             try:

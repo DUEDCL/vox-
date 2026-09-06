@@ -13,6 +13,13 @@ tauri = { version = "2.0.0", features = ["tray-icon"] }
 # 命中区域的反序列化。两者本来就是 tauri 的传递依赖，锁文件里已是 1.0.228 / 1.0.149，
 # 提成直接依赖不引入新版本。
 serde = { version = "1", features = ["derive"] }
+# 托盘更新那一个小形状（`{"kind":"tray",...}`）的解析。**2026-09-01 从 dev-dependencies
+# 挪上来**：它此前只在测试里可用，于是 `main.rs` 里那行 `serde_json::from_str` 编译不过。
+# 同样不引入新版本 —— tauri 自己就依赖它，锁文件早就有。
+#
+# 手写一个 JSON 解析器是另一条路，不走：这条管道的入站形状将来会变，而一个手写的
+# 解析器出错时的表现是「菜单文字不更新」，那种静默错误正是最难查的一类。
+serde_json = "1"
 
 [dev-dependencies]
 serde_json = "1"

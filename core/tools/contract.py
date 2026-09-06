@@ -12,8 +12,30 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, runtime_checkable
 
 #: Built-in tool names. ``shell.run`` is disabled by default in config/tools.toml.
+#:
+#: ``time.now`` / ``app.open`` / ``app.close`` / ``web.open`` / ``system.volume`` / ``weather.now``
+#: 是「简单的事平台自己做」那一类：查时间、打开播放器、打开一个搜索页、调音量、查天气 ——
+#: 派给 agent 要几秒和一次出网，而答案（或那个动作）就在本机或一个固定的免 key 端点上。
+#:
+#: **这个集合是政策门的入口白名单，注册工具时容易只加一半。** 2026-09-05 实测过：
+#: `weather.now` 已经 `register()` 了、已经在 `REGISTERED` 里、已经在页面上列出来了，
+#: 而 `policy.check()` 因为这里没有它一律回 `unknown tool` —— 于是「今天天气怎么样」
+#: 变成一句 `ok=False`，而**单元测试全绿**（它们验的是「注册了吗」，不是「跑得动吗」）。
 TOOL_NAMES = frozenset(
-    {"fs.read", "web.search", "shell.run", "memory.recall", "memory.write"}
+    {
+        "fs.read",
+        "web.search",
+        "web.open",
+        "shell.run",
+        "memory.recall",
+        "memory.write",
+        "time.now",
+        "app.open",
+        "app.close",
+        "system.volume",
+        "timer.remind",
+        "weather.now",
+    }
 )
 
 #: Who asked. A voice-originated request went through the speaker gate; an

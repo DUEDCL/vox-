@@ -35,9 +35,9 @@ Current status: DOC/AUTO/SIM and one REAL-MIC wake are established. REAL-AGENT, 
 | Voiceprint enrollment | `.venv/Scripts/python.exe scripts/enroll_speaker.py --name <名字>` | REAL-MIC |
 | Voice smoke | `.venv/Scripts/python.exe scripts/smoke_voice.py` | SIM |
 | Simulated E2E | `.venv/Scripts/python.exe scripts/e2e_simulated.py` | SIM |
-| t10 stack validation | `.venv/Scripts/python.exe tmp_proto/t10_voice_stack_validation.py` | AUTO+SIM |
+| t10 stack validation | `.venv/Scripts/python.exe scripts/acceptance/t10_voice_stack_validation.py` | AUTO+SIM |
 | TTS→VAD→KWS loop | `.venv/Scripts/python.exe tmp_proto/tts_kws_vad.py` | SIM |
-| Live mic wake | `.venv/Scripts/python.exe tmp_proto/live_wake.py` | REAL-MIC |
+| Live mic wake | `.venv/Scripts/python.exe scripts/acceptance/live_wake.py` | REAL-MIC |
 | Orb render spike | serve `tmp_proto/orb_spike.html`, drive `window.__SPIKE__` | SIM |
 
 ## Completed
@@ -109,7 +109,7 @@ The archive was resumed to a complete **160 MiB** file on 2026-07-23. `bzip2 -tv
 
 ## Session 2026-07-26 (real microphone wake — VERIFIED)
 
-- Added `tmp_proto/live_wake.py`: `SounddeviceWakeCapture` + `SherpaKeywordProvider` over the Realtek mic array (device 1), 16 kHz, threshold 0.25, audio in memory only.
+- Added `scripts/acceptance/live_wake.py`: `SounddeviceWakeCapture` + `SherpaKeywordProvider` over the Realtek mic array (device 1), 16 kHz, threshold 0.25, audio in memory only.
 - Live run: spoken `你好问问` produced a wake hit at **7.193 s** with score 1.0; capture stopped and resources released; nothing saved to disk.
 
 ## Session 2026-07-28 (t10 consolidated voice-stack validation + suite hygiene)
@@ -123,7 +123,7 @@ Suite hygiene:
 - `python -m pytest tests -q` → **19 passed, 2 skipped** (VoxCord optional).
 - `python scripts/smoke_voice.py` → OK. `python scripts/e2e_simulated.py` → OK (17 events, 2 bridge sends, 1 cancel; mock transport).
 
-t10 harness (`tmp_proto/t10_voice_stack_validation.py`) — release-path core sherpa-onnx, all checks passed:
+t10 harness (`scripts/acceptance/t10_voice_stack_validation.py`) — release-path core sherpa-onnx, all checks passed:
 
 | Check | Result | Evidence level |
 |---|---|---|
@@ -338,7 +338,7 @@ CSP widened to `default-src 'self'; style-src 'self' 'unsafe-inline'; connect-sr
 
 ### A real defect, found by re-running the claimed baseline in a clean shell
 
-`docs/handoff.md` and `.claude/CLAUDE.md` both recorded `599 passed, 2 skipped`. In a shell with no `PYTHON*` variables set the actual result was **`1 failed, 597 passed, 3 skipped`**. The failure:
+`docs/handoff.md` and the legacy Agent rules both recorded `599 passed, 2 skipped`. In a shell with no `PYTHON*` variables set the actual result was **`1 failed, 597 passed, 3 skipped`**. The failure:
 
 ```
 tests/test_agent_acp.py::test_a_chinese_prompt_crosses_the_process_boundary_intact
@@ -374,6 +374,91 @@ Result: **600 passed, 3 skipped**, identical in a clean shell and under `PYTHONU
 
 `claude` is on PATH (2.1.223), so the CLI adapter's SIM-only status looked upgradable without a microphone. It is not, on this host: invoked as a child process, `claude -p <prompt>` returns **`Not logged in · Please run /login`** and exits 1. A nested invocation does not inherit the parent session's credentials. So `agents/cli.py` remains **SIM**. This is "attempted and blocked by login state", not "not yet tried" — the distinction matters for whoever picks up P9.
 
+## Session 2026-08-24 (memory cross-process persistence — AUTO multi-process)
+
+- Target: the automatable half of release blocker #11 in `docs/project-overview.md`(记忆跨会话持久性).
+- New `scripts/acceptance/verify_memory_persistence.py`: three real interpreter processes over one SQLite file — process A writes a fact and exits; the parent edits the Markdown mirror out of band (front matter kept); a fresh process B must recall the original text, fold the edit via `sync_facts()` (`updated=1`), then return only the edited wording with the superseded wording gone. No mocks; scratch DB in a caller-provided temp dir; user `memory/` untouched.
+- Every child hop forces `PYTHONUTF8`/`PYTHONIOENCODING` — same rationale as `core/agents/acp.py` `_UTF8_ENV`; without it the JSON fact text arrives cp936-mangled on this host.
+- New `tests/integration/test_memory_cross_process.py` pins the property through the script and runs with the full suite.
+- Result: `all_pass: true`. Group run (cross-process test + `tests/test_memory.py`) **66 passed**; full suite **635 passed, 3 skipped** in ~34 s (clean shell: no PYTHONUTF8/PYTHONIOENCODING, proxies cleared).
+- Level: **AUTO_MULTI_PROCESS** — real processes and real files, but automation only. It does NOT close the REAL half of ADR 004's acceptance (a human relaunching the actual app and observing recall); that stays open under P10.
+
+## Session 2026-08-24 (TTS multi-segment queueing — AUTO)
+
+- Target: the long-standing gap 「长回复一次性合成播放」(handoff §5 / historical Agent notes).
+- Splitting lives in the orchestrator per ADR 001: `vox_plugin.plugin.split_speech()` cuts on CJK 。！？；… and ASCII ! ? ; ; newline; an ASCII dot between digits stays a decimal point (「3.14」 unsplit). Abbreviations like e.g. still split — prosody-only cost.
+- `complete_turn` now emits one `tts.chunk` (index 0..n-1) per sentence; single-sentence replies produce byte-identical event sequences to before.
+- New provider API: `speak_segments(texts)` synthesizes/plays sentence-by-sentence (first audio no longer waits for full-reply synthesis) and `stop()`/`is_stopped()` drop the unspoken remainder. This also fixes a real defect found en route: the concrete provider had **no** `stop()`, so plugin `cancel()` was a silent no-op with the real engine attached — barge-in could not actually silence audio.
+- Legacy engines without `speak_segments` are drained sentence-by-sentence honouring `is_stopped()` between sentences. Failure semantics unchanged: any mid-queue failure still finishes the turn (LISTENING), memory stores the full reply.
+- Tests: new `tests/test_plugin_tts_queue.py` (14 cases: splitter rules, chunk events, batch vs legacy engines, mid-queue failure, cancel-during-synthesis drops rest without opening audio). Adjacent groups green; full suite **649 passed, 3 skipped**.
+- Level: **AUTO** (fake/stub playback). Real audible speech and real spoken barge-in remain REAL-MIC/REAL-WIN items.
+
+## Session 2026-08-24 (bridge connect-phase retry — AUTO; REAL-AGENT re-probe still blocked)
+
+- Transport gap 「没有重连策略」 closed conservatively: `LocalEvoXTransport` gained `attempts` (default **1** = off) + `retry_backoff_s`, and retries ONLY on failures that prove the request never left the process — `ConnectionRefusedError` / `socket.gaierror` (checked at both exception layers, since urlopen wraps them as `URLError.reason`).
+- Deliberately NOT retried: timeouts and HTTP statuses — a blocking POST may have executed the turn server-side, and an automatic re-send could run it twice. The retry budget therefore cannot mask an ambiguous failure as success.
+- CLI agents already carried a 120s timeout (error chunk) and runtime already recovers a failed turn to LISTENING with `task.failed`; this session only added the missing transport piece.
+- Tests: 6 new cases in `tests/test_session_bridge.py` (refused→recover, DNS→recover, exhausted budget, timeout never retried, HTTP error never retried, default single attempt).
+- REAL-AGENT re-probe on this host (2026-08-24): `claude -p` → Not logged in (2.1.241); `codex exec` → no output within 90 s (auth hang suspected); `opencode run` → "Unable to connect" to its provider endpoint. All three remain blocked; SIM-only status unchanged.
+
+## Session 2026-08-24 (speaker gate hardening — AUTO)
+
+- Human directive: harden the voiceprint gate. Scope kept honest: input-side heuristics only, NOT spoof/replay detection (ADR 002 limitation stands).
+- Quality gate (`_audio_quality_issue`): rejects silence (RMS < `min_rms`, default 0.002) and clipping (share of samples at |x|>=0.99 above `max_clip_ratio`, default 0.05) BEFORE the model check — reachable and tested on model-less hosts.
+- Brute-force cooldown: `max_consecutive_rejections` (default 5) input-driven rejections inside the streak window arm a `cooldown_s` (default 30 s) blanket refusal; injected clock makes it deterministic; streaks older than one window start fresh so yesterday's pressure cannot lock the owner out today.
+- Optional multi-window vote: `verify_windows > 1` splits the buffer into equal windows and requires every one to clear threshold AND agree on the speaker; default 1 keeps today's single-window decision pending REAL-MIC tuning.
+- `describe()` now reports `gate` config and `gate_stats` counters (ints only — no text, no vectors); fail-closed ordering unchanged and every new path lands on rejection.
+- Tests: new `tests/test_speaker_hardening.py` (14 cases); existing groups updated where silence inputs now stop at the quality gate by design. Speaker+privacy+hardening group **44 passed**.
+- Level: **AUTO**. Real-voice pass/rejection rates and replay behaviour remain REAL-MIC (P10) and are NOT claimed here.
+
+## Session 2026-08-26 (standing-wave orb — Canvas 2D production renderer, FR-6.5)
+
+The fluid-glass core (two counter-rotating gradient blobs behind a double inset-shadow shell) plus
+eyes, blush and blink cycles were replaced by a **standing-wave core**: `desktop/src/core.ts` draws
+one wave whose amplitude tracks the real `--amplitude` signal and whose **topology encodes state**.
+Motivation is recorded in `THIRD_PARTY_NOTICES.md`: the removed layer credited its recipe to
+`kkclaw`, whose licence this repo records inconsistently (in-file "MIT" vs `docs/handoff.md`
+"Claw Desktop Pet License, resale prohibited") and whose checkout is no longer on disk.
+
+### Waveform geometry — AUTO (deterministic, `render_core_to_text()` at fixed t = 1, R = 74)
+
+| State | Arc length | Bounding box | Samples | Closed |
+|---|---:|---|---:|---|
+| idle | 115.61 | 115.44 × 4.79 | 97 | no |
+| listening | 204.28 | 115.44 × 44.39 | 97 | no |
+| thinking | 310.56 | 88.79 × 59.20 | 193 | yes |
+| speaking | 211.03 | 115.44 × 36.69 | 97 | no |
+| cancelled | 128.06 | 115.44 × 22.30 | 97 | no |
+| error | 166.67 | 115.44 × 31.08 | 97 | no |
+
+Six distinct arc lengths and six distinct heights: **a still frame identifies the state**, so FR-6.6
+degradation no longer depends on animation. Lissajous knot multiplicity tracks the dispatch fan-out
+(`task.progress.payload.agents.length`): lanes 1→4 give arc lengths 310.56 / 535.57 / 758.41 /
+981.43 while the bounding box stays 88.79 × 59.20 — which is exactly why the fingerprint carries arc
+length and not just the box.
+### Colour pipeline and layout — AUTO (live page: computed styles + canvas pixel reads)
+
+- Bitmap 296×296 for a 148 px element at DPR 2; `resize()` reopens the bitmap when DPR changes.
+- Brightest canvas pixels per state equal the CSS `--wave` value exactly: listening rgb(60,224,207) = `#3ce0cf`, thinking rgb(140,124,255) = `#8c7cff`, speaking rgb(111,228,255) = `#6fe4ff`, cancelled rgb(125,134,143) = `#7d868f`, error rgb(255,95,74) = `#ff5f4a`; gated rgb(255,181,87) ≈ `#ffb454` (the amber rim stroke blends in). CSS is the single source of colour and it demonstrably reaches the raster.
+- Opaque fill ratio 0.787 ≈ π/4 — the cavity fills the circle and nothing escapes the clip.
+- `#orb` layout box stays 148×148 and `#core` is `pointer-events:none`, so the front-end-measured hit region is unchanged: circle r = 82 (74 + 8 px float margin); the confirm card adds a 340×137 rect and grows the window 199 → 344 px.
+- FR-6.4: listening glow radius measured 31.12 px at amplitude 0.12 and 54 px at 1.0 (`28 + amp*26`).
+- Build: `tsc && vite build` clean. CSS 13.08 → 7.22 kB, JS 8.77 → 11.88 kB (renderer added, fluid/eye/blush CSS removed). `preview.html` stays out of `dist/`.
+
+### Visual capture — AUTO (headless Chromium/Edge, DPR 1)
+
+`desktop/preview.html` renders the six states plus the gated overlay twice — on a dark and on a light
+desktop backdrop. A transparent always-on-top orb lands on arbitrary wallpaper, so checking only the
+dark case would be self-deception. Captured with
+`msedge --headless=new --disable-gpu --screenshot --window-size=1200,560`.
+
+Environment note: the in-app Browser preview pane **cannot** screenshot here ("the pane is not
+displayed, so the page is not compositing frames"), so visual evidence goes through headless Edge.
+Computed styles and canvas pixel reads do work in the pane and produced the numbers above.
+
+**Not** verified in this session: real WebView2 transparent compositing, DPI 125 / 150 / 175 %,
+multi-monitor, RDP software-render fallback, and the ≥30 min resource profile. All remain REAL-WIN (P10).
+
 ## Not yet verified
 
 - Speaker gate on this host's microphone: own-voice pass rate, another person's rejection, recorded-replay behaviour (the gate does **not** claim replay resistance — ADR 002 「局限」).
@@ -382,8 +467,1038 @@ Result: **600 passed, 3 skipped**, identical in a clean shell and under `PYTHONU
 - Real streaming first-token latency.
 - Separate always-on-top, skip-taskbar wake window (defined and compiling, not visually accepted).
 - Wake-orb click-through, shadow suppression, drag, and DPI conversion at 125% / 150% / 175% — all SIM/AUTO only, REAL-WIN pending (P10).
-- The Python→desktop event path. `main.rs` has no `emit` and the frontend listens to DOM `CustomEvent`s; nothing in Python drives the orb yet.
-- A real external agent completing one turn (REAL-AGENT). **Attempted 2026-08-16 and blocked** by nested-invocation login state — see the session note above.
+- A real external agent completing one turn (REAL-AGENT). **Attempted 2026-08-16 and 2026-08-24, blocked** on all three backends — see the session note above. `scripts/acceptance/probe_agents.py` is the retry.
+- A third-party MCP server completing one `tools/call` (the client is SIM only — the tests drive an in-process fake server).
+- Browser microphone capture in the console: the recording path is asserted end to end with synthesised WAV, but no clip has been recorded through a real `getUserMedia` grant.
+
+## 2026-08-28 —— 控制台、MCP、语音入口（AUTO + 真实模型 + SIM）
+
+| 项 | 实测 | 等级 |
+|---|---|---|
+| 全量回归 | **924 passed, 3 skipped** in 39.4 s（干净 shell，`env \| grep PYTHON` 为空） | AUTO |
+| 语音契约 SHA-256 | `4f60b6124dcb9704624a0606f411981d0bf572de22fcf4a25fad133bd3c75de5`（**不变**） | AUTO |
+| TTS 真实合成 | 「控制台测试完成」→ 44100 Hz / 6041 采样点 / **243 ms**（`play=false`，不需要输出设备） | AUTO + 真实模型 |
+| 就绪清单（本机） | wake ok / asr ok / tts ok / speaker `model=ok enrolled=0` | AUTO |
+| 控制台页面 | 九个区块全部渲染，`preview_console_logs` **零输出** | SIM |
+| 控制台隐私 | `/api/state` 的 JSON 里搜不到 `token` / `voiceprint` / `embedding` / `vector` | AUTO |
+| 一轮真实工具调用 | `POST /api/text {"text":"读一下 README.md"}` → `route=tool ok=true`，3511 字 | AUTO |
+| 安全边界拒绝（实打 HTTP） | `mcp.require_confirmation` → 403 · `agents[0].command` → 403 · `../escape.md` → 400 · 私钥形状文本 → 403 | AUTO |
+| 进程计数器 | RSS **42.25 MB** / CPU 0.28 s（`ctypes` 走 `GetProcessMemoryInfo`/`GetProcessTimes`） | AUTO |
+| 模型体积（本机） | 总 **597 MB**；三个 `.tar.bz2` 归档 **261 MB** 可删；净 **336 MB**（KWS 36 / ASR 78 / TTS 183 / 声纹 38 / VAD 2.3） | AUTO |
+
+一个被修掉的真缺陷：`SqliteMemoryStore` 的连接懒建且绑在第一个查询的线程上，第二个线程
+抛 `sqlite3.ProgrammingError`。控制台是多线程的，所以症状是「保存档案成功，紧接着删除
+档案 sync 失败」—— 读起来像调用方的 bug 而不是线程设计问题。修法 `check_same_thread=False`
+加一把 `RLock`（**必须可重入**，`write()` 会调 `connection`，两者都取锁）。7 例真线程测试。
+
+一个被发现但没修的：`VoxCordAdapter().load()` 报 `import failed: No module named 'voxcord_core'`
+—— `D:\program\voxcord` **在**本机，是适配器的 sys.path 拼装与它的实际布局不匹配。那 2 个
+skip 掩盖的是一个缺陷，不是在报告「本机没这个可选依赖」。理由见 `docs/backlog.md` B1。
+
+**这一轮没有关掉任何 REAL 级阻塞项。** 做的是把它们从「一堆命令」变成「一条命令」：
+`run_console.py`（看缺什么并补齐）· `run_voice.py`（说话）· `probe_agents.py`（REAL-AGENT
+重试）· `resource_profile.py`（30 分钟画像，可无人值守启动但结论要人写）。
+
+
+## 2026-08-28（第二轮）—— 控制台第二版界面 + 模型配置（AUTO + SIM，含两个真缺陷）
+
+界面来源是使用者在 Open Design 里做的 `vox-console-v2.html`（2668 行，单文件内联，
+零外部资源：`<link>` 0 个、`<img>` 0 个、`@font-face` 0 个），验收后装进
+`core/console/static/index.html`。它引用三个当时**还不存在**的端点，本轮补齐。
+
+| 项 | 实测 | 等级 |
+|---|---|---|
+| 全量回归 | **1009 passed, 3 skipped** in 36.3 s（干净 shell） | AUTO |
+| 新增测试 | 模型方案 60 · 控制台 82→**103** · 配置编辑 29→**33** | AUTO |
+| 九个视图 | 全部吃到真实读数（就绪 3/4 · 工具 2 + agent 1 · claude 可用 · MCP 三层全关 · 安全边界只读那几个键）；`preview_console_logs` **零输出** | SIM |
+| `#models-degraded` | hidden —— 即 `/api/models` 真的通了，页面没退到出厂后备表 | SIM |
+| 宽版布局（1440px，Edge headless） | 236px 侧栏 + 正文，读数砖/就绪板/色带/告警四块齐全 | SIM |
+| 横向溢出 | 835px 与 1440px 两个宽度 `scrollWidth == clientWidth` | SIM |
+| 极光（WebGL2） | 240 fps（预览面板），headless 下也拿到 GL2；`prefers-reduced-motion`、后台、非总览页时不跑 | SIM |
+| **写入幂等** | 页面上点「保存方案」不改任何值 → `config/models.toml` SHA-256 `ce651c54…` **不变** | AUTO |
+| 单行 diff | 改一个模型名 → 只有那一行变（2451 → 2449 字节）；改回来 → 回到原哈希 | AUTO |
+| 端点探测（本机） | `GET http://127.0.0.1:11434/v1/models` → **真的发出了请求**，`WinError 10061 拒绝连接`（2065 ms 后放弃，502） | AUTO（真实套接字） |
+| 端点探测（拒绝路径） | 非回环明文 HTTP、URL 带凭据、`file://` 三条在**建立套接字之前**被拒（400） | AUTO |
+| 密钥形状拒绝 | `key_env = "sk-live-0123456789abcdef"` → 400，文件字节不变 | AUTO |
+| 云端服务商探测 | **没试过**（19 条预设端点抄自各家文档，本项目一次都没打通过） | 未验证 |
+
+**两个真缺陷，一个是本轮引入的、一个是既有的**：
+
+1. **预设端点被复制进配置文件**（本轮引入，已修）。页面为了显示会把预设的
+   `base`/`proto`/`key_env` 填进输入框，保存时一并送来。第一版实现照写 —— 结果「打开页面
+   点一次保存」凭空长出四行，全是 `providers.py` 里已有的值，而且将来改预设表改不到它。
+   修法：写侧丢掉「与预设相同且文件里本来没有」的字段；`custom` 除外；文件里已有该键时
+   照写（好让「切回预设」更新那一行，而不是留下陈旧的覆盖值）。
+2. **保存任何配置都会重写整个文件的行尾**（既有缺陷，已修）。`config_edit` 用
+   `read_text` 读、`write_text` 写：前者把 `\r\n` 归一成 `\n`，后者在 Windows 上又翻译
+   回去。**git 里看不见这件事**（本仓库 `core.autocrlf=true`，提交时归一化），所以代价不是
+   diff 噪音，而是：一次「什么都没改的保存」会让文件的 SHA-256 变掉 —— 而上面那条「写入
+   幂等」正是靠哈希取证的。发现方式也正是它：保存前后各算一次哈希，2451 → 2603 → 2513，
+   第二跳纯粹是行尾。修法：行尾从字节里探、写入用 `newline=""`。LF 与 CRLF 各两条测试。
+
+**一个渲染缺陷**（已修）：`.shell` 的 `align-items:flex-start` 是给横排布局的，转成竖排
+（≤1080px）之后交叉轴变成宽度，侧栏与正文各自缩到内容宽 —— 侧栏内容是九个 nowrap 链接、
+量出来 1026px，于是把 835px 的页面撑到 1043px，而 `nav` 的 `overflow-x:auto` 因为拿不到
+确定宽度永远不生效。加 `align-items: stretch` 后 820 = 820，nav 自己滚。
+
+**这一轮同样没有关掉任何 REAL 级阻塞项。** `config/models.toml` 现在能读能写能探端点，
+但**没有任何运行时代码按它组装模型** —— 语音栈仍由 `voice.toml` + 四个环境变量决定。
+所以 `active` 目前只是一个被记录的意图（`docs/backlog.md` B7）。
+
+
+## 声纹：窗长、段数、条件（2026-08-30，AUTO + SIM）
+
+素材是 KWS 模型自带的 7 段真实人声，模型是当前默认的 CAM++（dim 192）。脚本
+`.vox-ref/probe_speaker_windows.py` 与 `.vox-ref/probe_speaker_conditions.py`，不打网络。
+
+**1. `SpeakerEmbeddingManager.add(name, vectors)` 求质心，不是留全部。** 判据：两条正交
+向量注册在一个名字下，各自只得 **0.7071**（= 1/√2，即到二者归一化均值的余弦）；单独注册
+一条得 1.0000。这决定了后面两条的解释方式 —— 多段样本是在**平均掉每次说话的偶然偏差**，
+不是在建一个「多模板」库。
+
+**2. 窗长（注册 × 校验）配对。** 同一个人、同一条录音的两半：
+
+| | 校验 1.0s | 1.5s | 2.0s | 3.0s |
+|---|---|---|---|---|
+| 注册 1.5s | 0.647 | 0.725 | 0.716 | 0.750 |
+| **注册 3.0s** | 0.774 | **0.835** | 0.807 | **0.846** |
+
+两条结论：注册窗长每一列都赢 0.10 左右（所以脚本录 3 s 是对的）；校验窗长从 1.0 到 3.0
+差 **0.072**。这解释了「试一句 0.8 而实机 0.6」的一半 —— 诊断用 3 s、门用 1.5 s。
+
+**3. 窗口里的静音要扣分。** 同一段 1.5 s 语音，前面补静音后再算：
+
+| 前置静音 | 0.0s | 0.5s | 1.0s | 1.5s |
+|---|---|---|---|---|
+| 相似度 | **0.803** | 0.711 | 0.752 | 0.769 |
+
+补静音一律低于不补，最多掉 **0.09**。**所以不要为了「窗口越长越好」去调大 `verify_seconds`**：
+唤醒时那 1.5 s 是「以唤醒词结尾」的，而「你好小沃」本身约 1.0–1.2 s，1.5 s 正好装得下且
+几乎不带静音；调到 2.5 s 只会把前面的安静房间灌进去。第 2 条的「越长越好」只在**连续语音**
+上成立，两条不矛盾。
+
+**4. 段数（同条件）单调有效。** 同一条录音的不同片段作为注册段：
+
+| 注册段数 | 1 | 2 | 3 |
+|---|---|---|---|
+| 相似度 | 0.706 | 0.772 | **0.794** |
+
+1 → 3 段 **+0.088**。这是「多录几轮会不会提高精度」的答案：会，而且可测。
+
+**5. 混条件（SIM，不是真远场）。** 用加白噪声（SNR 6 dB）近似「离得远」：
+
+| 档案 | 校验干净 | 校验加噪 |
+|---|---|---|
+| 只注册近场 | 0.745 | **0.607** |
+| 近 + 远注册进**同一个**名字 | 0.750 | **0.722** |
+| 近 / 远各一个名字，取最大 | 0.745 | 0.723 |
+
+远场那一侧从 0.607 抬到 0.722（+0.115），而近场没有变差。两种做法打平 —— 但「各一个名字取
+最大」在数学上**不可能**比其中最好的单个档案差（`_best_match` 是跨名字取最大），所以条件
+差异大时它更安全。**这一条是 SIM**：加白噪声少了混响和方向性，真远场结论要 REAL-MIC。
+
+`scripts/enroll_speaker.py` 因此改成默认 5 段、后两段要求退开两步，闭环校验按门的窗长报分。
+
+
+## 输入音量：OS 那一侧的读数（2026-09-01，REAL-WIN）
+
+使用者三次提出同一件事：「真正的最佳效果应该是无论何种设备、音量，都能准确的识别唤醒词」。
+在此之前我们只能**建议**他去调 Windows 的滑条。读到那根滑条之后，两个长期症状变成了同一个
+数字的两端 —— 纯 ctypes 走 Core Audio（`core/audio/winlevel.py`，零新依赖），同一时刻：
+
+| 采集端点 | OS 输入音量 | 症状 |
+|---|---|---|
+| 耳机 (沉麟的耳机)（系统默认） | **0.01** | 「这只麦克风是死的」（原始峰值 ~0.01） |
+| 麦克风阵列 (Realtek(R) Audio)（在用） | **0.82** | 「一说就削波」（注册第 3 段 peak 1.000） |
+| 麦克风 (ToDesk Virtual Audio) | 0.20 | —— |
+
+写入往返也已实测（拿空闲的虚拟设备做的）：0.20 → 0.35 → 复读 0.35 → 复原 0.20。
+
+两条经核实的细节，写下来免得下次重新踩：
+
+- **`CoInitializeEx(COINIT_MULTITHREADED)` 在这个进程里一定返回 `0x80010106`
+  (`RPC_E_CHANGED_MODE`)** —— sounddevice/PortAudio 已经把线程初始化成 STA 了。它**不是
+  错误**，按 `S_FALSE` 处理（照常用、出去时不反初始化）。
+- **Core Audio 的友好名和 `sounddevice` 报的 MME/DirectSound/WASAPI 名逐字相同**，所以设备
+  匹配用精确相等就够。不做模糊匹配是刻意的：同机同时存在「麦克风 (Realtek…)」和
+  「麦克风阵列 (Realtek…)」，前者是后者的前缀，猜错等于去调另一只设备的音量。
+
+**`input.device` 的索引会漂。** `config/voice.toml` 里 `device = "2"` 是 08-29 为
+「耳机 (沉麟的耳机)」选的；09-01 实测同一个索引已经指到「麦克风阵列 (Realtek(R) Audio)」，
+因为中间插拔过设备。索引本身仍然是对的选择（同一物理设备在四种 host API 下重复出现，名字
+片段会让 sounddevice 抛 `Multiple input devices found`），但**每一处报设备的地方都改成报
+名字**，让漂移可见 —— 就绪清单、`input_level.device`、`/api/devices` 都是。
+
+校准（`/api/mic/calibrate`）用**二分**而不是按比例缩放：`SetMasterVolumeLevelScalar` 的标度
+不是幅度的线性函数（实测 0.01 与 0.82 分别约合 0.03× 与 0.54× 幅度，即一条 dB 曲线，范围
+还各家驱动不同）。按比例算下一步要先假设曲线，猜错就来回过冲；二分只依赖「音量调高峰值
+不会变小」，对任何曲线都收敛，4 轮把标度收敛到 1/16。目标带 0.35–0.80：下界之下软件增益要
+放大 2 倍以上（增益抬信号也抬底噪），上界留 2 dB 余量给「偶尔一句说得响」，因为过冲的代价
+（削波，ADC 里发生，不可恢复）比欠冲大得多。**没听到说话时一格都不动** —— 拿房间底噪校准
+会把音量推到顶，正好是削波那一端。
+
+
+## 唤醒失效的真凶：我们自己在软件里造的削波（2026-09-01，SIM）
+
+使用者报「注册流程正常，试一句也正常，就是无法进行真实的唤醒」。这三句话把故障锁在一段很窄
+的代码里：**声纹读的是原始环形缓冲，KWS 读的是加过增益之后的音频** —— `_ring.write()` 在
+`_callback` 里排在 `wake_held` 早退之前，KWS 那一步排在它之后，所以「试一句有分」根本不能
+证明 KWS 被喂到了、更不能证明喂进去的东西是好的。
+
+诊断方法是 `.vox-ref/wake_path_check.py`：把本人真实录音（`.vox-ref/rec/*.wav`，16 kHz）按
+100 ms 一块喂进**和生产完全同一条链**（VAD → 增益 → `keyword_provider.feed`）。同一段
+「你好小沃」念三遍，满分 3：
+
+| 配置 | 命中 | 增益末值 | 输出峰值 |
+|---|---|---|---|
+| 逐块峰值算 `wanted`（旧） | **1 / 3** | 3.86 | **1.0（削波）** |
+| 完全不加增益 | **3 / 3** | 1.0 | 0.746 |
+| 峰值包络 + 乘前封顶（现在） | **3 / 3** | 0.81 | 0.684 |
+
+机制：`wanted = target_peak / peak` 按**当前这一块**算，而一句话里大部分 100 ms 的块是气口、
+轻辅音、字与字之间 —— 那些块峰值只有 0.03，于是 `wanted` 冲到 16 倍、增益一路爬到 4–6 倍；
+紧接着的重音块（峰值 0.75）被乘成 1.7，然后被 `np.clip` 裁平。**裁平就是削波**，而那一行
+的注释当年写的是「硬裁一次好过把失真交给下游模型」—— 硬裁本身就是失真。
+
+两处修法：①`wanted` 改由**输入峰值包络**算（起音立刻跟上、回落 0.97/块），气口不再把增益
+推高；②**上限在乘之前生效**（`min(gain, 0.95 / peak)`），让这一级造出削波在构造上不可能。
+`describe()` 多报 `limited_blocks` —— 此前「我们自己有没有在造削波」在每一处读数里都不可见。
+
+### 顺带量出来的两件事
+
+**这个 KWS 对绝对电平几乎不敏感**（它的特征是归一化的）。同一段话等比缩到不同峰值：
+
+| 配置 | 0.746 | 0.30 | 0.10 | 0.05 | 0.02 | 0.01 |
+|---|---|---|---|---|---|---|
+| 完全不加增益 | 3 | 3 | 3 | 3 | 3 | **2** |
+| target 0.5 / release **0.05**（旧） | 3 | 3 | **2** | 3 | 3 | 3 |
+| target 0.5 / release **0.005**（现在） | **3** | **3** | **3** | **3** | **3** | **3** |
+| target 0.3 / release 0.005 | 3 | **2** | 3 | 3 | 3 | 3 |
+
+所以自适应增益的定位从「常态 AGC」降级为「救援级」：真正救回的只有 0.01 那一档，而**增益
+动得快是会扣命中的**（0.10 那一档 3/3 → 2/3）。`release` 因此从 0.05 降到 0.005。
+
+这张表的**每一行都已经带着包络与封顶两处修法**，所以 0.10 那一档的 2/3 是 `release` 单独的
+账。（一个反例值得记下来：第二次跑这张表时「rel.05」那一行其实跑的是新默认 0.005 ——
+变体字典里那一行当时留空表示「用默认」，而默认值刚被改过。**参数扫的每一行都要显式给参数**，
+否则标签会在改默认值的那一刻变成谎话。）
+
+**ADC 削波那一端也扣命中，但要相当严重才扣得动。** 把录音推到过载再硬裁：
+
+| 削平样本占比 | 0% | 0.15% | 1.05% | 5.14% | 14.65% |
+|---|---|---|---|---|---|
+| 命中（满分 3） | 3 | 3 | **2** | **1** | **1** |
+
+**回调预算不是瓶颈**：VAD 0.37 ms + 增益 0.02 ms + KWS 1.27 ms = 1.66 ms，占 100 ms 块的
+1.7%（所以「VAD 拖慢回调导致丢块」这个假设可以排除）。
+
+等级是 **SIM**：音频没有经过 D/A → 空气 → A/D。真机对着麦克风喊仍然是 REAL-MIC。
+
+
+## 唤醒率 4/10 的两个真因：解码束宽 + 一个漂掉的设备索引（2026-09-01，SIM + REAL-WIN）
+
+使用者报「10 次只成 4 次」，并明确要求不许无脑降 `keywords_threshold`。两个根因，
+全程 `threshold = 0.25` 不动。
+
+### 1. 解码束宽（sherpa-onnx 默认 4）—— SIM
+
+唤醒词的假设路径要和普通转写路径竞争束里的位置，束太窄时它在噪声里先被剪掉。症状是
+**安静时叫得应、有人说话或开着风扇就叫不应**，而每一层都报告自己健康。
+
+正样本 = 本人三段真录音（5 次机会）逐级加白噪声；负样本 = 本人念的另一个唤醒词
+「你好问问」三遍 + 纯噪声（约 25 秒）：
+
+| beam | 干净 | 20dB | 15dB | 10dB | 5dB | 0dB | -5dB | -10dB | 误唤醒 |
+|---|---|---|---|---|---|---|---|---|---|
+| 4（sherpa 默认） | 5/5 | 5/5 | 5/5 | 5/5 | 4/5 | **2/5** | 3/5 | 2/5 | 0 |
+| 8 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | 3/5 | 4/5 | 0 |
+| **16（新默认）** | 5/5 | 5/5 | 5/5 | 5/5 | 5/5 | **5/5** | 4/5 | 4/5 | 0 |
+| 32 | 5/5 | — | — | — | — | 5/5 | 5/5 | 5/5 | 0 |
+
+代价基本为零：每块 1.10 ms（beam 4）→ 1.21 ms（beam 16），都是 100 ms 预算的约 1%。
+不取 32 的理由是统计功效：「误唤醒 0」这个数字在 25 秒非唤醒词语音上说明不了什么。
+
+同时试过但**没用**的两个旋钮：`keywords_score` 加分（1.5 / 2.0 / 3.0）在 0 dB 只到 4/5；
+`num_trailing_blanks = 0` 没有区别。能抬起来的是束宽，不是加分。
+
+### 2. `input.device = "2"` 已经不是那只耳机了 —— REAL-WIN
+
+2026-08-29 记下那个索引时它是 `耳机 (沉麟的耳机)`；2026-09-01 索引 2 指向
+`麦克风阵列 (Realtek(R) Audio)`，耳机成了 1。**索引由枚举顺序决定，插拔就移位，而移位
+之后不报错**：流照常打开、回调照常触发，只是唤醒率变差。上一版配置注释还写着「[2] 耳机」
+—— 那是配置与现实分岔最安静的一种形式。
+
+两次测量都说那只内建阵列不该用：2026-08-29 同一时刻阵列 peak 0.00003 而耳机 0.188；
+2026-09-01 安静环境阵列 0.00003、耳机 0.00031。
+
+改法是让配置写**名字片段**而不是索引：`resolve_device` 按固定优先级取 WASAPI（这台机器上
+耳机只有 WASAPI 报 16 kHz 原生），排除没有输入通道的设备，同一 host API 下重名才算真歧义。
+名字没匹配上时先给一条可读的警告 —— PortAudio 的原话读起来像「设备 -1 查询失败」，而真实
+情况是「你配的那只麦克风现在不在」。
+
+
+## 一轮语音的耗时构成，以及唯一值得动的那一段（2026-09-01，真实端点 + 真实凭据）
+
+先量整条链，再决定动哪里。
+
+| 段 | 实测 | 结论 |
+|---|---|---|
+| ASR 每块推理 | 4.61 ms 均值 / 15.5 ms p95 | 100 ms 预算的 4.6%，不是瓶颈 |
+| ASR 端点（说完之后的纯等待） | 固定 1.1–1.2 s | 100% 在我们手里，但**不能降**（见下） |
+| LLM 首字（流式） | 5005 ms | 首字比整轮结束只早 **2 ms** |
+| LLM 整轮（流式） | 5007 ms | 这个端点**根本不增量下发** |
+| LLM 非流式 | 5637 ms | 与流式基本同价 |
+| TTS（旧：两个 HTTP 往返） | 3 字 3353 / 11 字 4243 / 38 字 5786 ms | 约 3.3 s 固定开销 |
+
+**「把 LLM 增量喂进 TTS」在这个端点上省不到时间**（首字 = 整轮），所以没有做。一次没有
+收益的重构会把一条受测的状态机路径变脆。真正能省的是 TTS 那 3.3 秒固定开销。
+
+### TTS 改走 SSE：一个请求，音频按帧下发
+
+| 字数 | 旧：音频到手 | SSE：首块 | SSE：音频到手 |
+|---|---|---|---|
+| 3 | 3353 ms | 2405 ms | **2735 ms** |
+| 11 | 4243 ms | 2267 ms | **3117 ms** |
+| 38 | 5786 ms | 2301–2569 ms | **3700–3961 ms** |
+
+生产装配路径复测：2609 / 3233 / 3783 ms，音频时长与峰值正确（0.69 / 2.77 / 7.08 s）。
+
+两个附带结论：**SSE 首块到达时间与句子长度基本无关**（2.3–2.6 s），所以「把第一段切短
+让它早出声」这个策略在流式下不再必要；`stop()` 现在在**帧之间**生效，打断不必等整句合成完。
+
+### 端点静音 `rule2`：量完之后决定**不降** —— SIM
+
+那 1.2 秒是每一轮里唯一完全由我们决定的等待，所以它看起来是最该砍的一刀。
+`.vox-ref/endpoint_probe.py` 把本人真录音喂进**生产那条两段路径**（唤醒前喂 KWS，命中后
+才开识别器，命中那一块不进识别器），测「判定说完的时刻」与「最终文本是否完整」：
+
+| rule2 | 判定说完 | 最后有语音 | 浪费的等待 | 转写 |
+|---|---|---|---|---|
+| **1.2（默认）** | 未在录音内触发 | 6.7 s | — | 「你好小沃你好小沃」（两句合一段） |
+| 1.0 | 5.4 s | 4.3 s | 1.1 s | 「你好小沃」（切开了） |
+| 0.8 | 5.1 s | 4.3 s | 0.8 s | 「你好小沃」（切开了） |
+| 0.5 | 4.8 s | 4.3 s | 0.5 s | 「你好小沃」（切开了） |
+
+关键读数不是延迟那一列，是**切没切开**：这位说话人自己的短语间停顿是 **1.0–1.1 秒**。
+rule2 = 1.2 时那些停顿不切句；降到 1.0 就切 —— 后半句落进下一轮或者干脆丢掉，而使用者
+看到的是「它没听全」。
+
+所以这 1.2 秒**不是余量，是按这个人的停顿长度定的**。三条规则已经从 `load()` 里提成
+构造参数（能量、能调），但默认值不动，并且有一条测试禁止在没有新的停顿分布测量之前调小它。
+
+### 结论：Wake → 第一声回答的构成
+
+约 **1.0 s（应答音）+ 说话时长 + 1.2 s（端点）+ 5.0 s（LLM）+ 2.4 s（TTS 首块）**。
+这一轮省下的是 TTS 那约 0.9 秒。**剩下的 5 秒在 LLM**，而它是所选模型与端点的属性
+（`claude-opus-5` 经中转站，首字 = 整轮）—— 换一个更快的模型是配置决定，不是代码问题，
+控制台的「模型配置」那一栏可以直接改并用「试一句」当判据。
+
+
+## 延迟预算复测：识别上云之后大头换人了（2026-09-05，REAL）
+
+上一节那个「1.0 + 说话 + 1.2 + 5.0 + 2.4」的构成是 **2026-09-01** 量的，而 **09-03 识别改走
+云端**（ADR 009）之后它已经不成立：那条路是「说完 → 整段 POST → 等结果」，凭空多出一段。
+
+`.vox-ref/asr_cloud_stream_probe.py` 把真录音按 100 ms 真实节奏喂进生产那条两段路径：
+
+| 录音 | 音频长 | 端点判出 | 文本到手 | 往返 |
+|---|---|---|---|---|
+| 「你好小沃」 | 2.64 s | 3.1 s | **6.2 s** | 3125 ms |
+| 「你好小沃 检查目前运行状态是否正常」 | 7.15 s | 3.5 s | 13.7 s | 5250 ms（切了两段） |
+
+**从「说完最后一个字」算起：0.8 s（VAD 端点）+ 3.1 s（整段往返）= 3.9 s 才有文本。** 本机
+流式那条路这一段是 0。
+
+### LLM：首字 7.9 秒，而且换模型这条路在那个端点上不存在
+
+`.vox-ref/llm_latency_probe.py`，同一句话、同一段系统提示（`speech_system_prompt`），各跑一次：
+
+| 端点 / 模型 | 首字 | 整轮 | text 块 | 增量下发 |
+|---|---|---|---|---|
+| 中转站 `claude-opus-5` | **7938 ms** | 7938 ms | **1 条** | **否** |
+| 百炼 `qwen-flash` | **1516 ms** | 1641 ms | 7 条 | 是 |
+| 百炼 `qwen-turbo` | 1561 ms | 1717 ms | 8 条 | 是 |
+| 百炼 `qwen3-max` | 1813 ms | 2375 ms | 8 条 | 是 |
+| 百炼 `qwen-plus` | 1844 ms | 2297 ms | 8 条 | 是 |
+
+两个结论，第二个比第一个重要：
+
+1. **快 4 倍。** 2026-09-01 记的 5005 ms 到今天已经是 7938 ms —— 那个数字是端点的属性，
+   而端点会变差而不通知任何人。
+2. **中转站不增量下发**（1 条 text 块，首字时刻 = 整轮时刻），百炼是真增量（7–8 条）。所以
+   2026-09-01 那句「把 LLM 增量喂进 TTS 在这个端点上省不到时间，因此没有做」**只对中转站
+   成立**；换到百炼之后那个优化重新有收益。
+
+**而「换一个更快的模型」在中转站上根本不存在**：它的 `/v1/models` 只自报两个
+（`claude-opus-5` 与 `claude-opus-5-thinking`），`claude-sonnet-5` /
+`claude-haiku-4-5-20251001` / `gpt-5-mini` / `deepseek-chat` / `qwen-flash` 一律 **403**。
+必须连端点一起换。
+
+凭据侧的事实（**只报能不能打通，不回显任何值**）：百炼 `compatible-mode/v1` 上
+`VOX_ASR_KEY` 与 `VOX_TTS_KEY`（各 35 字符）**HTTP 200**；`VOX_LLM_KEY` /
+`VOX_DASHSCOPE_KEY` / `VOX_AGENT_HTTP_TOKEN`（中转站那把）**401**。
+
+### 选哪个模型：光看速度会选错
+
+一个 flash 档模型 1.5 秒出字，但如果它不肯按格式调工具，「智能化」就退回成一句
+「好，正在打开网易云音乐」然后什么都没发生 —— 那正是 `core/agents/skills.py` 要修的毛病，
+换个更快的模型把它换回来是净损失。所以 `.vox-ref/model_pick_probe.py` 两件事一起量，
+四个用例：`time`（最低门槛）· `search`（参数要自己填）· `multi`（一句话两件事）·
+`plain`（不该调工具的句子，**误调比不调更糟**）。
+
+第一轮（格式仍要求 `⟦vox:tool NAME⟧`、提示写着「一轮最多一次」）：
+
+| 模型 | 四题 | 平均首字 | 失败长什么样 |
+|---|---|---|---|
+| qwen3-max | 3/4 | 2843 ms | multi 只调一个 |
+| claude-opus-5 | 3/4 | 3894 ms | multi 只调一个 |
+| qwen-plus | 2/4 | 2444 ms | **写成 `⟦vox:web.search {…}⟧`**（少了 `tool`） |
+| qwen3.8-flash | 2/4 | 4741 ms | plain 误调 web.open |
+| qwen-flash | **1/4** | 1664 ms | **写成 `⟦vox:time.now⟧`** |
+
+**五个里三个少写 `tool` 那个词** —— 那不是模型笨，是格式里那个词多余（`vox:` 后面自然接
+工具名）。而这个失败特别贵：模型**以为自己调了**，回答里只有那一行标记、没有可念的内容，
+使用者听到一串奇怪符号，日志里既没有工具调用也没有错误。
+
+两处改动之后（`tool` 变可选 + `MAX_CALLS` 提到 3 且提示改成「两件事就把两行一起写」）：
+
+| 模型 | 四题 | 平均首字 |
+|---|---|---|
+| **qwen-flash** | **4/4** | **1741 ms** |
+| **qwen-plus** | **4/4** | 1769 ms |
+| qwen3-max | 4/4 | 2085 ms |
+| qwen3.8-flash | 4/4 | 2772 ms |
+| claude-opus-5 | 4/4 | 3858 ms |
+
+`multi` 用例现在五个模型**全部**输出 `['time.now', 'app.open']` 两个调用且参数正确
+（`{"name": "网易云音乐"}`）—— 在这之前它们全部只调第一个，因为提示里写着「最多一次」。
+`plain` 五个都正确不调工具，回答 13–30 字。
+
+出厂选 `qwen-plus` 不选 `qwen-flash`：四题都是 4/4，而 plus 只慢 28 ms —— 那点差价买的是
+推理余量。第五个用例（2026-09-05 加的 `memory`：「我上次说想买的那个东西叫什么」）
+qwen-plus 自己写出了 `memory.recall {"query": "买什么"}`。
+
+### ASR：换一个更快的整段模型，短句省 1.1–1.4 秒
+
+`.vox-ref/asr_model_race.py`，同一段真录音、同一端点，各跑两轮：
+
+| 模型 | 2.64 s 音频 | 7.15 s 音频 | 写对「沃」 |
+|---|---|---|---|
+| `qwen-audio-3.0-asr-flash`（原） | 3609 / 3655 ms | 3797 / 3359 ms | 2/2 |
+| **`fun-asr-flash-2026-06-15`** | **2250 / 2546 ms** | 3671 / 3500 ms | **2/2** |
+| `qwen3-asr-flash` | **HTTP 400** | HTTP 400 | — |
+
+**短句省 1.1–1.4 秒，长句相当**，而短句是这个产品的常态（「几点了」「打开网易云」）。
+准确度那一列必须一起看：一个快 1 秒但把「小沃」写成「小吴」的模型是净损失 —— 那正是
+2026-09-03 把识别搬上云的全部理由。两个模型都写对了。
+
+`qwen3-asr-flash` 的 400 不是配置问题：它不认多模态那套 `input_audio` + `parameters.format`，
+接它要改 `core/audio/asr_cloud.py` 的 payload 形状。
+
+生产装配路径复测（`.vox-ref/asr_cloud_stream_probe.py`，按 `config/voice.toml` 建 provider）：
+「你好小沃」2.64 s 音频 → 往返 **2734 ms**、文本 5.8 s 到手（换之前 3125 ms / 6.2 s），
+转写「你好小沃。」正确。
+
+**名字带日期是这一行唯一的隐患**：百炼没给它不带日期的别名，这个 tag 下线时会 4xx。
+那时的正确动作是重跑上面那个探针挑新的，不是回退到慢的那个。
+
+### TTS：换模型这条路走不通，但第一块音频比 `synthesize()` 返回早 0.5 秒
+
+`.vox-ref/tts_model_race.py` 扫了 `qwen3-tts-flash` 与 `qwen3-tts-instruct-flash` 各 4–9 个
+音色名，**全部**回「流式响应里一帧音频都没有」（HTTP 200 但 `output` 是空对象）。所以那不是
+「音色名不对」（那会是 411），是**响应结构不同** —— 接它要改解析，而收益未知。
+
+直接 dump SSE 帧的结构（同一句「好，开好了。」）：
+
+| 模型 | 帧 1 | 帧 2 | 帧 5 |
+|---|---|---|---|
+| `qwen-audio-3.0-tts-plus` | @1719 ms，`data` **空**（只有元信息） | @2015 ms，`data` 24348 字符 | @2563 ms |
+| `qwen3-tts-flash` | @2250 ms，`output` **是空对象** | — | — |
+
+**第一块可播音频在 2015 ms 就到了，而 `synthesize()` 要等所有帧（2563 ms+）才返回** ——
+生产实测整段到手 3578 ms。这中间的差是一个不需要换模型、不需要新协议的优化：收到第一块
+PCM 就开始播。没做，因为它触及播放路径上的三样东西（`stop()` 打断、半双工窗、静音窗时机），
+而那三样都有真机踩过的坑；判据与数字记在这里，好让下一轮从这里接上。
+
+### 合成改走 WebSocket：整段 3578 ms → 936 ms（2026-09-05，REAL）
+
+上一小节把「第一块音频比 `synthesize()` 返回早 0.5 秒」记成了下一轮的活。跑完之后发现估小了
+六倍：**那 2 秒固定开销根本不在合成里，在 HTTP 层。**
+
+`help.aliyun.com` 与 `blog.csdn.net` 在这台机器上都取不到（企业策略拦掉），所以协议是探出来
+的 —— 按搜索摘要里的骨架发一个 `run-task`，服务端的错误消息就是文档（`.vox-ref/ws_tts_probe.py`）。
+标准库没有 WS 客户端，所以先写了一个（`core/ws.py`，握手与掩码钉在 RFC 6455 官方示例上）。
+
+第一轮探针的三条错误各回答一个问题：
+
+| 模型 | 服务端说 | 于是知道 |
+|---|---|---|
+| `qwen3-tts-flash-realtime` | `ModelNotFound` | realtime 那族**不在**这个端点上（它们走 `/api-ws/v1/realtime`，OpenAI Realtime 风格） |
+| `cosyvoice-v2` | `AllocationQuota.FreeTierOnly` | **协议、凭据、时序全对**，只是免费额度不含它 |
+| `qwen-tts` | `ModelNotFound` | 同第一条 |
+
+第二轮换成**当前在用的那一族**，全部通：
+
+| 模型 / 音色 | 第一块音频 | 整段到手 | 音频时长 |
+|---|---|---|---|
+| `qwen-audio-3.0-tts-plus` / `longanhuan_v3.6` | **702 ms** | **936 ms** | 1.49 s |
+| `qwen-audio-3.0-tts-flash` / 同上 | 483 ms | 515 ms | 1.33 s |
+| `cosyvoice-v1` / `longxiaochun` | 657 ms | 688 ms | 0.79 s |
+
+对照 HTTP SSE 那条路（同模型同音色）：首块 2015 ms、整段 **3578 ms**。**省 2.64 秒**，而
+音频字节与时长一致。
+
+两个协议细节值得记：**`instruction` 在 WS 上放 `parameters` 里，HTTP 上放 `input` 里** ——
+放错位置不报错，只会让使用者配的语气静默失效（带上「语速稍慢」之后同一句话的音频从 1.33 s
+变成 1.49 s，所以它真的生效）；**三个上行事件的 `task_id` 必须是同一个**，否则服务端按
+「没有这个任务」拒。
+
+生产装配路径复测（按 `config/voice.toml` 建 provider）：6 字整段 **905 ms** / 首块 655 ms；
+27 字整段 1688 ms / 首块 594 ms。
+
+没换成 `qwen-audio-3.0-tts-flash`（还能再省 0.4 秒）的理由只有一个：**那把嗓子没人听过。**
+音色名相同不等于同一个声音，而这条是听觉判断，要使用者在场。
+
+### 端到端复测：说完 → 第一声，11.3 s → 4.6 s（2026-09-05，REAL-AGENT + 真实合成）
+
+`.vox-ref/e2e_headless.py`（**先修了它**：`stack.tts` 从 2026-09-03 起是 `FallbackTts`，
+而它没有 `_player` —— 那个探针从那天起就在这一行崩，只是没人跑）。凭据用一次性注入
+（`VOX_QWEN_KEY` 只在那个进程里，不写盘），好量出「使用者按指引配好之后」的数字：
+
+| 轮次 | 路由 | 第一声 | 整轮 |
+|---|---|---|---|
+| 「你好，简单介绍一下你自己」 | relay → **qwen-plus** | **4625 ms** | 13921 ms（含朗读 45 字） |
+| 「帮我改一下这个函数」 | claude（CLI） | 27969 ms | 52453 ms |
+
+第一行是这个产品的常态，对照 2026-09-01 的 **11.3 s** —— 省 6.7 秒。第二行是 CLI 后端自己的
+启动开销（那条路一直是 12–43 s，见上面那一节），和这一轮的改动无关。
+
+加上 ASR 那一段（2.7 s），**「说完最后一个字 → 听见第一个音」从约 14.4 s 降到约 7.3 s**。
+
+### 段前空白：第一句话在 LLM 写完之前就送去合成，多句回答省 0.8–1.1 s（2026-09-05，REAL-AGENT）
+
+上一节那 4625 ms 里最后一段串行是不必要的。顺序原来是：
+
+    等 LLM **整轮**写完 → 切句 → 合成第一段 → 出声
+
+而第一句话在 LLM 写完之前就已经定下来了（文本只往后追加）。`_Ahead` 早就在盖**段间**空白
+（播上一段时合成下一段），缺的是同一招用在**段前**：把第一段的合成挪进「LLM 还在写后半段」
+的那段时间。
+
+`.vox-ref/prewarm_probe.py`：同一句话、同一把音色（`qwen-audio-3.0-tts-plus` /
+`longanhuan_v3.6`，`wire=ws`）、同一个端点各跑一遍，**只差 `Dispatcher._on_partial` 那一个
+开关**（关掉 = 2026-09-05 之前的顺序）。播放换成只打时间戳的假播放器 —— 出声的那一刻才是
+指标，把十几秒朗读也算进去只会把差别淹掉：
+
+| 这一句 | 关预热 第一声 | 开预热 第一声 | 省 |
+|---|---|---|---|
+| 「用三句话说明一下你能做什么」 | 4500 ms | **3719 ms** | 781 ms |
+| 「简单说说今天该注意什么，分两三句」 | 4859 ms | **3719 ms** | **1140 ms** |
+
+第二行是更干净的那次对照：**两次的回答文本逐字节相同**（「今天气温骤降，出门记得添衣。/
+下午三点有雷阵雨，带伞更稳妥。/ 要我帮你设个雨前提醒吗？」），所以那 1140 ms 里没有
+「这次答得短一点」的成分。四轮下来 `warm_hits` 累计 2、`warm_misses` **0** —— 预热的文本
+和真要说的第一段每次都对上了。
+
+**这个优化到今天才有意义。** 2026-09-01 记的那句「把 LLM 增量喂进 TTS 在这个端点上省不到
+时间」对**中转站**是成立的：那个端点整轮只下发一个 text 块（同日实测），「增量」在它上面
+根本不存在。换到百炼之后是 7–8 块真增量，同一句话就重新有了提前量。
+
+**单句回答一分钟都省不到，而这是构造上的，不是回归。** e2e 第一轮的回答是一句 44 字
+（只有句末一个「。」），`split_speech` 全程只切出一段，于是 `warm_hits=0 / warm_misses=0`
+—— 那一句直到 LLM 写完才完整，没有任何东西可以提前。所以 `describe()` 里那两个计数**必须
+报出来**：一个每轮都落空的预热（切句对不上、模型每次都调工具）和一个正常工作的预热在
+耳朵里完全同形，都是「有时候快有时候慢」。
+
+**能造成的唯一真实伤害是播错音，所以文本逐字节比对才认。** 对不上就重合成一次（多花一次
+额度）。那个失败形状听起来完全正常 —— 播出的是上一轮或另一段的合成 —— 所以它永远不会被
+发现，这也是「打断时丢掉预热」那一条存在的理由（下一轮第一句恰好是「好的。」的概率并不低）。
+
+### `weather.now`：「今天天气怎么样」终于有真数据（2026-09-05，REAL）
+
+在这个工具之前那句话的回答**必然是编的**。判据不是「模型答得像不像」——它答什么都像，
+而一个把气温说错五度的助手不会被发现。`web.search` 也接不住它：搜索结果页那个天气块是 JS
+渲出来的，抓回去的 HTML 里没有那几个数字。
+
+后端选 Open-Meteo 的判据是本项目对新依赖那三条：零注册、零 key、零 telemetry。先探可达性
+（这台机器上 `help.aliyun.com` / `blog.csdn.net` / `github.com` 都被拦过，所以这一步不能省）：
+
+| 端点 | 状态 | 耗时 |
+|---|---|---|
+| `geocoding-api.open-meteo.com/v1/search?name=Beijing&language=zh` | 200（回中文名「北京」） | 1828 ms |
+| `api.open-meteo.com/v1/forecast` | 200 | 1155 ms |
+| `wttr.in/Beijing?format=j1` | 200 | 1015 ms |
+
+选 Open-Meteo 而不是 wttr.in：后者的 `lang_zh` 实测回的是英文（`Smoky haze`），而前者有
+结构化的 WMO 天气码 + 独立的地名解析接口（可缓存）。
+
+`.vox-ref/weather_probe.py`，**走意图快路径 + 真实 API**：
+
+| 说的话 | 快路径判成 | 耗时 | 回答 |
+|---|---|---|---|
+| 今天天气怎么样（默认城市空） | `weather.now` | 0 ms | 「还不知道你在哪个城市 —— 说『上海天气怎么样』就行…」 |
+| 今天天气怎么样（默认「北京」） | `weather.now` | 3188 ms | 北京现在 33 度，晴，今天 22 到 33 度，降水概率 0% |
+| 上海天气怎么样 | `weather.now` | 3125 ms | 上海现在 30 度，多云，今天 24 到 30 度，降水概率 35% |
+| **北京明天天气** | `weather.now` | **1546 ms** | 北京明天 22 到 31 度，降水概率 0% |
+| 成都气温多少度 | `weather.now` | 3094 ms | 成都现在 34 度，晴，体感 36 度，今天 24 到 34 度，降水概率 16% |
+| 搜一下 武汉天气 | **`web.search`** | — | （显式动词赢，见下） |
+
+第四行那 1546 ms 是**地名缓存**：一次查询本来是两个往返，而城市不会搬家，所以同一城市的
+第二次只剩预报那一个请求。缓存只在进程内 —— 一个磁盘缓存要管失效、并发、`.gitignore`，
+换来的只是重启后第一次查询的 1.6 秒。
+
+**「显式动词赢」是一次真实的冲突改出来的。** 城市捕获组会把「搜一下 武汉」整段吃进去，
+第一版因此把 `tests/test_intent.py` 里三条 `web.search` 抢走了。挡法是正则开头的
+`_REQUEST_VERBS` 否定前视，**不是**规则顺序 —— 顺序只解决带空格的那一种，粘着写的
+「搜一下武汉天气」会让城市变成「搜一下武汉」，然后报「没找到叫『搜一下武汉』的地方」。
+
+**模型侧也量了。** 快路径接住的是「今天天气怎么样」这类直问，模型根本看不到它们；真正要量
+的是「这句话需要今天的真实天气」这个判断。`.vox-ref/model_pick_probe.py` 因此挑了一句带
+「吗」的（`_QUESTION_TAIL` 会把它判成 agent，所以它确实到得了模型手上）：
+
+| 用例 | 说的话 | qwen-plus 的调用 | 首字 |
+|---|---|---|---|
+| weather | 明天适合去爬山吗，我在上海 | `weather.now {"city": "上海", "day": "tomorrow"}` | 2172 ms |
+
+七个用例 **7/7**，平均首字 2448 ms。
+
+**「注册了」不等于「跑得动」，这一次是实测抓到的。** `weather.now` 已经 `register()` 了、
+已经在 `skills.REGISTERED` 里、控制台页面上也列出来了，而 `core/tools/contract.py` 的
+`TOOL_NAMES`（政策门的入口白名单）里没有它 —— 于是 `policy.check()` 一律回 `unknown tool`，
+上面那张表第一次跑出来六行全是 `ok=False`。**而那个工具自己的 12 条单元测试全绿**：它们验的
+是「在不在 `runner.tools` 里」。护栏因此加在 `tests/test_tools.py`：注册了什么就必须在
+`TOOL_NAMES` 里（MCP 那一族除外，名字运行时才知道）。
+
+### 识别也改走 WebSocket：说完 → 文本 2734 ms → 93 ms（2026-09-05，REAL）
+
+WS 客户端已经在（上一节），所以这一步只是协议工作。`.vox-ref/ws_asr_probe.py` 走**合成那条
+路同一个端点**（`/api-ws/v1/inference`，只把 `task` 换成 `asr`、`function` 换成
+`recognition`）—— 于是第一轮探针里 `qwen3-asr-flash-realtime` 那个 `ModelNotFound` 的推断
+（「realtime 那族走 /api-ws/v1/realtime」）只对它自己成立：paraformer 与 fun-asr 那几个
+`-realtime` 模型**就在这个端点上**。
+
+同一段真录音（7.15 s），按 100 ms 真实节奏喂，量「音频发完 → 最终文本」：
+
+| 模型 | 说完 → 最终文本 | 「沃」写对了吗 |
+|---|---|---|
+| **`fun-asr-realtime`** | **93 ms** | ✓ 「你好，小沃。」 |
+| `paraformer-realtime-v1` | 108 ms | ✗ 「你好，小**吴**」 |
+| `paraformer-realtime-v2` | 359 ms | ✗ 「你好小**吴**」 |
+| `qwen3-asr-flash-realtime` | — | `ModelNotFound`（走另一个端点） |
+
+准确度那一列决定了选谁：写不出「沃」的模型再快也是净损失。中间结果是**实时**下发的
+（说话过程中就在出字），所以将来球上要显示实时转写，数据已经在那里。
+
+**端点仍然由本机 VAD 判，这是刻意的。** 服务端自己会在句间停顿处切句（`sentence_end`），
+用它当「一轮结束」看起来更省事，但那个阈值不由我们定 —— 而上面那张 `rule2` 表证明过：
+这位说话人的短语间停顿是 1.0–1.1 秒，切得比这激进就会把一句话切成两半。所以分工是
+**服务端出字，我们判「说完了」**。
+
+生产装配路径复测（`.vox-ref/asr_ws_stack_probe.py`，按 `config/voice.toml` 建）：
+「你好小沃」2.64 s 音频 → 转写「你好，小沃。」，**说完之后一共等 720 ms**（其中本机端点
+800 ms 的窗口里已经含掉服务端那 203 ms）。整段那条路同一段是 **3.9 秒**（0.8 端点 + 3.1
+往返）—— 省 3.2 秒。
+
+第二段素材（「你好小沃 检查目前运行状态是否正常」）在流式路上只转出前半句，那**不是缺陷**：
+那段录音把唤醒词和请求连在一起，中间的停顿超过 0.8 秒于是判了端点。生产上唤醒词那一块
+**不进识别器**（capture 的两段模式保证），所以识别流里只有请求那一句。
+
+**两条路的模型名不一样**：流式要 `fun-asr-realtime`，整段是 `fun-asr-flash-2026-06-15`，
+把整段的名字发给流式接口回 `ModelNotFound`。`config/voice.toml` 的 `asr.model` 写的是整段
+那条路的名字，流式路由装配层自己挑（除非那一行本身带 `realtime`）。
+
+### 现在的构成
+
+| 段 | 09-01 | 09-05（改之前） | 改之后 | 还能怎么砍 |
+|---|---|---|---|---|
+| VAD 端点 | 1.2 s | 0.8 s | 0.8 s | **不能**（这位说话人的短语间停顿 1.0–1.1 s，见上一节） |
+| ASR | 0（本机流式） | 3.1 s | **0.2 s**（在端点窗口内） | 已换 |
+| LLM 首字 | 5.0 s | 7.9 s | **1.8 s** | 已换 |
+| TTS 整段 | 2.4 s | 3.6 s | **0.9 s** | 换 `-tts-flash` 还能再省 0.4 s，但那把嗓子要人听过 |
+| **合计** | 8.6 s | **15.4 s** | **约 3.5 s** | 剩下的都在模型自己身上 |
+
+三块云端往返（识别 / 推理 / 合成）从 14.6 s 压到 2.9 s，而**唯一没动的那一段是本机 VAD 的
+0.8 秒** —— 它是按这位说话人的停顿长度定的，有一条测试禁止在没有新测量之前调小它。
+
+**这张表在同一天的换音色之后有一处变了**：TTS 整段 0.9 → **1.1 s**（新音色 `longyan_v3`），
+而首块 0.64 → **0.53 s** —— 「第一声」那个指标改善了，见下一节。
+
+### 挑一把「有磁性的女声」：扫 26 个组合，两个新事实（2026-09-05，REAL）
+
+使用者的要求是「换个性感一点的声色，要那种有磁性的女声」。上一把是
+`qwen-audio-3.0-tts-plus` + `longanhuan_v3.6`（龙安欢，官方描述「欢脱元气女」）。
+
+候选来自百炼官方音色表（`help.aliyun.com/zh/model-studio/cosyvoice-voice-list`，经 WebFetch
+核实）。**整张表里带「磁性」的女声只有一个**：龙悦「温暖磁性女」30~35 岁；离「性感」最近的
+描述是龙嫱「浪漫风情女」。其余按「沉稳」「低调冷静」「优雅知性」「温暖治愈」取语义近邻。
+
+`.vox-ref/voice_timbre_probe.py` 扫 26 个 (model, voice) 组合、同一句 24 字各合成一次、落
+wav 让使用者听。**18 个可用**，基频中位数（自相关，**只用来排序**）：
+
+| 组合 | 特质 | 基频 | 首块 | 整段 |
+|---|---|---|---|---|
+| 现用音色 + 「低沉慵懒气声」指令 | — | **101 Hz** | 577 ms | 2014 ms |
+| `cosyvoice-v1` / `longyuan` | 温暖治愈女 35~40 | 158 Hz | 594 ms | 1844 ms |
+| `cosyvoice-v3-flash` / `longyuan_v3` | 温暖治愈女 | 176 Hz | 467 ms | 1296 ms |
+| `qwen-audio-3.0-tts-plus` / `longanhuan_v3.6`（原） | 欢脱元气女 | 197 Hz | 639 ms | 1734 ms |
+| `cosyvoice-v1` / `longyue` | **温暖磁性女** 30~35 | 208 Hz | 625 ms | 1656 ms |
+| `cosyvoice-v3-flash` / `longqiang_v3` | 浪漫风情女 30~35 | 210 Hz | 500 ms | 1296 ms |
+| **`cosyvoice-v3-flash` / `longyan_v3`（选定）** | 温暖春风女 30~35 | **231 Hz** | **530 ms** | 1140 ms |
+
+**使用者挑的不是基频最低的那个** —— 全表最低的两个（101 Hz 与 158 Hz）都没被选中。这正是
+这个探针要落 wav 而不只报数字的理由：气声与共鸣量不出来，基频只能排序、不能拍板。
+
+那个 101 Hz 值得单独说一句，因为它看起来像自相关的倍周期误判（正好是同一把音色 197 Hz 的
+一半）。**它是真的**：频谱复核里 60–130 Hz 的能量是 180–230 Hz 的 **3.07 倍**，而基线那一段
+这个比值是 **0.03**。`qwen-audio-3.0-tts-*` 的 instruct 能把一把女声压到男中音区。
+
+两个新事实，都会影响下一次换音色：
+
+**一、`cosyvoice-v2` 整族 403，而 `cosyvoice-v3-flash` 通。** v2 回
+`AllocationQuota.FreeTierOnly`（免费额度耗尽），而官方表里「浪漫风情」「优雅知性」「高雅
+气质」那一批只在 v2/v3 上。只扫 v2 得到的结论会是「这些音色都用不了」——**把候选面从 18 个
+剪到 5 个**，剪掉的正好是语义上最贴题的那些。同一形状的坑还有一个：2026-08-29 记下的
+「`cosyvoice-v1` 不走 HTTP（400 `current user api does not support http call`）」是**HTTP
+时代**的事实，而 WS 上 v1 是通的（657 ms 首块）。拿那张表去否定 cosyvoice 会白丢整个音色库。
+
+**二、`cosyvoice` 那一族不认 `instruction`，而且它是硬失败。** 同一句话、同一把音色，只差
+这一个字段：
+
+| 组合 | 带 `instruction` 的结果 |
+|---|---|
+| `cosyvoice-v3-flash` / `longyan_v3` | **`InvalidParameter: [cosyvoice:]Engine return error code: 428`** |
+| `qwen-audio-3.0-tts-plus` / `longanhuan_v3.6` | 200，音频 1.33 s → 1.49 s（「语速稍慢」被执行了） |
+
+**代价不对称。** 静默忽略只是「配了不生效」；428 是**每一句合成都抛**，于是 `FallbackTts`
+latch 到本机 VITS —— 使用者听到的是 VITS 的默认女声，而症状读起来像「新音色就是这个味道」
+而不是「配置写错了」。所以换到 cosyvoice 必须同时把 `tts.instruction` 清空，「她怎么说」那个
+杠杆一并交出去。
+
+生产装配路径复测（`_open_tts` 按 `config/voice.toml` 建）：`model=cosyvoice-v3-flash`
+`voice=longyan_v3`、24 字整段 **1094 ms**、`degraded=False`、装配层零警告。对照上一把的
+936 ms —— 整段慢 158 ms，而**首块快 109 ms**（530 vs 639），所以「第一声」那个指标是改善的。
+唤醒确认音三句跟着重新合成了（`cache_name` 把 `voice` 算进哈希，文件名自动换 —— 这条
+2026-08-29 踩过一次，那次换了音色而播出来还是上一把声音）。
+
+
+## 一轮语音真正花在哪：朗读时间，不是接口延迟（2026-09-01，REAL-AGENT + 真实合成）
+
+`.vox-ref/e2e_headless.py` 从「识别器交出文本」那一点接上，把余下每一段都真的跑一遍
+（真实端点、真实凭据、真实合成与播放）。麦克风那一段仍未验，它**后面**的全验了。
+
+| | 改前 | 改后 |
+|---|---|---|
+| 「你好，简单介绍一下你自己」 | 120 字 / 整轮 **28983 ms** | 32 字 / 整轮 **15983 ms** |
+| 「帮我改一下这个函数」 | 130 字 / 整轮 **47766 ms** | 15 字 / 整轮 **19827 ms** |
+
+这把音色约 4.3 字/秒，所以 120 字要念 **28 秒**，而 LLM 首字 5.0 s、TTS 首块 2.4 s ——
+等待里 20 秒以上是在念一段没人需要那么长的回答。两条路各缺一句话：
+
+- HTTP 那条路的 system prompt 只写了「通常两三句话说完」，模型把它读成「两三句 + 一段
+  补充」。改成可数的上限（40 字 / 两句）+ 明确禁令（不许空行分段、不复述问题、
+  结尾不加「有什么想问的」）。
+- **CLI 那条路根本没有任何提示** —— `cli.py` 只发 `render_prompt(task)`。它是本机进程，
+  操作系统和工作目录自己知道，但「回答会被念出来」猜不到。
+
+### 第一声（目标指标）
+
+| 这一句 | 走谁 | 第一声 | 整轮 |
+|---|---|---|---|
+| 你好，简单介绍一下你自己 | relay（http） | **11280 ms** | 19358 ms |
+| 帮我改一下这个函数 | claude（cli） | 43125 ms | 55391 ms |
+
+普通对话那 11.3 秒的构成是 **LLM 整轮 + TTS 首块 2.4 s** —— 这个端点首字 = 整轮，所以
+缩短回答同时缩短了第一声。claude 那 43 秒是 CLI 自己的启动 + 工作区扫描。
+
+### 两个附带发现
+
+- **`claude` 读到了 Vox 仓库的 git status**：回答里点名了当时正在改的 `cli.py` 与
+  `environment.py`。`cwd = ".agent-workspace"` 在仓库**内部**，而 git 会往上找仓库根 ——
+  隔离不完整。已记为已知缺口。
+- **蓝牙耳机不在时没有可用麦克风**：`input.device = "耳机"` 匹配不上（当时只枚举到
+  `麦克风阵列 (Realtek)` 与 ToDesk 虚拟设备），而那只阵列实测峰值 0.00003。此时
+  `open_voice_stack` 会给一条可读的警告，死麦克风检测 4 秒后进运行日志 —— 行为正确，
+  但**这台机器在耳机断开时唤醒功能整体不可用**，这是环境事实不是缺陷。
+
+
+## 想不用人也量到「过空气」的唤醒率：失败了，以及为什么（2026-09-01，REAL-MIC(loopback)）
+
+所有唤醒率数字此前都是 **SIM**（wav 直接喂回调）。试图用「扬声器放真录音、麦克风收」补上
+空气那一段 —— 空气是真的，说话人不是活的，等级记作 **REAL-MIC(loopback)**，不冒充真人。
+
+**结论：这台机器上这条路不成立**，三个具体原因，每个都量到了：
+
+1. **蓝牙耳机不能同时当扬声器和麦克风。** Windows 在 A2DP（立体声输出、无麦克风）与
+   HFP（单声道 + 麦克风）之间切换。实测：临时开的 `InputStream` 收到峰值 0.1696，而
+   播放一开始，生产装配那条流收到 **112 块全零** —— 流照常开着、回调照常触发。
+2. **能用的输入设备只有一只，而且它在两次枚举之间会变。** 只有耳机稳定接受 16 kHz 单声道；
+   Realtek 阵列在 WASAPI 下只接受 2 通道，在 MME 下可以。索引每次枚举都可能不同。
+3. **「Realtek 扬声器 → Realtek 阵列」这条无蓝牙的路通了，但唤醒词不命中**：生产装配收到
+   `speech_blocks 15`、包络 0.0202、增益爬到 2.376 —— 也就是说 VAD 和增益都在正常工作，
+   只是 KWS 不命中。把播放增益提到 3.0 反而更差（麦克风峰值 0.1209 → 0.0569，播放侧被
+   `np.clip` 削平了）。
+
+**不能从第 3 条推出「过空气就唤不醒」。** 一只笔记本扬声器播放的人声录音，和一个人在说话，
+不是同一个声学对象（频响、指向性、近讲效应全都不同）。正确的结论是**这个装置不能替代
+一个人说话**，所以 REAL-MIC 那一格仍然空着。
+
+### 顺带查出并修掉的三个真缺陷
+
+| 缺陷 | 症状 | 修法 |
+|---|---|---|
+| `_match_device` 并列时返回名字片段 | 蓝牙耳机与一只蓝牙音箱的名字都含「耳机」，于是 PortAudio 抛 `Multiple input devices found`，麦克风整体开不起来 | 先按「能否按这个采样率打开」过滤，再按 host API 排序，还并列取最小索引。设备选择不是安全边界 |
+| WDM-KS 被当成最后的退路 | `check_input_settings` 说格式没问题，`start()` 抛 `Unanticipated host error`（输出 GLE 0x490 / 输入 GLE 0x48F） | 按名字选设备时**直接排除** WDM-KS；写索引那条路不变 |
+| 名字解析不到时把名字原样交给 PortAudio | 抛出的报错列举的恰恰是刚被判定「开不起来」的那两条 WDM-KS 条目 —— 最容易把人带错方向的失败 | 退到系统默认设备并给一条可读警告；默认设备聋的话由「全零输入」探测在 4 秒后进日志 |
+
+### 真机验收的入口已经建好
+
+`scripts/acceptance/real_mic_e2e.py`：跑起来、按提示说 N 轮、读最后那张表。它在生产装配上
+插了六个时刻（KWS 命中 / 声纹判定 / ASR 端点 / 派发 / agent 首 chunk / 第一声），直接输出
+目标指标那一列。**这一步没有替代品** —— 需要一个人说话，和一只不聋的麦克风。
+
+
+### 回环失败的原因：不是唤醒词，是阵列麦克风自己的回声消除
+
+上面第 3 条（空气通了但 KWS 不命中）不能就这么留着 —— 它读起来像「过空气就唤不醒」，
+而那会是个严重结论。用软件模拟每一项空气退化，逐项加进同一段真录音，喂**生产那条回调
+路径**（`.vox-ref/degrade_probe.py`，无硬件、无副作用）：
+
+| 退化 | 命中 | 增益末值 | VAD 语音块 |
+|---|---|---|---|
+| 原样（峰值 0.746） | **3/3** | 0.74 | 36 |
+| 只缩到 0.05 | **3/3** | 2.79 | 34 |
+| 带通 300–7000 Hz（像小扬声器） | **3/3** | 2.71 | 34 |
+| 五阶衰减混响（像房间） | **3/3** | 2.80 | 34 |
+| 带通 + 混响 | **3/3** | 2.63 | 34 |
+| 带通 + 混响 + 底噪 | **3/3** | 2.67 | 35 |
+
+**这个 KWS 对通道响应、混响和底噪都稳。** 所以回环那次失败另有原因，两个数字指向同一个
+解释：临时开的裸 `InputStream` 在播放时收到峰值 **0.1209**，而紧接着生产装配那条流的包络
+只有 **0.0202**、VAD 语音块 **15**（SIM 同一段是 34–36）。
+
+**推断（不是实测）：那只「麦克风阵列」的驱动端点自带回声消除（AEC）。** 它的工作恰恰是
+消掉扬声器正在放的东西，而 AEC 需要几秒收敛 —— 3 秒的听力测试里它还没锁上（信号过得去），
+生产那条流跑得久，锁上之后剩下的就是残差。这解释了两个数字为什么同时成立。
+
+结论因此更强也更窄：**扬声器 → 内建阵列这条回环在原理上就测不了唤醒**（AEC 会消掉素材），
+而唤醒词本身在可模拟的空气退化下是稳的。要过空气测，麦克风必须是不对笔记本扬声器做 AEC 的
+那一只（耳机麦），而它此刻断开着。**真人说话仍然是唯一的 REAL-MIC 判据。**
+
+
+## 打包后的球一直不是 AE 序列层：一条 CSP 指令（2026-09-03，SIM，真实浏览器控制台）
+
+使用者的问题是「为什么现在的语音球不是另一个分支最新的 AE 雪碧图？是不是接入错了版本」。
+**版本没接错**，而且没有任何一层报错 —— 这是它难查的全部原因。
+
+先把版本这件事关掉：`claude/ui-d91f92` 的 tip 是 `948db11`，`git merge-base --is-ancestor
+948db11 main` 成立，`git log main..claude/ui-d91f92` 是空的 —— **整支已经并进 main**，
+`desktop/public/orb/{flow,burst}.{png,json}` 是 main 的已跟踪文件，默认渲染层是 `seq`。
+
+真因在 `desktop/src-tauri/tauri.conf.json` 的一行：
+
+```
+default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost
+```
+
+CSP 的指令之间**互不继承**：写了 `connect-src` 就不再回落到 `default-src`。而
+`sequence.ts::loadSheet` 取元数据用的是 `fetch()`，落在 `connect-src` 上；取图用的是
+`new Image()`，落在 `img-src`（未写 → 回落 `default-src 'self'`，通）。于是两个 60 字节的
+`.json` 被拒、4 MB 的 PNG 反而是通的，而 `main.ts` 对失败的处理是
+
+```js
+.catch((e) => { console.warn('[orb] 序列资产未就绪，回退手写渲染器：', e); });
+```
+
+—— **静默回退 `core.ts`**。使用者看到的就是「球还是老样子」。
+
+取证（`.vox-ref/csp_probe.py`：把这一行 CSP 原样加到一个服务 `desktop/dist` 的本地服务器上，
+两个端口两档；已固化为 `scripts/acceptance/csp_check.py`，策略从 `tauri.conf.json` 读，
+不再抄一份）。浏览器控制台，逐字：
+
+| CSP | 控制台 | 服务器日志 |
+|---|---|---|
+| 现行 | `Connecting to '…/orb/flow.json' violates the following Content Security Policy directive: "connect-src ipc: http://ipc.localhost"` ×2 + `[orb] 序列资产未就绪，回退手写渲染器` | 只有 `index.html` / `assets/*` |
+| **加 `'self'`** | **零报错、零告警** | `orb/flow.json 200` · `orb/burst.json 200` · `orb/flow.png 200` · `orb/burst.png 200` |
+
+**为什么此前所有取证都没抓到它**：`docs/routines.md` 的六态渲染取证打的是 dev server
+（5173/5273），而 **dev server 不发 CSP**。那条例程连「生产页 `index.html?state=idle`
+画布全空」都验了 —— 只是验在了无 CSP 的一侧。一个只在打包后成立的失败，用 dev server
+是测不出来的，无论测多细。
+
+修法是 `connect-src` 加 `'self'`，**不放开任何外网**：`'self'` 就是打进 exe 的那份资产，
+本地优先的姿态不变。需要 `cargo build --release` 才进二进制（`vox.exe` 在跑时链接会被
+文件锁挡住，先退出托盘）。已重新构建并核对：新 exe（13,473,280 字节）里有
+`connect-src 'self' ipc:`，旧的那份没有。
+
+
+## 「用的不是我配的模型」「没有声音」：两个配置面，一个只有写没有读（2026-09-03）
+
+使用者两句观察，都成立，而且**都不是代码算错了，是配置根本没被读**：
+
+> 现在 vox 在进行对话时使用的是我 claude 配置的模型，并没有调用我给其配置的 api key。
+> 而且最近的对话并没有进行 tts 转写，后台 api 也没有调用。
+
+### 一、`config/models.toml` 只有控制台在读
+
+`grep -rn "load_models_config" core/ vox_plugin/ scripts/` 的结果全部落在
+`core/console/routes.py`。也就是说「模型配置」那一栏能编辑、能保存、页面显示成功，
+**而运行时一个字都不读** —— 答对话的一直是 `config/agents.toml` 里那条 `relay`
+（端点 `api.justwoker.icu`、`key_env = ANTHROPIC_AUTH_TOKEN`，正是 Claude Code 那一套）。
+
+日志里那一行就是它：`agent single → relay(http model=claude-opus-5 endpoint=https://api.justwoker.icu)`。
+
+修法见 `core/agents/registry.py::apply_llm_profile`。要点是**套用与不套用都留一句话**：
+一个静默套用的覆盖层和一个静默不套用的覆盖层一样难查。
+
+### 二、TTS 的 401 是变量被覆盖，不是代码
+
+`.env` 里五个凭据变量的 SHA-256（只比摘要，不打值）：
+
+| 变量 | 长度 | 摘要前 12 位 |
+|---|---|---|
+| `VOX_LLM_KEY` | 51 | `60a50f081b68` |
+| `VOX_AGENT_HTTP_TOKEN` | 51 | `60a50f081b68` |
+| `VOX_TTS_KEY` | 51 | `60a50f081b68` |
+| `VOX_DASHSCOPE_KEY` | 51 | `60a50f081b68` |
+| `ANTHROPIC_AUTH_TOKEN` | 51 | `d002050f42b3` |
+
+四个逐字节相同。而 2026-08-29 记下的那个**能用**的百炼 key 是 **35 字符** —— 它被覆盖掉了。
+拿现在的 `VOX_TTS_KEY` 打百炼：`HTTP 401 {"code":"InvalidApiKey"}`。
+
+三层各自吞掉这件事，合起来就是「一句话都不出声，而哪里都不说为什么」：`_open_tts` 只在
+`load()` 失败时报一次警告（401 在 `load()` 时探不到），`complete_turn` 是
+`except Exception: pass`，云端 provider 自己不重试。**对语音助手来说「不出声」与「没听见」
+「崩了」「网断了」在使用者那一侧完全同形**，所以这三层是同一个缺陷的三段。
+
+现在：`FallbackTts` 换本机嗓子 + 三处留痕，`plugin.tts_failures` 让运行日志答得出
+「这一轮为什么没出声」。**真正的修复仍然在使用者手里**：把 35 字符那个百炼 key 放回
+`VOX_TTS_KEY`。
+
+### 三、顺带一个会把人带偏的观察
+
+排查凭据时用裸 `urllib` 打 `api.justwoker.icu`，三个 key **全部** `HTTP 403 error
+code: 1010` —— 看起来像全都失效。换上 `core/agents/http.py` 的 `API_USER_AGENT` 之后
+全是 200。那是 Cloudflare 按 UA 拦的。**探这个端点必须带项目自己的 UA**，否则得出的结论
+和事实相反。
+
+
+## 朗读时打断不了：一行 `return`，不是哪一层不灵（2026-09-03，SIM）
+
+使用者报的是「朗读 TTS 内容时必须等读完或者重新使用唤醒词才能继续对话」。
+
+打断这条链**一直是通的**：`wake_detected` 在 SPEAKING/THINKING 时先 `cancel()` 停 TTS 再进
+LISTENING，代码和测试从 P8 起就在。坏的是最前面那一道闸 —— 回答播放期间压的是**硬静音窗**，
+而硬静音在音频回调的第一行就返回：
+
+    if self.muted:            # ← 在 _watch_input_level、增益、KWS 之前
+        self.muted_blocks += 1
+        return
+
+于是那几秒里 KWS 一块音频都收不到。想打断的那句话落在一个聋掉的麦克风上。
+
+**半双工窗**（`capture.duck_for`）只关三样：转写（唯一会产生错误内容的一样 —— 开着的话助手
+把自己的回答转写成下一句请求）、电平观测（拿自己的声音证明麦克风活着是假证据）、增益适应
+（跟着扬声器包络走，人一开口时已经偏了）。**KWS 与环形缓冲继续跑** —— 缓冲必须继续写，
+因为打断也要过声纹门，而门看的是命中前那 3 秒。
+
+为什么敢让 KWS 在自己的声音里跑：**自激会被声纹门拒掉**（助手的 TTS 不是注册的那个人）。
+门在后面才敢开这个窗。代价如实说：音箱音量大时缓冲里是「人声 + 串音」，相似度会掉，
+表现是打断偶尔要说两次；戴耳机几乎没有串音。这一条是推断，**未在真机上量过**。
+
+改完跑了 `wake_path_check.py`（因为增益路径动了）：「你好小沃」三段录音在四种增益配置下
+全部命中，负样本「你好问问」在四种配置下**全部 0 次**，电平扫 0.746→0.01 六档都是 3/3。
+半双工窗没有动到唤醒本身。
+
+## 思考态频闪：一道算术题（2026-09-03，算术 + npm build）
+
+使用者说「思考状态跟鬼畜了一样」。`burst` 雪碧图是 **28 帧 @ 24fps**，一个循环 1.17 秒：
+
+| 配置 | 一圈多久 | 每秒循环 |
+|---|---|---|
+| rate 2.20（旧） | 0.53 s | 1.9 次 |
+| rate 2.20 × boost 1.7（旧，思考 6 秒后） | **0.31 s** | **3.2 次** |
+| **rate 1.15（新）** | **1.01 s** | 1.0 次 |
+| rate 1.15 × boost 1.25（新，思考 8 秒后） | 0.81 s | 1.2 次 |
+| 参照：listening（flow 64 帧 @ rate 0.70） | 3.81 s | 0.26 次 |
+
+一段爆发式素材每秒循环 3.2 次读出来是频闪，不是「在想」。新值仍然比「在听」快近 4 倍，
+「久想会更紧」那层语义也留着 —— 只是它现在是渐强不是抽搐。
+
+同一轮修掉「球外那圈暗灰边」：`drawUnderlay` 以 `R * 0.99`（几乎整张画布）为半径画暗盘，
+而球体只占约 0.69 的半径 —— 球外那一圈是一块没有任何东西盖住的灰，在浅色背景上就是使用者
+圈出来的那道边。同一层还把球身中段的加色压掉一档（「颜色有点淡有点看不清」的一半）。
+暗底现在跟着球体走（`base / 2 * 1.02`），渐变 0.62 处归零。
+
+**这两条都还没进二进制**：`cargo build --release` 报 `拒绝访问。(os error 5)` —— 球正在跑，
+Windows 不让替换一个运行中的 exe。要先从托盘退出球。
+
+## 「打开网易云」不用先加白名单：188 个可开的东西（2026-09-03，REAL-WIN 枚举）
+
+使用者的要求是「而不是每次都需要添加名单才能打开」。枚举两处：
+
+| 来源 | 条数 |
+|---|---|
+| 开始菜单（`%APPDATA%` + `%ProgramData%` 的 Programs） | 151 |
+| 注册表 `App Paths`（HKLM + HKCU） | 40 |
+| 去重后 | **188** |
+
+按名字打分的实测（这台机器）：
+
+| 说的 | 分 | 中的 |
+|---|---|---|
+| 网易云 | 99 | 网易云音乐 ✅ |
+| 网易云音乐 | 100 | 网易云音乐 |
+| 微信 | 100 | 微信 |
+| QQ音乐 | **0** | （没装，正确地没找到）|
+| 音乐 | 59 | **网易云音乐、酷狗音乐** —— 歧义，报候选不猜 |
+| B站 | 0 | 没装客户端 → 落到 `apps.sites` 的网页版 |
+
+**一条实测抓出来的错**：噪声词如果**两侧都剥**，「QQ音乐」会剥成「QQ」然后精确匹配到本机
+的「QQ」—— 开出来是聊天软件而不是播放器。所以噪声词只从候选那一侧剥。
+
+## 云端识别 vs 本机识别（2026-09-03，SIM + 真录音）
+
+判据来自使用者三次报「语音转文字还是不够精准」。前两轮的处理都落在参数上，第三轮他说
+已经重新构建并重启而症状没变 —— 那时才值得怀疑参数不是原因。全文见 ADR 009。
+
+**同一条真录音，两条路各跑一次**（`.vox-ref/rec/你好小沃 检查目前运行状态是否正常.wav`，
+16 kHz 单声道 7.15 s）：
+
+| 路 | 转写 |
+|---|---|
+| 本机 `sherpa-onnx-streaming-zipformer-zh-14M` | 你好小**吴**检查目前运行状态是否正常 |
+| 云端 `qwen-audio-3.0-asr-flash` | **你好，小沃，检查目前运行状态是否正常。** |
+
+**为什么参数救不回来**：本机那个模型的 `tokens.txt` 里只有 **1426 个汉字**，「沃」不在里面 ——
+它写不出这个字。21 行热词里有 8 行含它写不出的字（沃 / 酷 / 哔 / 哩 / 抖 / 浏 / 览 / 唤 / 纹），
+而 sherpa-onnx 对此只在 C++ 层打 `Cannot find ID for token`，Python 侧一个字都看不见。
+
+**热词文件不能带 `#` 注释**（实测）：带注释的文件让加载报 `invalid stof argument`，而那个
+失败让**整个 ASR 不可用**，不是「热词被忽略」—— 一个静默扩大的故障面。
+
+**请求形状，四种各发一次**（这一段是使用者报的 400 的全部内容）：
+
+| 请求 | 结果 |
+|---|---|
+| 原生端点 + `data:audio/wav;base64,…` + `parameters.format` | **200，转写正确，7.8 s** |
+| 原生端点 + 旧式 `{"audio": "data:…"}` 键 | 200，转写正确，4.3 s |
+| 原生端点 + 裸 base64（不带 `data:` 前缀） | 500 `Cannot run program "/usr/bin/wget": Argument list too long` |
+| 原生端点 + 缺 `parameters` | 400 `UNSUPPORTED_FORMAT: format is empty` |
+| **`compatible-mode/v1`**（他配的那条） | 400 `UNSUPPORTED_FORMAT: format is empty`，25.4 s |
+
+裸 base64 那一行说明服务端把不带前缀的字符串**当 URL 拿 wget 去下载**。兼容端点那一行说明
+这个模型在 OpenAI 协议上不可能工作：`format` 无处安放。
+
+**端到端（走 provider 契约，按 100 ms 真实节奏喂）**：
+
+| 样本 | 转写 | 端点判出 | 文本到手 | 段长 | 往返 |
+|---|---|---|---|---|---|
+| 7.15 s（中途 1.9 s 停顿） | 你好，小沃检查目前运行状态是否正常。 | 3.2 s | 11.3 s | 两段共 4.9 s | 3.1 s |
+| 2.64 s | 你好，小沃。 | 3.1 s | 7.0 s | 3.1 s | 3.8 s |
+
+第一行是**续说拼接**的读数：1.9 s 的停顿被当成句末，而第一段的文本回来时人已经在说后半句，
+于是它被认成句中、攒起来等第二段。生产上唤醒词由 KWS 吃掉、不进识别流，所以典型一轮是一段：
+**说完之后 4–5 秒拿到文本**。这是端点的属性，不是可调项。
 
 ## Blockers
 

@@ -14,6 +14,16 @@ Use `SpeakerEmbeddingExtractor` + `SpeakerEmbeddingManager` from the already-ins
 
 The only external need is the model file (~37 MB), `3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx`, from the k2-fsa releases. It lives in `models/`, which is outside version control.
 
+> **Amended 2026-08-29 — the model, not the decision.** The default is now
+> `3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx` (CAM++, 27 MB, **dim 192**), from the same
+> release tag and the same sherpa-onnx API, so nothing above changes. The swap was decided on
+> measured discriminability over this project's own recordings rather than upstream claims:
+> same-speaker minimum **0.833** vs ERes2Net's 0.736, different-speaker maximum 0.396 vs 0.370 —
+> the usable gap widened from +0.366 to +0.437. The numbers are in `core/audio/speaker.py`'s module
+> header and `THIRD_PARTY_NOTICES.md`. **Every enrolment made under the old model is void** (512-dim
+> vectors mean nothing to a 192-dim model); `_restore()` reports them in `stale_profiles` instead of
+> looking like "nobody is enrolled".
+
 ### 2. The gate fires at the KWS hit, not after the first sentence
 
 On a keyword hit, `SounddeviceWakeCapture` verifies the audio already sitting in a **3-second in-memory ring buffer** (≈192 KB at 16 kHz float32). The rejected case therefore terminates before anything is visible or audible.

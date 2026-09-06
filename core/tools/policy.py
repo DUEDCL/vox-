@@ -57,6 +57,111 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "blocked_domains": [],
         "max_results": 5,
         "snippet_chars": 280,
+        # Backend selection (see core/tools/search_backends.py). Both off by
+        # default, which is what keeps "the default install talks to nobody" true.
+        # A self-hosted SearxNG on loopback wins whenever one is configured.
+        "searx_url": "",
+        "allow_internet": False,
+        "timeout_s": 8,
+        # ``web.open``：把地址交给默认浏览器，不抓结果回来。默认开着，因为它不出网、
+        # 不下载、不回传 —— 动作就只是「让浏览器打开一个页面」。
+        "open_enabled": True,
+        # ``{q}`` 是编码后的查询词。必应不需要 JS 就能出结果页。
+        "open_search_url": "https://www.bing.com/search?q={q}",
+    },
+    # ``app.open``：语音能启动哪些本机应用。
+    #
+    # **白名单，不是搜索**。能启动任意可执行文件等于代码执行，而这条路的输入是语音转写 ——
+    # 「打开记事本」和「打开记账本」在一个 14M 的识别器上是同一个音。所以这里是显式的
+    # 「说出来的名字 → 可执行文件绝对路径」映射，表里没有的一律拒绝。
+    #
+    # entries 默认是空的：路径是每台机器自己的事，写死在代码里的路径在别人机器上是错的。
+    # 控制台的「技能」那一栏会列出配了但文件不在的条目。
+    "apps": {
+        "enabled": True,
+        "entries": {},
+        # **装了什么就能开什么**（2026-09-03 加，默认开）。
+        #
+        # 使用者点名的要求：「我让他打开网易云就打开，而不是每次都需要添加名单才能打开。」
+        # 开着的时候 `app.open` 在 entries / sites 都没命中时去**枚举**开始菜单的快捷方式与
+        # 注册表的 App Paths（见 core/tools/app_index.py），按名字打分挑一个。
+        #
+        # 为什么这不等于「把话当命令执行」：候选集永远来自那两处枚举，参数只用来**在候选里
+        # 挑**。发现出来的是使用者自己装的应用，开它和他在开始菜单里点一下是同一件事。
+        # 歧义（两个同分）不猜，报候选让他说清楚 —— 开错一个应用会让人以为它听错了。
+        #
+        # 关掉它就回到「只认白名单」，和这个功能不存在时一模一样。
+        "discover": True,
+        # 「放点音乐」这类泛指开哪个。空 = 报错而不是在白名单里挑一个：装了三个播放器的
+        # 机器上「挑一个」是抽奖，而抽错的那次用户还得自己去关。
+        "default_music": "",
+        # 说出来的名字 → 一个**网页**。「给我打开抖音」在这台机器上要的是网页版
+        # （使用者原话：「我习惯使用网页版刷视频」），而抖音根本没装客户端。
+        #
+        # 和 entries 同一条规矩：白名单，不是搜索。放在 [apps] 而不是 [web] 下面，是因为
+        # 「打开 X」是**一句话一个意图** —— 让意图层去分「X 是应用还是网站」等于让它知道
+        # 这台机器装了什么，那正是它不该知道的。先查 entries 再查 sites，两张表都是显式的。
+        "sites": {},
+        # 应用名 → 「带着一个搜索词打开」的模板，``{q}`` 是那个词。
+        #
+        # 「我想听薛之谦的歌」要的不只是打开播放器。模板有两种形状：
+        #   * `http(s)://…`  → 交给默认浏览器（网页播放器，**这条已验证可用**）
+        #   * 其他（如 `orpheus://search/{q}`）→ 作为**一个 argv** 传给那个 exe
+        # 没配模板时带词的请求照旧打开应用，但会明说「没法直接搜」—— 一个假装搜了的
+        # 回答比一句「打开了，搜不了」糟得多。
+        "play": {},
+    },
+    "system": {
+        # `system.volume` —— 读或改**默认播放设备**的音量（「声音大一点」）。
+        #
+        # 默认开。它是朗读期间最自然的一句话，而那正是使用者手不在键盘上的时刻 —— 一个
+        # 语音助手回答「请在任务栏上点音量图标」是这个产品最没有说服力的一种回答。
+        #
+        # 不需要确认卡：可逆、无数据损失、后果当场可听见。和 `app.open` 同一档。
+        # 非 Windows 上这个工具**不注册**（`core/audio/winlevel.py` 是 Core Audio 的
+        # ctypes 绑定），所以关掉它只在 Windows 上有意义。
+        "enabled": True,
+    },
+    "timer": {
+        # `timer.remind` —— 「二十分钟后提醒我关火」。**这是唯一让 Vox 主动开口的工具**，
+        # 所以它也是唯一会往盘上写使用者说的话的工具（`.vox/reminders.json`，gitignored，
+        # 播报完就删）。记忆库已经是同一个立场，而这里的量小得多、也更短命。
+        #
+        # 关掉它就退回「只会应答」。到期播报在 `pump()` 那一侧走和普通回答同一条路径 ——
+        # 一个能自己开口的工具会绕过状态机（球不亮、静音窗不挂、打断不生效）。
+        "enabled": True,
+    },
+    "memory": {
+        # `memory.recall` —— 让 agent **主动**翻记忆（`⟦vox:tool memory.recall {"query": …}⟧`）。
+        #
+        # 默认开，而这不是一次新的出网授权：**记忆文本在这个工具之前就已经在出网了** ——
+        # `Dispatcher._recall_context()` 每一轮都把 `facts()` + `recent_turns()` 拼进发给
+        # 云端 LLM 的请求。所以这个开关控制的不是「记忆会不会出网」，是「谁决定查哪一条」。
+        #
+        # 关掉它就退回纯被动召回：按当前这句话去查，查到什么给什么。代价是「我上次说想买的
+        # 那个东西叫什么」这类问题必然答不了 —— 使用者这句话里没有那个东西的名字。
+        #
+        # 只读。**没有 `memory.write`**：给模型一支能往长期记忆里写字的笔，等于让一次转写
+        # 错误变成一条永久的「事实」。写入仍然只走 `write_turn` 与隐式提炼。
+        "enabled": True,
+    },
+    "weather": {
+        # `weather.now` —— 「今天天气怎么样」。**在它之前那句话的回答必然是编的**：LLM 手上
+        # 没有今天的数据，而一个把气温说错五度的助手比一个说「我查不到」的助手糟得多。
+        #
+        # 默认开，但它**是一次对外请求** —— 所以这个开关和 `web.allow_internet`、
+        # `web.open_enabled` 同一个形状：一个会出网的能力必须能被单独关掉。去的是
+        # Open-Meteo 的两个固定主机（`geocoding-api.` 与 `api.open-meteo.com`），
+        # 主机写死在代码里，没有任何输入能改变请求发到哪台机器。
+        #
+        # **不需要 key**，所以也没有「配了 key 但放错变量」这一整类失败（那一类在这个仓库里
+        # 出现过三次）。
+        "enabled": True,
+        # 「今天天气怎么样」（没说城市）用哪个城市。**出厂是空的，这是刻意的**：填一个
+        # 「北京」会让在成都的人听到北京的天气，而那句话听起来完全正常 —— 空的时候工具报
+        # 一句可执行的话（「说『上海天气』就行，或者在控制台把默认城市填上」）。
+        "default_city": "",
+        "timeout_s": 8,
     },
     "shell": {
         "enabled": False,
@@ -233,9 +338,20 @@ def refuse(tool: str, reason: str, **audit: Any) -> ToolResult:
 class DefaultToolPolicy:
     """The shipped ``ToolPolicy``. Decides only -- it never runs anything."""
 
-    def __init__(self, config: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        config: Mapping[str, Any] | None = None,
+        *,
+        mcp_config: Mapping[str, Any] | None = None,
+    ) -> None:
         self.config = dict(config) if config is not None else load_tools_config()
         self.roots = sandbox_roots(self.config)
+        #: MCP servers, injected rather than read here. It lives in its own file
+        #: (``config/mcp.toml``) because its shape is a list of subprocesses rather
+        #: than a set of switches, and passing it in keeps this class testable
+        #: without a second config file on disk. ``None`` means "no MCP", which is
+        #: the closed answer.
+        self.mcp_config = dict(mcp_config) if mcp_config is not None else None
         #: Refusal counters by reason, for ``describe()``. No arguments are kept.
         self.refusals: dict[str, int] = {}
 
@@ -246,6 +362,16 @@ class DefaultToolPolicy:
     def check(self, request: ToolRequest) -> ToolResult | None:
         """``None`` to allow; a refusing ``ToolResult`` to deny."""
         tool = request.tool
+        # MCP tools are named ``mcp.<server>.<tool>`` and are checked here, by the
+        # same gate, for the reason red line 2 gives: a remote tool must not reach
+        # a capability the user's own voice could not. They are not in
+        # ``TOOL_NAMES`` because the set is discovered at runtime from whichever
+        # servers are configured -- the switch that governs them is in the config,
+        # not in a frozenset.
+        if tool.startswith("mcp."):
+            if request.origin not in ORIGINS:
+                return self._refuse(tool, "unknown origin")
+            return self._check_mcp(request)
         if tool not in TOOL_NAMES:
             return self._refuse(tool, "unknown tool")
         if request.origin not in ORIGINS:
@@ -260,6 +386,53 @@ class DefaultToolPolicy:
             return self._check_web_search(request, settings)
         if tool == "shell.run":
             return self._check_shell_run(request, settings)
+        return None
+
+    def _check_mcp(self, request: ToolRequest) -> ToolResult | None:
+        """Decide one ``mcp.<server>.<tool>`` request.
+
+        Confirmation is the default rather than the exception, which is the
+        opposite of every built-in tool but the same as ``shell.run``. The reason is
+        the same too: an MCP tool's blast radius is whatever its author gave it, so
+        the starting assumption cannot be "read-only".
+
+        Refusals deliberately say ``unknown tool`` for a server that is absent,
+        disabled, or misspelled. Distinguishing them would let a caller enumerate
+        which servers this machine has configured.
+        """
+        tool = request.tool
+        config = self.mcp_config
+        if not config or not config.get("enabled", False):
+            return self._refuse(tool, "mcp tools are disabled")
+        parts = tool.split(".")
+        if len(parts) != 3 or not parts[1] or not parts[2]:
+            return self._refuse(tool, "unknown tool")
+        _, server_name, remote = parts
+        server = next(
+            (
+                entry
+                for entry in config.get("servers", ())
+                if getattr(entry, "name", None) == server_name and getattr(entry, "enabled", False)
+            ),
+            None,
+        )
+        if server is None:
+            return self._refuse(tool, "unknown tool")
+        allow = tuple(getattr(server, "allow", ()) or ())
+        if allow and remote not in allow:
+            return self._refuse(tool, "tool is not on the allow-list")
+        auto = tuple(getattr(server, "auto_allow", ()) or ())
+        if config.get("require_confirmation", True) and remote not in auto:
+            if request.arguments.get("confirmed") is not True:
+                # ``is True`` and not truthiness: ``"confirmed": "no"`` is a truthy
+                # string, and that exact bug was caught once already in shell.run.
+                return ToolResult(
+                    tool=tool,
+                    ok=False,
+                    error="confirmation required",
+                    needs_confirmation=True,
+                    audit={"decision": "confirm", "server": server_name, "remote": remote},
+                )
         return None
 
     def _check_fs_read(

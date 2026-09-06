@@ -179,3 +179,21 @@ def test_render_prompt_keeps_context_lines_distinguishable():
         Task(id="t3", text="q", context=("fact one", "fact two"))
     )
     assert "- fact one\n- fact two" in rendered
+
+
+def test_the_shipped_agents_config_passes_the_real_checker():
+    """The repo's own ``config/agents.toml``, through ``load_agents_config``.
+
+    Every other agent test builds its entry inline, so a key the JSON Schema allows
+    but ``KIND_KEYS`` does not would leave the whole suite green while the shipped
+    file refuses to load -- and the first place that shows up is startup. This was
+    not hypothetical: ``prompt_stdin`` passed the schema and failed the per-kind
+    check, with 77 tests still passing.
+    """
+    from core.agents.registry import load_agents_config
+
+    config = load_agents_config()
+
+    assert config["agents"], "the shipped config declares no agents"
+    names = [entry["name"] for entry in config["agents"]]
+    assert "claude" in names

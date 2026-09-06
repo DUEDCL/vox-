@@ -100,6 +100,7 @@ def build(
     tool_runner: Any = None,
     on_event: Any = None,
     aggregator: Any = None,
+    on_partial: Any = None,
 ) -> tuple[Dispatcher, FakeRouter]:
     router = FakeRouter(plan or DispatchPlan(mode="single", agents=("claude",)))
     dispatcher = Dispatcher(
@@ -108,6 +109,7 @@ def build(
         resolver=resolver,
         tool_runner=tool_runner,
         on_event=on_event,
+        on_partial=on_partial,
     )
     return dispatcher, router
 
@@ -261,7 +263,7 @@ def test_a_successful_turn_reports_ok_and_concatenates_the_text():
 
 
 def test_an_agent_failure_arrives_as_a_chunk_and_is_recorded_as_failed():
-    adapter = FakeAdapter(done(error="exit status 1"))
+    adapter = FakeAdapter(done(error="exit 1: backend detail"))
     dispatcher, router = build()
     result = dispatcher.dispatch(task(), {"claude": adapter})
     assert result.ok is False
@@ -403,6 +405,65 @@ def test_stream_runs_the_tool_path_when_the_intent_is_a_tool():
     assert out[-1].kind == "done"
 
 
+# -- on_partial：让合成提前开始（2026-09-05）------------------------------------
+
+
+def test_the_partial_sink_sees_the_answer_grow():
+    """参数是**到目前为止的全文**，不是这一次的增量。
+
+    调用方（`vox_plugin/runtime.py` 的 `_prewarm_speech`）要判的是「第一句话完整了没有」，
+    而那只能在全文上判 —— 逐块给增量的话每个调用方都要自己再攒一份。
+    """
+    seen: list[str] = []
+    adapter = FakeAdapter(
+        AgentChunk(kind="text", text="好，"),
+        AgentChunk(kind="text", text="开好了。"),
+        AgentChunk(kind="text", text="还要别的吗"),
+        done(),
+    )
+    dispatcher, _ = build(on_partial=seen.append)
+
+    result = dispatcher.dispatch(task(), {"claude": adapter})
+
+    assert seen == ["好，", "好，开好了。", "好，开好了。还要别的吗"]
+    assert seen[-1] == result.text, "最后一次必须和这一轮真要说的话逐字节相同"
+
+
+def test_a_partial_sink_that_raises_is_dropped_and_the_turn_is_unharmed():
+    """预热是**旁路**：它抛异常的正确后果是回到「等 LLM 写完再合成」，不是让回答消失。
+
+    摘掉它也是必须的 —— 每个 chunk 都重试一个已经坏了的回调，只是把一次失败变成几十次。
+    """
+    calls: list[str] = []
+
+    def angry(text: str) -> None:
+        calls.append(text)
+        raise RuntimeError("预热坏了")
+
+    adapter = FakeAdapter(
+        AgentChunk(kind="text", text="一"),
+        AgentChunk(kind="text", text="二"),
+        AgentChunk(kind="text", text="三"),
+        done(),
+    )
+    dispatcher, _ = build(on_partial=angry)
+
+    result = dispatcher.dispatch(task(), {"claude": adapter})
+
+    assert result.ok and result.text == "一二三"
+    assert calls == ["一"], "第一次就摘掉，不会喂第二块"
+    assert dispatcher.sink_failures == 1
+
+
+def test_no_partial_sink_changes_nothing():
+    adapter = FakeAdapter(AgentChunk(kind="text", text="正文"), done())
+    dispatcher, _ = build()
+
+    result = dispatcher.dispatch(task(), {"claude": adapter})
+
+    assert result.ok and result.text == "正文"
+
+
 # -- events -------------------------------------------------------------------
 
 
@@ -472,8 +533,26 @@ def test_a_failed_turn_emits_task_failed_with_a_reason_but_no_text():
     dispatcher, _ = build(on_event=events.append)
     dispatcher.dispatch(task("我的秘密问题"), {"claude": adapter})
     failed = next(e for e in events if e["type"] == "task.failed")
-    assert failed["payload"]["error"] == "exit status 1"
+    assert failed["payload"]["error"] == "agent reported failure"
     assert failed["payload"]["task_id"] == "t-1"
+
+
+def test_task_failed_does_not_publish_agent_error_or_reply_text():
+    events: list[dict[str, Any]] = []
+    prompt = "用户提示中的秘密"
+    reply = "模型回复中的秘密"
+    stderr = f"backend echoed {prompt}; generated {reply}"
+    adapter = FakeAdapter(done(error=stderr))
+    dispatcher, _ = build(on_event=events.append)
+
+    dispatcher.dispatch(task(prompt), {"claude": adapter})
+
+    blob = repr(events)
+    failed = next(e for e in events if e["type"] == "task.failed")
+    assert failed["payload"]["error"] == "agent reported failure"
+    assert prompt not in blob
+    assert reply not in blob
+    assert stderr not in blob
 
 
 def test_an_abandoned_stream_names_its_own_failure_mode():
@@ -520,6 +599,22 @@ def test_dispatched_carries_the_mode_and_the_router_reason():
     assert payload["agents"] == ["a"]
 
 
+def test_a_failing_event_sink_does_not_change_dispatch_result():
+    """A transport failure cannot turn a successful agent turn into an error."""
+    def broken_sink(_event):
+        raise RuntimeError("reply secret and C:/private/turn.log")
+
+    dispatcher, _ = build(on_event=broken_sink)
+
+    result = dispatcher.dispatch(task(), {"claude": FakeAdapter(done())})
+
+    assert result.ok is True
+    assert result.route == "agent"
+    assert dispatcher.sink_failures > 0
+    assert "C:/private/turn.log" not in repr(dispatcher.__dict__)
+
+
+
 # -- the result object --------------------------------------------------------
 
 
@@ -539,3 +634,268 @@ def test_a_default_result_is_a_failure():
     """``ok`` defaults to ``False``: a turn is not successful until it says so."""
     assert DispatchResult(route="none").ok is False
     assert DispatchResult(route="none").text == ""
+
+
+# -- 能力闸门（2026-09-01：让「所有聊天都进了 Claude Code」这个问题可回答）----------
+
+
+def _fleet():
+    """出厂那两个后端的形状：一个便宜快但只会聊，一个贵慢但真能动机器。"""
+    from core.agents.contract import AgentDescriptor
+
+    return (
+        AgentDescriptor(
+            name="relay",
+            kind="http",
+            capabilities=frozenset({"chat", "reason"}),
+            cost=2,
+            latency_ms=1500,
+        ),
+        AgentDescriptor(
+            name="claude",
+            kind="cli",
+            capabilities=frozenset({"chat", "code", "reason", "local-exec"}),
+            cost=4,
+            latency_ms=2500,
+        ),
+    )
+
+
+def _real_dispatcher():
+    from core.dispatch.intent import RuleBasedIntentResolver
+    from core.dispatch.router import DefaultRouter
+
+    router = DefaultRouter(_fleet())
+    dispatcher = Dispatcher(
+        router=router,
+        aggregator=PassthroughAggregator(),
+        resolver=RuleBasedIntentResolver(),
+    )
+    adapters = {"relay": FakeAdapter(AgentChunk(kind="text", text="嗯"), done()),
+               "claude": FakeAdapter(AgentChunk(kind="text", text="嗯"), done())}
+    return dispatcher, adapters
+
+
+def test_ordinary_chat_goes_to_the_cheap_endpoint_not_the_cli():
+    """闲聊必须走最便宜最快的后端。
+
+    这一半是使用者要的「普通对话用 Vox 自己配的模型」，另一半在下面那条。语音里
+    1.5 秒和 2.5 秒 + 一个进程启动是能听出来的差别。
+    """
+    dispatcher, adapters = _real_dispatcher()
+    result = dispatcher.dispatch(Task(id="t-1", text="今天天气怎么样"), adapters)
+    assert result.agents == ("relay",)
+    assert adapters["claude"].streamed == []
+
+
+def test_a_code_request_goes_to_the_backend_that_can_actually_do_it():
+    """「帮我改一下这个函数」必须落到能动机器的后端上。
+
+    **这是能力闸门第一次在派发路径上真的生效。** 在它之前 relay 以 0.866 对 0.602 赢下
+    每一轮 —— 包括这一句，而 relay 连文件都读不了：它会写出一段没人执行的步骤，而回合
+    报成功。cost/latency 占 70% 权重，所以靠调分数是修不好的，闸门才是。
+    """
+    dispatcher, adapters = _real_dispatcher()
+    result = dispatcher.dispatch(Task(id="t-2", text="帮我改一下这个函数的返回值"), adapters)
+    assert result.agents == ("claude",)
+    assert adapters["relay"].streamed == []
+
+
+def test_an_explicit_capability_from_the_caller_is_not_overwritten():
+    """调用方给的赢 —— 主脑（ADR 008）将来就是那个调用方。
+
+    一个会覆盖调用方判断的推断层会让那条路无法测试：主脑说「这句要动机器」而推断层
+    说「不用」，谁赢就成了实现细节。
+    """
+    dispatcher, adapters = _real_dispatcher()
+    task = Task(id="t-3", text="你好", capabilities=frozenset({"code"}))
+    result = dispatcher.dispatch(task, adapters)
+    assert result.agents == ("claude",), "显式带 code 的闲聊也必须去能动机器的那个"
+
+
+def test_the_route_log_says_which_model_answered():
+    """运行日志必须回答「哪个模型答的」。
+
+    使用者报「所有聊天都进了 Claude Code」时，没有任何一处读数能证实或否证它 ——
+    日志里只有 agent 名字，没有 model、没有端点。事件不能带这些（它扇出到每个通道），
+    所以这一行只走 on_detail。
+    """
+    lines: list[tuple[str, str, dict]] = []
+
+    def sink(source, message, **fields):
+        lines.append((source, message, fields))
+
+    from core.dispatch.intent import RuleBasedIntentResolver
+    from core.dispatch.router import DefaultRouter
+
+    class Checked(FakeAdapter):
+        def check(self):
+            return {"name": "relay", "kind": "http", "available": True,
+                    "model": "claude-opus-5", "endpoint": "https://api.example.com",
+                    "token_configured": True, "key_env": "VOX_LLM_KEY"}
+
+    dispatcher = Dispatcher(
+        router=DefaultRouter(_fleet()),
+        aggregator=PassthroughAggregator(),
+        resolver=RuleBasedIntentResolver(),
+        on_detail=sink,
+    )
+    dispatcher.dispatch(
+        Task(id="t-4", text="讲个笑话"),
+        {"relay": Checked(AgentChunk(kind="text", text="嗯"), done())},
+    )
+    agent_lines = [entry for entry in lines if entry[0] == "agent"]
+    assert agent_lines, "一轮 agent 派发必须留一条 agent 日志"
+    _source, message, fields = agent_lines[-1]
+    assert "model=claude-opus-5" in message
+    assert fields["backends"] == [
+        "relay(http model=claude-opus-5 endpoint=https://api.example.com)"
+    ]
+    assert fields["capabilities"] == []
+    # 凭据一个字都不许进日志：适配器只报变量名，这里连变量名也不转发。
+    assert "VOX_LLM_KEY" not in message
+
+
+def test_a_backend_whose_check_explodes_still_gets_dispatched():
+    """``check()`` 是诊断，不是前提。它抛异常时这一轮照常跑，日志退回只报名字。"""
+    class Exploding(FakeAdapter):
+        def check(self):
+            raise RuntimeError("boom")
+
+    lines: list[tuple[str, str, dict]] = []
+    from core.dispatch.intent import RuleBasedIntentResolver
+    from core.dispatch.router import DefaultRouter
+
+    dispatcher = Dispatcher(
+        router=DefaultRouter(_fleet()),
+        aggregator=PassthroughAggregator(),
+        resolver=RuleBasedIntentResolver(),
+        on_detail=lambda source, message, **fields: lines.append((source, message, fields)),
+    )
+    result = dispatcher.dispatch(
+        Task(id="t-5", text="讲个笑话"),
+        {"relay": Exploding(AgentChunk(kind="text", text="嗯"), done())},
+    )
+    assert result.ok is True
+    assert [entry[2]["backends"] for entry in lines if entry[0] == "agent"] == [["relay"]]
+
+
+# ------------------- 能力闸门降级：闸门对了，但那个后端这台机器上没装（2026-09-01）
+
+
+class GatingRouter:
+    """按 ``task.capabilities`` 给不同计划的路由 —— 生产里 ``DefaultRouter`` 的形状。
+
+    要求 ``code`` 时返回空计划（唯一有这个能力的后端不可用），不要求时返回 relay。
+    """
+
+    def __init__(self) -> None:
+        self.plans: list[frozenset[str]] = []
+        self.recorded: list[tuple[str, bool, int]] = []
+        self.released: list[str] = []
+
+    def score(self, task: Task):  # pragma: no cover
+        return ()
+
+    def plan(self, task: Task) -> DispatchPlan:
+        self.plans.append(frozenset(task.capabilities))
+        if task.capabilities:
+            return DispatchPlan(
+                mode="single",
+                agents=(),
+                reason="no available agent has code; claude has it but is 'claude' is not on PATH",
+            )
+        return DispatchPlan(mode="single", agents=("relay",), reason="relay scored 0.866")
+
+    def record(self, agent: str, *, ok: bool, elapsed_ms: int) -> None:
+        self.recorded.append((agent, ok, elapsed_ms))
+
+    def release(self, agent: str) -> None:
+        self.released.append(agent)
+
+
+class CodeResolver:
+    """把每一句都判成需要 ``code``，好把降级那条路逼出来。"""
+
+    @staticmethod
+    def resolve(text: str) -> Intent:
+        return Intent(kind="agent")
+
+    @staticmethod
+    def capabilities(text: str) -> frozenset[str]:
+        return frozenset({"code"})
+
+
+def test_a_capability_no_available_agent_has_degrades_instead_of_failing():
+    """**此前这里整轮失败**，使用者听到的是「agent 报告失败」—— 一句既不回答问题也不说
+    明原因的话。退一步用能力不设限的计划：那个后端答不了「帮我改这个函数」，但它的
+    system prompt 要求它说「这个我做不到」，而那是一个诚实且有用的回答。
+    """
+    router = GatingRouter()
+    dispatcher = Dispatcher(
+        router=router,
+        aggregator=PassthroughAggregator(),
+        resolver=CodeResolver(),
+    )
+    adapters = {"relay": FakeAdapter(AgentChunk(kind="text", text="这个我做不到"), AgentChunk(kind="done"))}
+
+    result = dispatcher.dispatch(task("帮我改一下这个函数"), adapters)
+
+    assert result.route == "agent"
+    assert result.ok is True
+    assert result.agents == ("relay",)
+    assert result.text == "这个我做不到"
+    # 先带能力问一次、被挡了才放开 —— 顺序反了就等于闸门从来没生效过。
+    assert router.plans == [frozenset({"code"}), frozenset()]
+    # 降级必须留在 reason 里：一个看不出「它本该给 claude」的记录查不动 PATH 问题。
+    assert "降级" in result.reason
+    assert "not on PATH" in result.reason
+
+
+def test_a_turn_with_no_agents_at_all_still_fails_cleanly():
+    """降级不是「无论如何都要找个后端」：一个都没有时仍然是失败，而且带原因。"""
+
+    class EmptyRouter(GatingRouter):
+        def plan(self, task: Task) -> DispatchPlan:
+            self.plans.append(frozenset(task.capabilities))
+            return DispatchPlan(mode="single", agents=(), reason="no agents configured")
+
+    router = EmptyRouter()
+    dispatcher = Dispatcher(
+        router=router,
+        aggregator=PassthroughAggregator(),
+        resolver=CodeResolver(),
+    )
+
+    result = dispatcher.dispatch(task("帮我改一下这个函数"), {})
+
+    assert result.route == "none"
+    assert result.ok is False
+    assert result.reason == "no agents configured"
+
+
+def test_a_plain_chat_turn_is_not_affected_by_the_fallback():
+    """普通对话本来就不带能力要求，所以它只问一次路由。"""
+    router = GatingRouter()
+
+    class ChatResolver:
+        @staticmethod
+        def resolve(text: str) -> Intent:
+            return Intent(kind="agent")
+
+        @staticmethod
+        def capabilities(text: str) -> frozenset[str]:
+            return frozenset()
+
+    dispatcher = Dispatcher(
+        router=router,
+        aggregator=PassthroughAggregator(),
+        resolver=ChatResolver(),
+    )
+    adapters = {"relay": FakeAdapter(AgentChunk(kind="text", text="嗨"), AgentChunk(kind="done"))}
+
+    result = dispatcher.dispatch(task("你好"), adapters)
+
+    assert result.ok is True
+    assert router.plans == [frozenset()]
+    assert "降级" not in result.reason

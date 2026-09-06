@@ -1,0 +1,454 @@
+"""``config/models.toml``: the model profiles, with a loader strict enough to trust.
+
+A profile is one ASR + TTS + LLM triple; ``active`` names the one in effect. The
+console's 模型配置 module is the only writer today, and a future LLM adapter will be
+the reader -- which is why this lives next to ``config_edit`` rather than inside
+``core/console/``.
+
+Three things this file refuses, each for a reason the project has already paid for:
+
+- **Unknown keys raise.** Same stance as ``load_voice_config`` and
+  ``load_tools_config``: a misspelled ``key_env`` that is silently ignored leaves an
+  operator believing a setting applied when it did not.
+- **A value that looks like a credential is refused whole.** The header of
+  ``config/models.toml`` promises this. Only the *name* of an environment variable
+  belongs here; the value is read from the environment at call time. A key written
+  into this file would reach the version history, the logs and the event stream.
+- **Plain ``http://`` only for loopback, and never credentials in a URL.** The same
+  rule ``core/session_bridge.py``, ``core/agents/http.py`` and
+  ``core/tools/search_backends.py`` each enforce for their own endpoints. This is a
+  **fourth copy**, for the reason the third one already wrote down: each of the
+  others is a security boundary with its own exception type and pinned messages, so
+  extracting a shared helper means editing three tested security modules to serve a
+  new caller. The extraction is worth doing on its own; ``docs/backlog.md`` carries
+  it, now with four call sites instead of three.
+
+Nothing in this module reaches the network. Probing an endpoint is the console's
+job (``ConsoleApi.models_probe``) and is a deliberate, per-click action.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import os
+import re
+import tomllib
+from pathlib import Path
+from typing import Any, Mapping
+from urllib.parse import urlparse
+
+from core.audio.config import repo_root
+from core.config_edit import ConfigEditError, set_scalars, set_section
+
+DEFAULT_CONFIG_NAME = "models.toml"
+
+#: The three model roles a profile configures. Fixed: they are the three the voice
+#: stack assembles, not an open set.
+KINDS: tuple[str, ...] = ("asr", "tts", "llm")
+
+#: Every key a ``[profiles.NAME.KIND]`` table may carry. This doubles as the
+#: console's write allow-list -- there is no second list to keep in sync.
+#:
+#: ``voice`` is here because a TTS section that cannot name its voice does not
+#: describe a TTS setup: 每个云端合成模型只支持一组特定的音色（见 `config/voice.toml`
+#: 的实测表），所以「模型」和「音色」是同一个决定的两半。少了它的后果不是「少一个可选
+#: 项」—— 音色只能写在 `config/voice.toml` 里，于是同一件事有了两个配置来源，而其中一个
+#: 没有读侧。2026-09-01 的 TTS 401 就是那个分裂的账（两边的 `key_env` 指向不同的变量）。
+FIELDS: tuple[str, ...] = ("provider", "model", "voice", "base", "proto", "key_env")
+
+#: Request shapes an adapter can speak. ``custom`` means "a human will wire it".
+#:
+#: **``dashscope`` 是 2026-09-03 加的，而它不是修饰。** 在那之前这张表里只有兼容协议，
+#: 于是百炼的原生接口只能被写成 `proto = "openai"` —— 而使用者的云端 ASR 400 正是这件事
+#: 的后果：`qwen-audio-3.0-asr-flash` 要 `parameters.format`，OpenAI 协议里没有地方放它，
+#: 兼容端点恒回 `UNSUPPORTED_FORMAT: format is empty`。一个说不出「这是另一种协议」的
+#: 配置面，会逼人把它写成一个谎，而这个谎在运行时表现为一条摸不着的 400。
+PROTOS: tuple[str, ...] = ("openai", "anthropic", "ollama", "dashscope", "custom")
+
+#: A profile name becomes a TOML table name, so it is restricted to bare-key
+#: characters. No dots: a dot would nest the table somewhere else entirely.
+PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$")
+
+#: An environment variable name, which is all ``key_env`` may ever hold.
+_ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+
+#: Prefixes that are unambiguously the front of a real credential. Matching one is
+#: reported as a refusal, not stripped: a redacted secret still leaves the secret
+#: in the file's history, and the operator needs to know it was rejected.
+_SECRET_PREFIXES: tuple[str, ...] = (
+    "sk-", "sk_", "rk-", "pk-", "ghp_", "gho_", "ghs_", "github_pat_",
+    "xoxb-", "xoxp-", "xapp-", "AKIA", "ASIA", "AIza", "ya29.", "hf_", "glpat-",
+)
+
+#: A blob with no separators that mixes cases and digits: the shape of a token, not
+#: of a model name (``qwen2.5:7b``), a slug (``deepseek``) or a URL (it has ``/``).
+_BLOB = re.compile(r"^[A-Za-z0-9+/=_-]{24,}$")
+
+
+class ModelsConfigError(RuntimeError):
+    """A models config that cannot be trusted to mean what it says."""
+
+
+def models_config_path(path: str | Path | None = None) -> Path:
+    """Explicit argument, then ``VOX_MODELS_CONFIG``, then ``config/models.toml``."""
+    if path is not None:
+        return Path(path)
+    return Path(os.getenv("VOX_MODELS_CONFIG") or repo_root() / "config" / DEFAULT_CONFIG_NAME)
+
+
+def looks_like_secret(value: str) -> bool:
+    """Whether a string is shaped like a credential rather than a setting.
+
+    Narrow on purpose. ``model = "claude-opus-4-20250514"`` has no upper case,
+    ``base = "https://api.deepseek.com/v1"`` has separators, and a slug is short --
+    so none of them trip the blob rule, while a 40-character mixed-case token does.
+    """
+    text = value.strip()
+    if not text:
+        return False
+    if text.startswith(_SECRET_PREFIXES):
+        return True
+    if "bearer " in text.lower():
+        return True
+    if not _BLOB.match(text):
+        return False
+    return (
+        any(c.islower() for c in text)
+        and any(c.isupper() for c in text)
+        and any(c.isdigit() for c in text)
+    )
+
+
+def url_problem(url: str) -> str | None:
+    """``None`` when ``url`` is an endpoint we are willing to touch.
+
+    Same three checks the bridge and the HTTP agent make: absolute HTTP(S), no
+    credentials in the URL, and plain HTTP only when the host is loopback.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return "端点必须是完整的 http(s) URL"
+    if parsed.username or parsed.password:
+        return "端点里不许带凭据（user:pass@）"
+    if parsed.scheme == "https":
+        return None
+    host = parsed.hostname.lower()
+    if host == "localhost":
+        return None
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return None
+    except ValueError:
+        pass
+    return "明文 HTTP 只许回环地址"
+
+
+def check_field(where: str, name: str, value: Any) -> str:
+    """One field, validated. Returns the trimmed value; raises ``ModelsConfigError``.
+
+    ``where`` is only used to build the message, so the caller decides how precise
+    it is: ``profiles.local.llm`` when a file is being read, the same when one is
+    being written.
+    """
+    label = f"{where}.{name}"
+    if name not in FIELDS:
+        raise ModelsConfigError(f"unknown model key: {label}")
+    if not isinstance(value, str):
+        raise ModelsConfigError(f"{label} must be a string")
+    text = value.strip()
+    if looks_like_secret(text):
+        raise ModelsConfigError(
+            f"{label} 看起来是一个密钥。这个文件里只写环境变量名（key_env），"
+            "值从环境变量读 —— 写进来的 key 会进版本库、日志和事件流"
+        )
+    if name == "proto" and text and text not in PROTOS:
+        raise ModelsConfigError(f"{label} must be one of: {', '.join(PROTOS)}")
+    if name == "key_env" and text and not _ENV_NAME.match(text):
+        raise ModelsConfigError(
+            f"{label} 要一个环境变量名（大写字母、数字、下划线），不是密钥本身"
+        )
+    if name == "base" and text:
+        problem = url_problem(text)
+        if problem:
+            raise ModelsConfigError(f"{label}: {problem}")
+    return text
+
+
+def load_models_config(path: str | Path | None = None) -> dict[str, Any]:
+    """Read and validate the profiles. A missing file yields an empty registry.
+
+    Returns ``{"active": str, "profiles": {name: {"label": str, kind: {...}}}}``.
+    An ``active`` that names no profile raises: a registry that points at a
+    profile which is not there is exactly the kind of config that looks fine and
+    is not.
+    """
+    config_path = models_config_path(path)
+    if not config_path.is_file():
+        return {"active": "", "profiles": {}}
+    try:
+        raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ModelsConfigError(f"models config is unreadable: {exc}") from exc
+
+    unknown = sorted(set(raw) - {"active", "profiles"})
+    if unknown:
+        raise ModelsConfigError(f"unknown top-level key: {', '.join(unknown)}")
+
+    active = raw.get("active", "")
+    if not isinstance(active, str):
+        raise ModelsConfigError("active must be a string")
+
+    table = raw.get("profiles", {})
+    if not isinstance(table, dict):
+        raise ModelsConfigError("[profiles] must be a table")
+
+    profiles: dict[str, Any] = {}
+    for name, body in table.items():
+        if not PROFILE_NAME.match(name):
+            raise ModelsConfigError(f"not a usable profile name: {name!r}")
+        if not isinstance(body, dict):
+            raise ModelsConfigError(f"[profiles.{name}] must be a table")
+        extra = sorted(set(body) - {"label", *KINDS})
+        if extra:
+            raise ModelsConfigError(f"unknown key in [profiles.{name}]: {', '.join(extra)}")
+        label = body.get("label", "")
+        if not isinstance(label, str):
+            raise ModelsConfigError(f"profiles.{name}.label must be a string")
+        entry: dict[str, Any] = {"label": label}
+        for kind in KINDS:
+            section = body.get(kind)
+            if section is None:
+                continue
+            if not isinstance(section, dict):
+                raise ModelsConfigError(f"[profiles.{name}.{kind}] must be a table")
+            entry[kind] = {
+                key: check_field(f"profiles.{name}.{kind}", key, value)
+                for key, value in section.items()
+            }
+        profiles[name] = entry
+
+    if active and active not in profiles:
+        raise ModelsConfigError(f"active = {active!r} names no profile in this file")
+    return {"active": active, "profiles": profiles}
+
+
+def active_profile(config: Mapping[str, Any]) -> dict[str, Any]:
+    """当前生效的那一套方案，没有就是空 dict。
+
+    存在的理由是 2026-09-02 的一个真实缺口：这个文件此前**只有控制台在读**
+    （`core/console/routes.py`），运行时一个字都不读。于是使用者在「模型配置」那一栏
+    改完模型、存好 key 变量名、页面显示「已保存」，而对话照旧走 `config/agents.toml`
+    里那条 `relay` —— 一个能编辑、能保存、什么都不影响的配置面。
+    """
+    profiles = config.get("profiles")
+    if not isinstance(profiles, Mapping):
+        return {}
+    active = str(config.get("active", "") or "")
+    entry = profiles.get(active)
+    return dict(entry) if isinstance(entry, Mapping) else {}
+
+
+def active_llm(config: Mapping[str, Any]) -> dict[str, str]:
+    """当前生效方案的 ``[llm]``。字段名与 ``FIELDS`` 一致，值都是已校验的字符串。"""
+    section = active_profile(config).get("llm")
+    if not isinstance(section, Mapping):
+        return {}
+    return {str(key): str(value) for key, value in section.items()}
+
+
+def write_profile_kind(
+    profile: str,
+    kind: str,
+    fields: Mapping[str, Any],
+    *,
+    path: str | Path | None = None,
+    label: str = "",
+    preset: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Write one profile's one role, creating the table when it is new.
+
+    Empty strings are dropped rather than written: an empty ``base`` means "the
+    preset's endpoint", and writing ``base = ""`` into the file would turn that
+    into "no endpoint at all".
+
+    ``preset`` is what the caller's provider table already says for this provider
+    (``base`` / ``proto`` / ``key_env``). A field whose value merely repeats the
+    preset **and is not already in the file** is not written: the file would then
+    carry a second copy of an endpoint that lives in the provider table, and a
+    later correction to that table would not reach it. A field that *is* already in
+    the file keeps being written, so switching a profile back to a preset updates
+    the line instead of leaving a stale override behind. Pass ``None`` (as the
+    caller does for ``custom``) to persist everything.
+
+    Validation runs twice on purpose -- once on the fields here, once by the loader
+    against the whole candidate file -- because the second one is what catches an
+    edit that is fine alone and wrong in context.
+    """
+    config_path = models_config_path(path)
+    if not config_path.is_file():
+        raise ModelsConfigError(f"config file not found: {config_path}")
+    if not PROFILE_NAME.match(profile):
+        raise ModelsConfigError(
+            "方案名只许字母、数字、下划线和连字符（它会成为 TOML 的表名）"
+        )
+    if kind not in KINDS:
+        raise ModelsConfigError(f"kind must be one of: {', '.join(KINDS)}")
+    if not isinstance(label, str):
+        raise ModelsConfigError("label must be a string")
+    if looks_like_secret(label):
+        raise ModelsConfigError("label 看起来是一个密钥；标签是给人看的名字")
+
+    # Pre-flight. A file that is already invalid must say so about itself, not
+    # about the candidate -- otherwise changing ``provider`` reports an error about
+    # ``active`` and reads like the edit caused it.
+    existing = load_models_config(config_path)
+    known = existing["profiles"].get(profile)
+    already = set((known or {}).get(kind, {}))
+
+    where = f"profiles.{profile}.{kind}"
+    defaults = dict(preset or {})
+    values: dict[str, Any] = {}
+    considered = 0
+    for name, value in fields.items():
+        checked = check_field(where, name, value)
+        if not checked:
+            continue
+        considered += 1
+        if name in defaults and defaults[name] == checked and name not in already:
+            continue
+        values[name] = checked
+    if not considered:
+        raise ModelsConfigError("没有要写的字段（空值不写入，那会把「用预设端点」变成「没有端点」）")
+
+    changed: dict[str, Any] = {}
+    if label and (known is None or known.get("label", "") != label):
+        changed.update(
+            set_section(config_path, f"profiles.{profile}", {"label": label}, validate=_validate)
+        )
+    if values:
+        changed.update(set_section(config_path, where, values, validate=_validate))
+    return changed
+
+
+def write_active(name: str, *, path: str | Path | None = None) -> dict[str, Any]:
+    """把 ``active`` 指到某一套方案上。
+
+    **这是「切换」在文件层的唯一动作**，而在 2026-09-03 之前它只能靠手改文件：控制台的
+    「模型配置」那一栏能新建方案、能改每个角色，却唯独不能**启用**一套 —— 页面上写的是
+    「保存后不会自动切换生效」。一个能配置十套方案但不能切换的界面，等于只能配置一套。
+
+    名字必须是已经存在的方案：指向一个不存在的方案会让 ``load_models_config`` 在下一次
+    读取时直接报错，而那时报错的地方离改动已经很远了。
+    """
+    config_path = models_config_path(path)
+    if not config_path.is_file():
+        raise ModelsConfigError(f"config file not found: {config_path}")
+    existing = load_models_config(config_path)
+    if name not in existing["profiles"]:
+        known = ", ".join(sorted(existing["profiles"])) or "（一套都没有）"
+        raise ModelsConfigError(f"没有叫 {name!r} 的方案。现有的：{known}")
+    if name == existing["active"]:
+        return {}
+    return set_scalars(config_path, {"active": name}, validate=_validate)
+
+
+#: 一个 profile 的角色 -> `config/voice.toml` 里对应的键。**只有 ASR 与 TTS 有对应**：
+#: LLM 那一栏由 `core/agents/` 读 models.toml 自己（见 ADR 008），不经过 voice.toml。
+#:
+#: `key_env` **刻意不在这张表里**，理由和 `scripts/audit_config_surface.py` 的 WONT 一样：
+#: 它是「去读哪个环境变量」，让网页改它等于让它决定把哪个凭据发给百炼。所以 key_env 的
+#: 分岔只被**报告**，不被同步 —— 报告是必需的（分岔时运行时读的是 voice.toml 那个），
+#: 同步是危险的。
+_VOICE_KEYS: Mapping[str, Mapping[str, str]] = {
+    "asr": {"model": "asr.model"},
+    "tts": {"model": "tts.model", "voice": "tts.voice"},
+}
+
+#: 一个角色的 `proto` / `provider` -> `voice.toml` 的 `provider` 值。
+#:
+#: 只认得出这两种，因为 `voice.toml` 的运行时只有这两条路（`vox_plugin/voice_stack.py` 的
+#: `_open_asr` / `_open_tts`）。认不出来的组合**报出来而不是猜一个** —— 猜 "dashscope"
+#: 会让一个配了 OpenAI 兼容识别端点的人以为它生效了，而实际上请求形状根本不对。
+_VOICE_PROVIDER: Mapping[str, str] = {
+    "dashscope": "dashscope",
+    "sherpa-local": "sherpa",
+    "sherpa": "sherpa",
+    "local": "sherpa",
+}
+
+
+def voice_overrides(
+    profile: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, str], list[str]]:
+    """一套方案的 ASR/TTS 换算成 ``config/voice.toml`` 的键。
+
+    存在的理由是一次**双份真相**。`config/models.toml` 是控制台上的编辑面，而运行时读的是
+    `config/voice.toml` —— 两个文件各说一句「云端识别用哪个模型」，只有后者算。TTS 那一栏
+    的注释从 2026-08-29 就写着「两处必须一致」，而「必须一致」这件事此前没有任何一层去保证，
+    靠的是人记得改两个地方。ASR 2026-09-03 上云之后同样的坑多了一个。
+
+    返回三样：
+
+    * ``updates`` —— 可以直接写进 voice.toml 的键；
+    * ``held`` —— **刻意不写**的键（只有 ``key_env``）与这套方案里的值。调用方拿它和
+      voice.toml 比，**只在真的不一样时**才报 —— 无条件报的话这条警告永远挂着，
+      而一个永远亮的警告等于没有警告；
+    * ``notes`` —— 换算不出来的（provider 不是 voice.toml 认识的两种）。
+
+    ``key_env`` 进 ``held`` 而不是 ``updates``，理由和 `scripts/audit_config_surface.py` 的
+    WONT 一样：它是「去读哪个环境变量」，让网页改它等于让它决定把哪个凭据发给百炼。
+    """
+    updates: dict[str, Any] = {}
+    held: dict[str, str] = {}
+    notes: list[str] = []
+    for kind, mapping in _VOICE_KEYS.items():
+        section = profile.get(kind)
+        if not isinstance(section, Mapping):
+            continue
+        slug = str(section.get("provider", "") or "").strip().lower()
+        proto = str(section.get("proto", "") or "").strip().lower()
+        # proto 优先：`provider = "custom"` 时 slug 什么都不说明，形状写在 proto 上。
+        resolved = _VOICE_PROVIDER.get(proto) or _VOICE_PROVIDER.get(slug)
+        if resolved is None:
+            notes.append(
+                f"{kind}：provider={slug or '(空)'} proto={proto or '(空)'} 不是 voice.toml "
+                f"认识的两种（dashscope / sherpa），所以 {kind}.provider 没有跟着改 —— "
+                "运行时用的仍然是 voice.toml 里那一行"
+            )
+        else:
+            updates[f"{kind}.provider"] = resolved
+        for field, key in mapping.items():
+            value = str(section.get(field, "") or "").strip()
+            if value:
+                updates[key] = value
+        env = str(section.get("key_env", "") or "").strip()
+        if env:
+            held[f"{kind}.key_env"] = env
+    return updates, held, notes
+
+
+def _validate(candidate: Path) -> None:
+    """The loader, as ``config_edit`` wants it: raises on a bad candidate file."""
+    try:
+        load_models_config(candidate)
+    except ModelsConfigError as exc:
+        raise ConfigEditError(str(exc)) from exc
+
+
+__all__ = [
+    "FIELDS",
+    "KINDS",
+    "PROFILE_NAME",
+    "PROTOS",
+    "ModelsConfigError",
+    "active_llm",
+    "active_profile",
+    "check_field",
+    "load_models_config",
+    "looks_like_secret",
+    "models_config_path",
+    "url_problem",
+    "voice_overrides",
+    "write_active",
+    "write_profile_kind",
+]

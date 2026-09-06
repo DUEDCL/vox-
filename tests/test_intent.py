@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import pytest
 
-from core.dispatch.intent import MIN_ARGUMENT_LEN, RuleBasedIntentResolver
+from core.dispatch.intent import MIN_ARGUMENT_LEN, RuleBasedIntentResolver, is_progress_query
 
 
 @pytest.fixture
@@ -232,3 +232,420 @@ def test_resolution_is_deterministic(resolver):
     first = resolver.resolve("搜一下 武汉天气")
     second = resolver.resolve("搜一下 武汉天气")
     assert first == second
+
+
+# -- 简单的事平台自己做：时间、应用、网页 ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["现在几点了", "几点了", "现在时间", "现在是几点", "今天星期几", "今天几号",
+     "报时", "what time is it"],
+)
+def test_asking_the_time_never_reaches_an_agent(resolver, text):
+    """答案在本机时钟里。派出去要几秒和一次出网，而快路径实测 15 ms。"""
+    intent = resolver.resolve(text)
+
+    assert intent.tool == "time.now"
+    # 时区是本机的属性，不是这句话的属性 —— 所以没有参数可提。
+    assert intent.arguments == {}
+
+
+@pytest.mark.parametrize("text", ["放点音乐", "来首歌", "听音乐", "放歌", "play some music"])
+def test_a_generic_music_request_opens_the_default_player(resolver, text):
+    """泛指的「放点音乐」没有曲目，所以是「打开那个播放器」而不是「搜这首歌」。
+    开哪个由 ``apps.default_music`` 定，不在这一层。"""
+    intent = resolver.resolve(text)
+
+    assert intent.tool == "app.open"
+    assert intent.arguments == {}
+
+
+@pytest.mark.parametrize(
+    "text, name",
+    [("打开网易云", "网易云"), ("打开网易云音乐", "网易云音乐"), ("启动酷狗", "酷狗"),
+     ("开启微信", "微信"), ("open Visual Studio Code", "Visual Studio Code")],
+)
+def test_opening_a_short_name_is_an_app(resolver, text, name):
+    assert resolver.resolve(text).arguments == {"name": name}
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["打开一下我昨天说的那个想法", "打开这个问题看看", "打开我的想法", "打开那些文件看看"],
+)
+def test_a_sentence_is_not_an_app_name(resolver, text):
+    """「打开」对文件、网址和应用三样都歧义，而形状是唯一能在不碰文件系统、不读工具配置
+    的前提下分开它们的东西。
+
+    两道线：中文 6 个字的上限挡住长短语，指示代词和动词性尾巴（``_NOT_APP_WORDS``）挡住
+    短的那些 —— 「打开这个问题看看」只有 6 个汉字，光靠长度过不了。
+    """
+    assert resolver.resolve(text).kind == "agent"
+
+
+@pytest.mark.parametrize(
+    "text, url",
+    [
+        ("打开 https://www.bilibili.com", "https://www.bilibili.com"),
+        ("访问 http://example.com/x", "http://example.com/x"),
+        # 说主机名的人省略了协议，补上是补一个他省的字。https 而不是 http：
+        # 降级到明文得是个显式选择。
+        ("上 www.bilibili.com", "https://www.bilibili.com"),
+    ],
+)
+def test_an_address_goes_to_the_browser(resolver, text, url):
+    intent = resolver.resolve(text)
+
+    assert intent.tool == "web.open"
+    assert intent.arguments == {"url": url}
+
+
+@pytest.mark.parametrize(
+    "text, query",
+    [("播放周杰伦的稻香", "周杰伦的稻香"), ("听周杰伦", "周杰伦")],
+)
+def test_playing_something_specific_opens_a_search_page(resolver, text, query):
+    """这句话要的是一个能点播放的页面 —— 渲染它的是浏览器，不是我们。所以是 ``web.open``
+    而不是 ``web.search``（后者把结果抓回来给平台读）。
+
+    **「放一首稻香」2026-09-03 从这一组挪走了**：带「一首 / 的歌 / 的音乐」这类标记词的
+    说法现在走 ``play.song`` → ``app.open``，也就是**本机那个播放器**。理由是使用者的
+    原话：「我说『我想听薛之谦的歌』就会打开默认音乐播放器并播放薛之谦的歌」—— 他要的是
+    那个程序，不是一个搜索页。没有标记词的（这一组剩下的两条）仍然走浏览器：那时候连
+    「是不是在说歌」都不确定。
+    """
+    intent = resolver.resolve(text)
+
+    assert intent.tool == "web.open"
+    assert intent.arguments == {"query": query}
+
+
+def test_searching_still_goes_to_web_search_not_web_open(resolver):
+    """两条路的分别是「结果给谁看」：``web.search`` 给平台，``web.open`` 给浏览器。"""
+    assert resolver.resolve("搜一下 幂等是什么").tool == "web.search"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["你好", "帮我写一个 python 脚本", "检查目前运行状态是否正常", "这个项目还差什么"],
+)
+def test_conversation_and_real_work_still_go_to_an_agent(resolver, text):
+    """新增的四组规则一条都不该把这些抢过去 —— 它们是派发存在的理由。"""
+    assert resolver.resolve(text).kind == "agent"
+
+
+# -- 路径后面跟中文修饰语 -------------------------------------------------------
+
+
+def test_a_chinese_qualifier_after_the_path_is_trimmed(resolver):
+    """「读一下 X 的第一行」是最自然的说法之一，而整段捕获不是任何文件的名字。
+
+    修之前这一句以 ``no such file`` 收场（实测），而说话的人只是想读那个文件。
+    """
+    assert resolver.resolve("读一下 README.md 的第一行").arguments == {"path": "README.md"}
+    assert resolver.resolve("读一下 docs/routines.md 的开头").arguments == {
+        "path": "docs/routines.md"
+    }
+
+
+def test_a_chinese_filename_is_not_trimmed_away(resolver):
+    """切的前提是「切之前那半已经像个文件名」。中文文件名的第一个汉字在扩展点之前，
+    所以切前那半是空的 —— 这个条件就是为它加的。"""
+    assert resolver.resolve("读一下 报告.txt").arguments == {"path": "报告.txt"}
+    assert resolver.resolve("读 中文目录/说明.md").arguments == {"path": "中文目录/说明.md"}
+
+
+def test_a_path_with_spaces_still_survives(resolver):
+    """按空白切会破坏这一类，所以切的依据是汉字而不是空白。"""
+    assert resolver.resolve("读 my file.txt").arguments == {"path": "my file.txt"}
+
+
+def test_a_search_query_is_never_trimmed(resolver):
+    """查询词几乎总是中文，按汉字切会把每一个查询都截成空 —— 只有 fs.read 走这条。"""
+    assert resolver.resolve("搜索 幂等 是什么意思").arguments == {"query": "幂等 是什么意思"}
+
+
+# ------------------------------------------------- 能力标注（2026-09-01 的路由修正）
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "帮我写个 Python 脚本统计目录大小",
+        "改一下这个函数的返回值",
+        "这个项目里的测试为什么跑不起来",
+        "跑一下测试",
+        "git status 看看",
+        "提交一下",
+        "报错了，帮我看看",
+        "重构这段代码",
+        "write a script that renames files",
+        "refactor this function's error handling",
+        "debug the failing test",
+    ],
+)
+def test_a_request_that_needs_the_machine_asks_for_the_code_capability(text):
+    """这些说法要一个**真能动这台机器**的后端。
+
+    漏判的代价是具体的：一句「跑一下测试」落到裸 HTTP 端点上，换回来的是一段它其实
+    执行不了的说明 —— 语法正确、事实全错，而回合报成功。
+    """
+    from core.dispatch.intent import CODE_CAPABILITY, required_capabilities
+
+    assert required_capabilities(text) == frozenset({CODE_CAPABILITY})
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "你好",
+        "今天天气怎么样",
+        "帮我写一封邮件给张三",
+        "什么是幂等",
+        "给我讲个笑话",
+        "我有点累了",
+        "翻译一下这句话",
+        "how are you",
+        "",
+        "   ",
+    ],
+)
+def test_ordinary_conversation_asks_for_nothing(text):
+    """空集 = 谁都行，于是最便宜最快的后端赢。
+
+    **反方向的误判在这里是有代价的**：把闲聊标成「要动机器」会让每一句话去起一个
+    CLI 进程（自报 2500ms，实测更慢），而语音里 0 秒和 3 秒是「即时」与「迟钝」的差别。
+    「写一封邮件」是这条线上最容易被误伤的那个 —— 它有「写」，物件不是代码。
+    """
+    from core.dispatch.intent import required_capabilities
+
+    assert required_capabilities(text) == frozenset()
+
+
+def test_the_resolver_carries_the_same_answer(resolver):
+    """挂在解析器上是为了让「换掉解析器」把两件事一起换掉。"""
+    from core.dispatch.intent import required_capabilities
+
+    for text in ("写个脚本", "你好"):
+        assert resolver.capabilities(text) == required_capabilities(text)
+
+
+# --------------------------------------------------- 结束本次对话（2026-09-03）
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "退下吧",
+        "退下",
+        "你退下吧",
+        "你先退下",
+        "那你退下吧",
+        "好，退下吧",
+        "结束本次对话",
+        "结束对话",
+        "结束这次对话吧",
+        "退出会话",
+        "停止聊天",
+        "对话到此为止",
+        "聊天就先这样吧",
+        "没事了",
+        "没别的了",
+        "不用了",
+        "不聊了",
+        "就这样吧",
+        "先这样",
+        "到这就行了",
+        "好的，没事了",
+        "嗯，就这样吧",
+        "再见",
+        "拜拜",
+        "晚安",
+        "bye",
+        "goodbye",
+        "that's all",
+        "never mind",
+        "nothing else",
+        "退下吧。",
+        "  没事了  ",
+    ],
+)
+def test_a_farewell_is_recognised_as_the_end_of_the_conversation(text):
+    """这些说法命中之后**不派给任何后端**：应一句就收，见 ``VoiceRuntime._dismiss``。
+
+    「吧」在这一组里是软化语气，不是提问 —— 所以这条路**不能**先过
+    ``_QUESTION_TAIL``（那个正则把「吧」算问句尾）。拿它当前置守卫会把整组静默拒掉，
+    症状是「说了退下吧它还在聊」，而且哪一层都不报错。
+    """
+    from core.dispatch.intent import is_dismissal
+
+    assert is_dismissal(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # **这一组是这个功能的安全属性。** 误判的形状是「对话在人还要说下去的时候被挂掉」。
+        "帮我结束这个进程",
+        "怎么结束本次对话",
+        "结束本次对话吗",
+        "这个不用了，用那个",
+        "不用改了，先跑一下测试",
+        "退下来的时候要注意什么",
+        "这样就行了吗",
+        "再见是什么意思",
+        "晚安用英语怎么说",
+        "拜拜这个词的来源",
+        "停止服务的命令是什么",
+        "关闭窗口",
+        "退出程序",
+        "别说了",
+        "谢谢",
+        "好的",
+        "现在几点",
+        "跑一下测试",
+        "",
+        "   ",
+    ],
+)
+def test_an_ordinary_request_is_not_a_farewell(text):
+    """三类容易擦到的：**带对象但对象不是对话**（结束进程、关闭窗口、退出程序）、
+    **前后还有内容**（「这个不用了，用那个」）、**在问这个词**（「晚安用英语怎么说」）。
+
+    「谢谢」「好的」也在这里：它们出现在对话中间的次数远多于结尾，收进来会让人在道谢
+    之后被挂电话。要结束的人会说「谢谢，没别的了」，那一句由「没别的了」命中。
+    """
+    from core.dispatch.intent import is_dismissal
+
+    assert is_dismissal(text) is False
+
+
+def test_a_farewell_never_reads_as_a_tool_call(resolver):
+    """「结束本次对话」里有「结束」，「退下吧」里有「下」—— 都不许落到工具路径上。
+
+    这一条与 ``is_dismissal`` 无关：即使有人把结束判定摘掉，这些话也不该去跑命令。
+    """
+    for text in ("结束本次对话", "退下吧", "没事了", "就这样吧"):
+        assert resolver.resolve(text).kind == "agent", text
+
+
+# ------------------------------------------ 打开东西 / 听歌（2026-09-03 的两条真机账）
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["给我打开网易云音乐", "给我打开抖音", "替我打开知乎", "为我打开B站"],
+)
+def test_gei_wo_is_a_polite_opener_too(resolver, text):
+    """**这是一次真机故障的账。** 使用者说的是「给我打开网易云音乐」，而 ``_POLITE`` 里
+    只有「帮我」—— 整句锚定在第一个字就失配，这句话落到 agent 上，agent 回了一句
+    「好，正在打开网易云音乐。」**然后什么都没发生**（它没有那个工具）。
+
+    少一个礼貌前缀的代价不是少一种说法，是这条工具路径在他的口语里根本不存在，
+    而失败的样子是「助手答应了但没做」—— 比报错难查得多。
+    """
+    intent = resolver.resolve(text)
+
+    assert intent.kind == "tool"
+    assert intent.tool == "app.open"
+    assert intent.arguments.get("name"), "名字必须被提出来，否则工具只能开默认播放器"
+
+
+@pytest.mark.parametrize(
+    "text, query",
+    [
+        ("我想听薛之谦的歌", "薛之谦"),
+        ("听周杰伦的歌", "周杰伦"),
+        ("放李荣浩的音乐", "李荣浩"),
+        ("来点五月天的歌", "五月天"),
+        ("我要听陈奕迅的专辑", "陈奕迅"),
+        ("放一首稻香", "稻香"),
+        ("来一首晴天", "晴天"),
+        ("给我放王菲的歌", "王菲"),
+    ],
+)
+def test_naming_who_to_listen_to_reaches_the_music_player(resolver, text, query):
+    """使用者的原话：「我说『我想听薛之谦的歌』就会打开默认音乐播放器并播放薛之谦的歌」。
+
+    所以这一类落到 ``app.open`` 而不是 ``web.open``：要开的是**那个程序**。带出来的只有
+    ``query`` —— 开哪个播放器由 `apps.default_music` 定，这两件事不该纠缠在一句话的两半上。
+    """
+    intent = resolver.resolve(text)
+
+    assert intent.kind == "tool"
+    assert intent.tool == "app.open"
+    assert intent.arguments == {"query": query}
+
+
+@pytest.mark.parametrize("text", ["给我放首雪", "放首雪", "放一首雪", "来一首夜"])
+def test_a_one_character_song_name_is_not_thrown_away(resolver, text):
+    """**一个字可以是一首歌。** 2026-09-03 使用者说「给我放首雪」，捕获出「雪」，被
+    ``MIN_ARGUMENT_LEN`` 扔掉，整句漏给 ``web.open``（它捕获的是「首雪」——一个不存在的
+    歌名），最后落到 agent，agent 回「好，搜歌名『雪』给你放上。」**然后什么都没发生。**
+
+    放宽只对 ``play.song``：判错的代价是「播放器里搜了一个字」，不是「跑了一条命令」。
+    """
+    intent = resolver.resolve(text)
+
+    assert intent.tool == "app.open"
+    assert len(intent.arguments["query"]) == 1
+
+
+def test_the_length_floor_still_protects_the_dangerous_tools(resolver):
+    """反向的护栏：单字放宽**只对歌名**。一个字仍然不可能是路径或命令。"""
+    assert resolver.resolve("读一下 一下").kind == "agent"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["我想听你的意见", "听我说完", "我想听听你怎么想", "听不清能再说一遍吗"],
+)
+def test_listening_to_a_person_is_not_a_music_request(resolver, text):
+    """没有「歌 / 音乐 / 一首」这类标记词就不是播放请求。少了这个边界，
+    「我想听你的意见」会去开音乐播放器 —— 而那句话要的是对话。"""
+    assert resolver.resolve(text).tool != "app.open"
+
+
+# ------------------------------------------ 「进度怎么样了」（2026-09-03）
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "进度怎么样了", "进度呢", "你在干什么", "你现在在做什么", "还要多久",
+        "好了吗", "搞定了吗", "怎么样了", "做到哪了", "什么情况",
+        "status", "how is it going", "are you done",
+    ],
+)
+def test_a_progress_question_is_recognised(text):
+    """朗读期间现在可以打断，所以「打断 → 问进度」是一条真实路径。它必须由本机答：
+    把「你在干什么」发给云端 agent 既答不出来，又要再等一轮 —— 而这句话的意思正是
+    「我不想再等了」。"""
+    assert is_progress_query(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "这个项目进度怎么样",  # 带宾语 —— 问的是那个项目，该派给 agent
+        "帮我看看进度报告怎么写",
+        "打开网易云",
+        "现在几点了",
+        "退下吧",
+        "读一下 README",
+        "",
+    ],
+)
+def test_things_that_are_not_progress_questions(text):
+    """整句锚定。少了这道边界，「这个项目进度怎么样」会被本机用一句「现在没有在做的事」
+    打回去 —— 而那是个明显的误答。"""
+    assert is_progress_query(text) is False
+
+
+def test_a_progress_question_is_not_a_dismissal():
+    """两条快路径不能互相吃掉。"""
+    from core.dispatch.intent import is_dismissal
+
+    assert is_dismissal("进度怎么样了") is False
+    assert is_progress_query("退下吧") is False

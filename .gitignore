@@ -1,5 +1,7 @@
 __pycache__/
 .pytest_cache/
+# pytest --basetemp 目录（例程里给每轮回归起独立名字，跑完可删）
+.pytest-*/
 .venv/
 desktop/node_modules/
 desktop/dist/
@@ -20,8 +22,109 @@ enrollment/
 # 前导斜杠是必须的：不带斜杠的 memory/ 会连 core/memory/ 的源码一起忽略。
 /memory/
 
+# Agent 的隔离工作目录：外部 agent（claude 等）在这里跑，而不是在仓库根 ——
+# 裸 CLI 会读工作目录里的 CLAUDE.md、跑 git status、glob 到源码，那些和用户那句话无关。
+# 它落下的临时文件是那些 agent 的产物，不是本仓库的内容。
+.agent-workspace/
+
 # 运行时产物与日志
 *.log
 .vite.pid
 .vox/
 tmp_proto/*.wav
+
+# 截图产物：唤醒球是透明置顶窗口，截它常常连桌面上别的窗口一起截进来
+# （标签栏、URL、文件名都算个人数据）。要留证据就手动挑一张改名提交，默认不进。
+.vox-*.png
+.vox-*.gif
+.vox-ref/
+# 资源画像的 CSV：一台机器的读数，结论要人写进 prototype-results.md 才算证据
+.vox-resource-profile.csv
+.vox-*.csv
+desktop/compare.html
+desktop/replay.html
+desktop/vox-timeline.json
+desktop/side.html
+desktop/f*.png
+desktop/picks12.json
+desktop/merge.html
+# 度量页：360px 放大渲染 + ridge / 边缘硬度 / cross / 核亮度比（texture）·
+# 动效包络稳态实测（envelope）。与上面几页同类，都是取证工具而不是产品的一部分；
+# 例程写在 docs/routines.md，页面可按它重建。
+# **`review.html` / `review.ts` / `tune.ts` / `vite.config.ts` 不在这里** —— 那四个是给人用的
+# 验收入口（`localhost:5273/` 直接落在上面，`tune.ts` 是那一页的参数控件），要进版本控制。
+desktop/texture.html
+desktop/envelope.html
+desktop/envelope.js
+
+# 取证页：720px 单球放大（零布局依赖，专给 headless 截图用）。
+desktop/zoom.html
+desktop/zoom.ts
+
+# AE 工程解析的读数（自写 RIFX 解析器的输出，取证用）
+.vox-aep.txt
+
+# WebGL2 在透明置顶窗口上的最小验证页（取证工具）
+desktop/gltest.html
+
+# aerender 直接渲染出来的参考帧
+.vox-ref-ae/
+
+# AE 参数 dump 脚本与它的输出（取证工具）
+.vox-ae-dump.txt
+
+# AE 输出模块模板的探测脚本与读数（一次性工具：查清 setSettings 里 Channels/Depth 只读）
+desktop/ae-omtemplate.jsx
+.vox-om.txt
+.vox-render.log
+.vox-strip.png
+.vox-prod.png
+.vox-six.png
+
+# 「球层全禁」的临时工程与它渲出的纯背景帧（逐帧减背景用）。
+# `.vox-ref-ae/` 288 帧 ≈ 4 GB、`.vox-bg2/` 73 帧 ≈ 1.1 GB —— 重建雪碧图要用它们，
+# 不重建就可以整个删掉。`.vox-bg-ae/` 是第一版背景（把中心光核也当成了背景），**已废弃**。
+.vox-bg-ae/
+.vox-bg2/
+
+# 注意 `desktop/demo.html` / `desktop/demo.ts` / `desktop/src/sequence.ts` /
+# `scripts/build_orb_assets.py` / `desktop/public/orb/*` **要进版本控制** ——
+# 序列渲染层与它的资产是产品的一部分，不是取证工具。
+
+# 说明：desktop/ae-*.jsx **要进版本控制** —— ae-*.jsx 要进版本控制的理由是资产的重建
+# 链条必须完整：没有 ae-bgonly.jsx 渲出的背景帧，build_orb_assets.py 的 --bg 就无从谈起，
+# 而「逐帧减真背景」正是同心环那个缺陷的解法。
+# AE 取证与中间产物（帧序列几 GB，临时工程 3 MB 一份）—— 资产成品在 desktop/public/orb/
+.vox-scan/
+.vox-scan1/
+.vox-sw/
+.vox-swbg/
+.vox-p2/
+.vox-t/
+.vox-bg2/
+.vox-bg3/
+.vox-bg-ae/
+.vox-ref-ae/
+.vox-scan*.txt
+.vox-full.txt
+.vox-bg.txt
+.vox-final.png
+.vox-demo.png
+.vox-six.png
+.vox-three.png
+
+# 本机 Agent / 浏览器调试状态（不进版本库）
+.claude/
+.codex/
+.agents/
+.agent-workspace/
+.agent-scratch/
+.open-design-review/
+.playwright-mcp/
+
+# 唤醒球视觉取证截图：正式文档资产请改名放到 docs/assets/
+/bot-*.png
+/design/companion-orb/*.png
+/desktop/bot-*.png
+/desktop/life-*.png
+/desktop/seq-*.png

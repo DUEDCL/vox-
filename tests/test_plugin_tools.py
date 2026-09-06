@@ -303,7 +303,10 @@ def test_diagnose_reports_the_gate_without_naming_arguments(toolset):
     report = plugin.diagnose()["tools"]
 
     assert report["attached"] is True
-    assert report["registered"] == ["fs.read", "web.search"]
+    # 集合包含而不是相等：加一个不碰文件、不出网的工具不该让这条变红，而这条测的是
+    # 「诊断报告里有工具清单、但没有参数」。
+    assert {"fs.read", "web.search"} <= set(report["registered"])
+    assert "shell.run" not in report["registered"]
     assert report["executed"] == 1
     assert report["refused"] == 1
     assert report["shell_enabled"] is False

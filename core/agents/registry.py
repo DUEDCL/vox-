@@ -58,10 +58,10 @@ COMMON_KEYS = frozenset(
     {"name", "kind", "enabled", "capabilities", "cost", "latency_ms", "timeout_s"}
 )
 KIND_KEYS: Mapping[str, frozenset[str]] = {
-    "cli": frozenset({"command", "args", "output", "cwd", "env_passthrough"}),
+    "cli": frozenset({"command", "args", "output", "cwd", "env_passthrough", "prompt_stdin"}),
     "evox": frozenset({"url"}),
     "acp": frozenset({"command", "args", "cwd", "env_passthrough"}),
-    "http": frozenset({"url", "model"}),
+    "http": frozenset({"url", "model", "key_env"}),
 }
 REQUIRED_KEYS: Mapping[str, tuple[str, ...]] = {
     "cli": ("command",),
@@ -118,28 +118,131 @@ def enabled_entries(config: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
     )
 
 
+#: `config/models.toml` 的 `[llm]` 盖在哪一条 agent 上。**名字钉在代码里，不做成配置项。**
+#:
+#: 「控制台上配的那个模型」在这个产品里只有一个角色，多一个可配的间接层只会让
+#: 「我改的到底是哪一条」变成又一个要查的问题。要换成别的后端答对话，改
+#: `config/agents.toml` 里各条的 `enabled` 就够了。
+LLM_AGENT = "relay"
+
+#: `HttpAgentAdapter` 只会讲 OpenAI Chat Completions。`proto` 是别的值时**不套用**
+#: 而不是照着套 —— 把 anthropic 的请求体发给一个只认 OpenAI 形状的适配器，回来的是
+#: 一个格式错误，而使用者会读成「我配的模型不好用」。
+_LLM_PROTO = "openai"
+
+
+def apply_llm_profile(
+    config: Mapping[str, Any], llm: Mapping[str, Any]
+) -> tuple[dict[str, Any], list[str]]:
+    """把 `config/models.toml` 当前方案的 `[llm]` 盖到 ``LLM_AGENT`` 那一条上。
+
+    返回 (新的 agents 配置, 给人看的说明)。**不抛** —— 模型方案配歪了不该让 agent 层
+    整个起不来，但也绝不能静默：每一条不套用的路径都留一句话，因为这个函数存在的全部
+    理由就是「配了但没生效」。
+
+    ## 为什么需要这一层
+
+    2026-09-02 使用者的观察：「vox 在进行对话时使用的是我 claude 配置的模型，并没有调用
+    我给其配置的 api key」。他说的是对的 —— `config/models.toml` 此前**只有控制台在读写**，
+    运行时一个字都不读，于是那一栏是个能编辑、能保存、什么都不影响的面板；真正答对话的是
+    `config/agents.toml` 里的 `relay`，端点与凭据都是 Claude Code 那一套。
+
+    ## 需要 base 与 model 都在才套用
+
+    只有 model 没有 base 时，盖上去的是「新模型 + 旧端点」；只有 base 时是「旧模型名 +
+    新端点」。两种都是半套配置，而半套配置的失败长得像模型不好用。所以缺一个就整条不套用
+    并说清楚缺什么。
+    """
+    resolved = {key: value for key, value in config.items()}
+    entries = [dict(entry) for entry in resolved.get("agents", ()) if isinstance(entry, Mapping)]
+    resolved["agents"] = entries
+    if not llm:
+        return resolved, []
+
+    target = next(
+        (entry for entry in entries if entry.get("name") == LLM_AGENT and entry.get("kind") == "http"),
+        None,
+    )
+    if target is None:
+        return resolved, [
+            f"模型方案里配了 llm，但 config/agents.toml 里没有名为 {LLM_AGENT} 的 http 后端 —— 那一栏因此不生效"
+        ]
+
+    proto = str(llm.get("proto", "") or "")
+    if proto and proto != _LLM_PROTO:
+        return resolved, [
+            f"模型方案的 llm.proto = {proto!r}，而 {LLM_AGENT} 只会讲 {_LLM_PROTO} —— 没有套用，"
+            f"对话仍走 agents.toml 里的设置"
+        ]
+
+    base = str(llm.get("base", "") or "").strip()
+    model = str(llm.get("model", "") or "").strip()
+    if not base or not model:
+        missing = " 和 ".join(name for name, value in (("base", base), ("model", model)) if not value)
+        return resolved, [
+            f"模型方案的 llm 缺 {missing} —— 半套配置比不配更难查，所以整条没有套用"
+        ]
+
+    key_env = str(llm.get("key_env", "") or "").strip()
+    before = (target.get("url"), target.get("model"), target.get("key_env"))
+    after = (base, model, key_env or target.get("key_env"))
+    if before == after:
+        # 已经一致：这一层什么都不做，所以它也没有话要说。凭据在不在位是那条 agent
+        # 自己的事（`check()` 报它），在这里替它报等于同一件事说两遍、而且是从一个
+        # 不负责它的地方说的。
+        return resolved, []
+
+    if key_env and not os.getenv(key_env):
+        # **凭据不在位就整条不套用。** 套用它的后果是每一轮都 401，而 401 在语音里和
+        # 「网断了」「这个模型不好用」听起来完全一样 —— 使用者会去换模型，而缺的是一个
+        # 环境变量。所以这里宁可留在旧端点上：一条慢但能答的路胜过一条快但全错的路。
+        #
+        # 这道闸是「换一个更快的端点」这件事的前提：切端点必然带着切凭据，而新凭据几乎
+        # 一定比配置文件晚到（配置进版本库，凭据在 `.env` 里）。没有它，仓库里改一行
+        # `models.toml` 就等于把使用者的对话弄坏，而现场看不出是哪一步弄坏的。
+        return resolved, [
+            f"模型方案的 llm 要从 {key_env} 读凭据，而这台机器上那个变量是空的 —— 整条**没有**"
+            f"套用，对话仍走 agents.toml 里的 {LLM_AGENT}"
+            f"（model={target.get('model')} url={target.get('url')}）。"
+            f"把那把 key 放进 {key_env} 之后重启即可生效"
+        ]
+
+    target["url"] = base
+    target["model"] = model
+    if key_env:
+        target["key_env"] = key_env
+    return resolved, [
+        f"{LLM_AGENT} 按 config/models.toml 生效：model={after[1]} url={after[0]} key_env={after[2]}"
+    ]
+
+
 def open_agents(
     config: Mapping[str, Any] | None = None,
     *,
     transport: Any = None,
+    tools: Sequence[str] = (),
 ) -> tuple[AgentAdapter, ...]:
     """Adapters for every enabled entry. Nothing is spawned or contacted here.
 
     ``transport`` overrides what an ``evox`` entry would build for itself, which
     is how a test -- or a host that already holds a session -- injects one.
+
+    ``tools`` 是这台机器上**真的装了**的工具名。传下去只影响 `http` 那一种：它的 system
+    prompt 会带上工具清单，于是 agent 能让 Vox 去开应用 / 开网页 / 读文件
+    （见 `core/agents/skills.py`）。CLI 后端不需要 —— 它们自己就有终端。
     """
     resolved = dict(config) if config is not None else load_agents_config()
     if config is not None:
         validate_agents_config(resolved)
         _check_entries(resolved.get("agents", []))
     return tuple(
-        build_adapter(entry, transport=transport)
+        build_adapter(entry, transport=transport, tools=tools)
         for entry in enabled_entries(resolved)
     )
 
 
 def build_adapter(
-    entry: Mapping[str, Any], *, transport: Any = None
+    entry: Mapping[str, Any], *, transport: Any = None, tools: Sequence[str] = ()
 ) -> AgentAdapter:
     """One entry -> one adapter. The entry is assumed already checked."""
     kind = entry.get("kind")
@@ -152,9 +255,11 @@ def build_adapter(
     if kind == "cli":
         extra = {
             name: entry[name]
-            for name in ("output", "cwd")
+            for name in ("output", "prompt_stdin")
             if name in entry
         }
+        if "cwd" in entry:
+            extra["cwd"] = _resolve_cwd(entry["cwd"])
         return CliAgentAdapter(
             command=entry["command"],
             args=tuple(entry.get("args", ())),
@@ -176,8 +281,15 @@ def build_adapter(
             **extra,
         )
     if kind == "http":
-        extra = {"model": entry["model"]} if "model" in entry else {}
-        return HttpAgentAdapter(url=entry["url"], **common, **extra)
+        # ``key_env`` 只是**变量名**，值永远从环境读。让配置指名变量，是因为一台机器上
+        # 会有好几个中转站/服务商各自的 key —— 2026-08-31 实机就是这个：relay 的有效凭据
+        # 在 `ANTHROPIC_AUTH_TOKEN` 里，而适配器只读 `VOX_AGENT_HTTP_TOKEN`，于是每一轮都
+        # 401（流式路径上服务端直接断连，报出来是 `SSL: UNEXPECTED_EOF_WHILE_READING`）。
+        extra = {key: entry[key] for key in ("model", "key_env") if key in entry}
+        # 工具清单进 system prompt。**由这一层注入而不是让 adapter 去读 tools.toml**：
+        # 一个自己去读配置的 adapter 就等于它知道了这台机器装了什么，而那是运行时的事实，
+        # 不是这条 HTTP 连接的属性。
+        return HttpAgentAdapter(url=entry["url"], tools=tuple(tools), **common, **extra)
     raise AgentsConfigError(f"kind {kind!r} has no adapter")
 
 
@@ -188,6 +300,33 @@ def _bridge(entry: Mapping[str, Any]) -> LocalEvoXTransport:
     if url:
         bridge.base_url = url
     return bridge
+
+
+def _resolve_cwd(raw: Any) -> str:
+    """``cwd`` 相对仓库根解析，不相对进程 cwd，并且**保证目录存在**。
+
+    一个 agent 的工作目录决定它**能看见什么** —— 裸 CLI 会去读那个目录里的
+    ``CLAUDE.md``、``git status``、随手 glob 到的文件。按进程 cwd 解析会让「从哪里启动
+    Vox」改变 agent 的视野，而那不该是启动方式的函数。
+
+    ``~`` 与 ``%VAR%`` 会被展开。**这不是便利功能，是隔离的前提**：2026-09-01 实测，
+    工作目录设在仓库**内部**（`.agent-workspace`）时 `claude` 的回答里出现了本仓库的
+    `git status` —— 它点名了当时正在改的两个文件。git 会从 cwd 往上找仓库根，所以
+    「放在仓库里的子目录」根本不是一道边界。要真隔离，路径必须落在仓库之外，而仓库之外
+    的路径不能写死在一个进版本控制的配置文件里 —— 它得是 `~/.vox/...` 这种形状。
+
+    目录不存在就建出来。不建的后果不是「少一层隔离」：``Popen`` 会直接失败，而那一轮
+    到达调用方的形状是「cannot start 'claude'」—— 读起来像命令没装。
+    """
+    text = os.path.expandvars(str(raw))
+    path = Path(text).expanduser()
+    resolved = path if path.is_absolute() else workspace_root() / path
+    try:
+        resolved.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # 建不出来（权限、路径非法）就照原样交给 Popen：它的报错比这里编一个更准确。
+        pass
+    return str(resolved)
 
 
 def _check_entries(entries: Any) -> None:

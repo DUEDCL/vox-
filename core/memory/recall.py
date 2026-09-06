@@ -73,11 +73,18 @@ class MemoryRecaller:
         self.store = store
         self.on_event = on_event
         self.default_limit = default_limit
+        #: Event delivery is optional telemetry, never a recall prerequisite.
+        self.sink_failures = 0
 
     def _emit(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         event = validate_event(build_event(event_type, payload), AGENT_SCHEMA_PATH)
         if self.on_event is not None:
-            self.on_event(event)
+            try:
+                self.on_event(event)
+            except Exception:
+                # The recalled records remain local return data; a failed
+                # transport must not make a successful lookup fail.
+                self.sink_failures += 1
         return event
 
     def recall(

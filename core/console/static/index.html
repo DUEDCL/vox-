@@ -1,0 +1,4359 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vox 控制台</title>
+<style>
+/* ============================================================================
+   Vox 控制台 v2 —— 运行时仪表盘
+
+   ## 视觉来源
+   色彩、字号、间距、圆角、动效全部来自当前生效的设计系统 Friendly，下面那段
+   :root 是它的 tokens.css 原文，一个值都没改。派生色一律用 color-mix 从令牌算，
+   本文件在 :root 之外不出现任何裸 hex。
+
+   ## 三处刻意的令牌配对偏离（都是对比度问题，不是审美问题）
+   1. 主按钮用 --accent 作底、--fg 作字（6.02:1）。令牌里配的 --accent-on(#fff)
+      落在 --accent 上只有 2.84:1，正文级文字用它不合格。
+   2. --success / --danger 作小字在白面上分别是 3.45:1 / 3.91:1，都不到 4.5:1。
+      所以语义色只进圆点、条带、填充，文字一律 --fg / --fg-2；报错另加文字前缀，
+      不靠颜色单独承载语义。
+   3. --muted 在 --bg(奶油) 上是 4.38:1，差一点。它只许出现在 --surface(白) 上
+      （4.67:1）；奶油底上的次级文字用 --fg-2（8.49:1）。
+
+   ## 动效
+   全站只有一处动画：刊头那条极光带。它不是装饰 —— 着色器的能量与色相由运行时
+   state 驱动（空闲最静、听/说最活、出错偏红），所以它是一个数据编码。
+   它遵守三道闸：prefers-reduced-motion 只画一帧、标签页隐藏时停 rAF、
+   离开总览页时停 rAF。另外给一颗「静止 / 流动」按钮 —— WCAG 2.2.2 要求
+   超过 5 秒的运动内容有暂停控件。
+============================================================================ */
+
+/* design-systems/friendly/tokens.css
+ * Structured token bindings for Friendly.
+ * friendly product surface with warm colors, rounded controls, and low-pressure hierarchy.
+ */
+
+:root {
+  --bg: #fff8d7;
+  --surface: #ffffff;
+  --surface-warm: #ffef9f;
+  --fg: #1d1836;
+  --fg-2: #4c426c;
+  --muted: #796f91;
+  --meta: #ff6b00;
+  --border: #eadfba;
+  --border-soft: #f5eccd;
+  --accent: #ff6b00;
+  --accent-on: #ffffff;
+  --accent-hover: color-mix(in oklab, var(--accent), black 8%);
+  --accent-active: color-mix(in oklab, var(--accent), black 14%);
+  --success: #2e9d57;
+  --warn: #ffb020;
+  --danger: #e5484d;
+  --font-display: Inter, system-ui, sans-serif;
+  --font-body: Inter, system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, monospace;
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 18px;
+  --text-xl: 24px;
+  --text-2xl: 36px;
+  --text-3xl: 54px;
+  --text-4xl: 76px;
+  --leading-body: 1.52;
+  --leading-tight: 1.06;
+  --tracking-display: -0.025em;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --section-y-desktop: 96px;
+  --section-y-tablet: 68px;
+  --section-y-phone: 48px;
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 24px;
+  --radius-pill: 9999px;
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised: 0 18px 44px rgba(29, 24, 54, 0.14);
+  --focus-ring: 0 0 0 4px rgba(255, 107, 0, 0.26);
+  --motion-fast: 150ms;
+  --motion-base: 240ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --container-max: 1180px;
+  --container-gutter-desktop: 36px;
+  --container-gutter-tablet: 24px;
+  --container-gutter-phone: 16px;
+}
+
+/* 页面自己的派生层。全部由令牌算出，不引入新色。 */
+:root {
+  --hair: color-mix(in oklab, var(--border), transparent 30%);
+  --glass: color-mix(in oklab, var(--surface), transparent 26%);
+  --glass-line: color-mix(in oklab, var(--surface), transparent 45%);
+  --ink-danger: color-mix(in oklab, var(--danger), black 28%);
+  --ink-success: color-mix(in oklab, var(--success), black 18%);
+  --ring-track: color-mix(in oklab, var(--fg), transparent 90%);
+  --focus-ink: color-mix(in oklab, var(--accent), black 22%);
+}
+
+* { box-sizing: border-box; }
+/* 这一页只有亮色一套面。不声明的话深色系统主题下 UA 会把 select 的下拉、滚动条、
+   滑块反成深色，落在奶油底上就是两套配色打架。 */
+html { color-scheme: light; }
+html, body { margin: 0; }
+body {
+  min-height: 100vh;
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  background-color: var(--bg);
+  /* 静态暖光晕。玻璃面要有东西可折射才读得出是玻璃，这三团就是它折射的东西。 */
+  background-image:
+    radial-gradient(60em 40em at 78% -8%, color-mix(in oklab, var(--surface-warm), transparent 25%) 0%, transparent 62%),
+    radial-gradient(46em 34em at 6% 12%, color-mix(in oklab, var(--surface), transparent 40%) 0%, transparent 58%),
+    radial-gradient(38em 30em at 92% 88%, color-mix(in oklab, var(--accent), transparent 90%) 0%, transparent 60%);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+}
+p { text-wrap: pretty; }
+.mono, code, input, textarea, select, .num { font-family: var(--font-mono); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* ------------------------------------------------------------------ 骨架 */
+.shell { display: flex; align-items: flex-start; min-height: 100vh; }
+main {
+  flex: 1; min-width: 0;
+  max-width: var(--container-max);
+  padding: var(--space-8) var(--container-gutter-desktop) var(--section-y-desktop);
+}
+
+/* ------------------------------------------------------------------ 侧栏 */
+.rail {
+  position: sticky; top: 0; flex: none;
+  width: 236px; height: 100vh;
+  display: flex; flex-direction: column;
+  padding: var(--space-6) 0 var(--space-4);
+  background: var(--glass);
+  backdrop-filter: blur(22px) saturate(1.18);
+  -webkit-backdrop-filter: blur(22px) saturate(1.18);
+  border-right: 1px solid var(--hair);
+  box-shadow: inset -1px 0 0 var(--glass-line);
+}
+.brand { padding: 0 var(--space-5) var(--space-5); }
+.brand b {
+  display: block; font-family: var(--font-mono); font-size: var(--text-lg);
+  font-weight: 600; letter-spacing: .3em; color: var(--fg);
+}
+.brand span { display: block; font-size: var(--text-xs); color: var(--muted); letter-spacing: .06em; margin-top: 2px; }
+.rail-group {
+  font-size: var(--text-xs); color: var(--muted); letter-spacing: .14em;
+  padding: var(--space-4) var(--space-5) var(--space-2);
+}
+.rail nav { display: flex; flex-direction: column; overflow: auto; flex: 1; padding-bottom: var(--space-4); }
+.rail nav .rail-group:first-child { padding-top: 0; }
+.rail a {
+  display: flex; align-items: center; min-height: 38px;
+  margin: 2px var(--space-3); padding: 0 var(--space-4);
+  border-radius: var(--radius-pill);
+  color: var(--fg-2); text-decoration: none; font-size: var(--text-sm);
+  transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+/* 底色抬亮就把前景一起抬。状态变化后对比度只许升不许降。 */
+.rail a:hover { background: color-mix(in oklab, var(--surface-warm), transparent 45%); color: var(--fg); }
+.rail a[aria-current="page"] { background: var(--surface-warm); color: var(--fg); font-weight: 600; }
+.rail a:focus-visible { outline: 2px solid var(--focus-ink); outline-offset: -2px; }
+
+/* 侧栏底部的连接状态：它在每一页都得看得见，所以不住在总览的刊头里。 */
+.rail-foot {
+  margin: 0 var(--space-3); padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--surface), transparent 45%);
+  border: 1px solid var(--glass-line);
+}
+.rail-foot .line1 { display: flex; align-items: center; gap: var(--space-2); }
+#link { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg-2); overflow-wrap: anywhere; }
+/* 判词加粗、故障时转红；技术原因始终留在 --fg-2。整句都红会让 236px 宽的侧栏里
+   三行折行文字变成一整块红，而红色在这一页是留给「这一项坏了」的，不是给解释文字的。 */
+#link b { font-weight: 600; }
+#link.down b { color: var(--ink-danger); }
+#link span { font-weight: 400; }
+#tick { display: block; font-size: var(--text-xs); color: var(--muted); margin-top: var(--space-1); }
+
+/* 状态灯。颜色是唯一的视觉载体，所以状态名同时写进 aria-label。 */
+.lamp { position: relative; width: 10px; height: 10px; flex: none; }
+.lamp i {
+  position: absolute; inset: -5px; border-radius: 50%;
+  background: radial-gradient(circle, var(--lamp, var(--accent)) 0%, transparent 68%);
+  filter: blur(1.5px);
+}
+.lamp b {
+  position: absolute; inset: 0; border-radius: 50%;
+  background: var(--lamp, var(--accent));
+}
+
+/* ------------------------------------------------------------------ 刊头带 */
+.hero {
+  position: relative; overflow: hidden; isolation: isolate;
+  background: var(--bg);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--glass-line);
+  box-shadow: var(--elev-raised);
+  padding: var(--space-8);
+  min-height: 232px;
+  display: flex; flex-direction: column; justify-content: space-between;
+  gap: var(--space-6);
+}
+#sky { position: absolute; inset: 0; width: 100%; height: 100%; display: block; z-index: -1; }
+/* WebGL2 拿不到时的退路：同样的暖色，静态渐变，不是空白也不是灰框。 */
+.hero.no-gl {
+  background-image:
+    radial-gradient(34em 22em at 22% 118%, color-mix(in oklab, var(--accent), transparent 72%) 0%, transparent 64%),
+    radial-gradient(30em 20em at 74% -14%, var(--surface-warm) 0%, transparent 62%),
+    linear-gradient(160deg, color-mix(in oklab, var(--surface), transparent 20%), var(--bg));
+}
+.eyebrow {
+  font-family: var(--font-mono); font-size: var(--text-xs);
+  letter-spacing: .18em; color: var(--fg-2); margin: 0 0 var(--space-3);
+}
+.hero h1 {
+  margin: 0; font-family: var(--font-display); font-size: var(--text-2xl);
+  line-height: var(--leading-tight); letter-spacing: var(--tracking-display);
+  font-weight: 700; color: var(--fg);
+}
+.hero .say { margin: var(--space-3) 0 0; max-width: 34em; color: var(--fg-2); font-size: var(--text-base); }
+.hero-state { display: flex; align-items: baseline; gap: var(--space-3); flex-wrap: wrap; margin-top: var(--space-5); }
+.hero-state .big {
+  font-family: var(--font-mono); font-size: var(--text-xl); font-weight: 600;
+  letter-spacing: -.01em; color: var(--fg);
+}
+.hero-state .tagline { font-size: var(--text-sm); color: var(--fg-2); }
+.hero-foot {
+  display: flex; align-items: center; gap: var(--space-4); flex-wrap: wrap;
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--glass-line);
+}
+#runline {
+  margin: 0; flex: 1; min-width: 14em;
+  font-family: var(--font-mono); font-size: var(--text-xs);
+  color: var(--fg-2); overflow-wrap: anywhere;
+}
+/* 连不上时上一次的读数还留在屏幕上，不标出来就会被当成当前值。 */
+#runline[data-stale]::before { content: "读数已过期 · "; color: var(--ink-danger); font-weight: 600; }
+#sky-note { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg-2); }
+
+/* ------------------------------------------------------------------ 面 */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  padding: var(--space-6);
+}
+.panel.glass {
+  background: var(--glass);
+  backdrop-filter: blur(20px) saturate(1.15);
+  -webkit-backdrop-filter: blur(20px) saturate(1.15);
+  border-color: var(--glass-line);
+  box-shadow: var(--elev-raised), inset 0 1px 0 color-mix(in oklab, var(--surface), transparent 20%);
+}
+.stack { display: grid; gap: var(--space-5); }
+.panel > h3, .block > h3 {
+  margin: 0 0 var(--space-4);
+  font-family: var(--font-mono); font-size: var(--text-xs);
+  letter-spacing: .16em; color: var(--muted); font-weight: 600;
+}
+.view > h2 {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-display); font-size: var(--text-xl); font-weight: 700;
+  letter-spacing: var(--tracking-display); line-height: 1.24; color: var(--fg);
+}
+.view > .sub { margin: 0 0 var(--space-6); color: var(--fg-2); font-size: var(--text-base); max-width: 46em; }
+.block { margin-top: var(--space-6); padding-top: var(--space-5); border-top: 1px solid var(--border-soft); }
+.block:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+.note { color: var(--muted); font-size: var(--text-xs); margin: var(--space-3) 0 0; max-width: 52em; }
+.note code { color: var(--fg-2); }
+.warn, .bad, .good { font-size: var(--text-sm); margin: var(--space-3) 0 0; max-width: 52em; }
+.warn { color: var(--fg); background: color-mix(in oklab, var(--warn), var(--surface) 86%); border-left: 3px solid var(--warn); padding: var(--space-3) var(--space-4); border-radius: var(--radius-sm); }
+.bad { color: var(--ink-danger); }
+.good { color: var(--ink-success); }
+
+/* ------------------------------------------------------------------ 读数砖 */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(178px, 1fr)); gap: var(--space-4); }
+.tile {
+  padding: var(--space-5); border-radius: var(--radius-md);
+  display: flex; gap: var(--space-4); align-items: center;
+  background: var(--surface); border: 1px solid var(--border-soft);
+}
+.tile .k { font-family: var(--font-mono); font-size: var(--text-xs); letter-spacing: .12em; color: var(--muted); }
+.tile .v {
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+  font-size: var(--text-2xl); font-weight: 600; line-height: 1.05;
+  letter-spacing: -.03em; color: var(--fg); margin-top: 2px;
+}
+.tile .v small { font-size: var(--text-base); font-weight: 600; color: var(--fg-2); letter-spacing: 0; }
+.tile .u { font-size: var(--text-xs); color: var(--fg-2); margin-top: 2px; }
+
+/* 就绪比例环：conic-gradient 是真填充，不是空心描边。 */
+.ring {
+  flex: none; width: 62px; height: 62px; border-radius: 50%;
+  background: conic-gradient(var(--accent) 0 var(--p, 0%), var(--ring-track) var(--p, 0%) 100%);
+  display: grid; place-items: center;
+}
+.ring::after {
+  content: ""; width: 46px; height: 46px; border-radius: 50%; background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--border-soft);
+}
+
+/* ------------------------------------------------------------------ 状态色带 */
+.ribbon { display: flex; gap: 2px; align-items: stretch; height: 44px; margin-top: var(--space-2); overflow: hidden; }
+.ribbon i { flex: 1 1 0; min-width: 2px; border-radius: 3px; background: var(--ring-track); }
+/* 还没轮询到的槽位。空槽比已记录的格子更淡，这样「容量」和「读数」分得开。 */
+.ribbon i.s-empty { background: color-mix(in oklab, var(--fg), transparent 95%); }
+.ribbon i.s-idle, .legend em.s-idle { background: color-mix(in oklab, var(--success), var(--surface) 62%); }
+.ribbon i.s-listening, .legend em.s-listening { background: var(--accent); }
+.ribbon i.s-thinking, .legend em.s-thinking { background: color-mix(in oklab, var(--accent), var(--surface) 45%); }
+.ribbon i.s-speaking, .legend em.s-speaking { background: var(--success); }
+.ribbon i.s-waiting, .legend em.s-waiting { background: var(--warn); }
+.ribbon i.s-error, .legend em.s-error { background: var(--danger); }
+.ribbon i.s-down, .legend em.s-down { background: color-mix(in oklab, var(--fg), transparent 82%); }
+.legend { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); margin-top: var(--space-3); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-xs); color: var(--fg-2); }
+.legend em { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+
+/* ------------------------------------------------------------------ 就绪板 */
+.board { display: grid; grid-template-columns: repeat(auto-fit, minmax(232px, 1fr)); gap: var(--space-3); }
+.item {
+  display: grid; gap: var(--space-2); text-align: left; cursor: pointer;
+  padding: var(--space-4); border-radius: var(--radius-md);
+  background: var(--surface); border: 1px solid var(--border-soft);
+  font-family: inherit; font-size: var(--text-sm); color: var(--fg);
+  transition: background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard);
+}
+.item:hover { background: color-mix(in oklab, var(--surface-warm), var(--surface) 55%); border-color: var(--border); }
+.item:focus-visible { outline: 2px solid var(--focus-ink); outline-offset: 2px; }
+.item .top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.item .who { font-family: var(--font-mono); font-weight: 600; letter-spacing: .02em; }
+.item .verdict { font-size: var(--text-xs); font-weight: 600; color: var(--fg-2); }
+.item .why { font-size: var(--text-xs); color: var(--muted); overflow-wrap: anywhere; }
+.item .bar { height: 4px; border-radius: var(--radius-pill); background: var(--ring-track); overflow: hidden; }
+.item .bar i { display: block; height: 100%; width: 100%; }
+.item.ok .bar i { background: var(--success); }
+.item.gap .bar i { background: var(--warn); }
+.item.bad .bar i { background: var(--danger); }
+
+/* ------------------------------------------------------------------ 行清单 */
+.rows { border-top: 1px solid var(--border-soft); }
+.row {
+  display: grid; grid-template-columns: 8px 13em 1fr auto;
+  gap: var(--space-3); align-items: baseline;
+  padding: var(--space-3) var(--space-2);
+  border-bottom: 1px solid var(--border-soft);
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.row:hover { background: color-mix(in oklab, var(--surface-warm), var(--surface) 62%); }
+/* 名字折行时点对齐第一行，不对齐整块的垂直中点。 */
+.row .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ring-track); align-self: start; margin-top: .42em; }
+.row.ok .dot { background: var(--success); }
+.row.gap .dot { background: var(--warn); }
+.row.bad .dot { background: var(--danger); }
+.row .name { color: var(--fg); font-family: var(--font-mono); font-size: var(--text-xs); letter-spacing: .01em; }
+/* 名称列固定 13em，而 shell.require_verified_speaker 这类键名比它长。点号在 UAX #14 里
+   不是换行机会，所以不加这两行会横着溢出、压到 .detail 上。min-width:0 是必需的：
+   grid 子项默认 min-width:auto，光有 overflow-wrap 压不下去。 */
+.row .name, .row .detail { min-width: 0; overflow-wrap: anywhere; }
+.row .detail { color: var(--fg-2); font-size: var(--text-xs); }
+.row.bad .detail { color: var(--ink-danger); }
+.row .act { display: flex; gap: var(--space-2); }
+
+/* 运行日志的行**不能**复用 .row。
+   .row 是四列网格（8px 13em 1fr auto），为就绪清单的 .dot/.name/.detail/.act 而设。
+   日志行只有「一行头 + 一段字段」两个子元素、且不带那些 class，于是网格自动布局把头塞进
+   8px 的第一列、把字段塞进 13em 的第二列 —— 撑爆的第一列压在第二列上，两层文字互相重叠。
+   这不是假想，是实际发生过的显示错乱。所以给它自己的块级行。 */
+.logrow {
+  display: block;
+  padding: var(--space-3) var(--space-2);
+  border-bottom: 1px solid var(--border-soft);
+}
+.logrow:hover { background: color-mix(in oklab, var(--surface-warm), var(--surface) 62%); }
+/* 头一行：时间戳、来源、摘要。baseline 对齐是因为等宽的时间戳和正文字号不同。 */
+.logrow .lg-head {
+  display: flex; gap: var(--space-3); align-items: baseline; flex-wrap: wrap;
+  font-size: var(--text-xs);
+}
+.logrow .lg-head code { color: var(--muted); font-family: var(--font-mono); flex: none; }
+.logrow .lg-head b { flex: none; font-family: var(--font-mono); }
+.logrow .lg-head span { color: var(--fg); min-width: 0; overflow-wrap: anywhere; }
+/* 字段段落紧跟在头下面，而不是 .note 默认的 12px 外边距 —— 它们属于同一条记录。 */
+.logrow .lg-fields { margin: var(--space-1) 0 0; max-width: none; overflow-wrap: anywhere; }
+
+/* 微信会话记录的行同样**不能**复用 .row，踩的就是上面那个坑的第二次：三个子元素
+   （时间头 / 正文 / 标记）一个都不带 .dot/.name/.detail，于是「22:19:20 他 1234」被塞进
+   8px 的第一列，而冒号在 UAX #14 里不是换行机会 —— 那一块只能横着溢出，正好压在第二列的
+   正文上，屏幕上是两层文字叠在一起。同样不是假想。 */
+.msgrow {
+  display: block;
+  padding: var(--space-3) var(--space-2);
+  border-bottom: 1px solid var(--border-soft);
+}
+.msgrow:hover { background: color-mix(in oklab, var(--surface-warm), var(--surface) 62%); }
+/* 头一行：时间、谁、标记。前两块是短的定长块，flex:none 免得被正文挤断。 */
+.msgrow .mg-head {
+  display: flex; gap: var(--space-3); align-items: baseline; flex-wrap: wrap;
+  font-size: var(--text-xs);
+}
+.msgrow .mg-head code { color: var(--muted); font-family: var(--font-mono); flex: none; }
+.msgrow .mg-head b { flex: none; }
+.msgrow .mg-head em { color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
+/* 正文独占整行宽 —— 一句请求可以很长，挤在 13em 的列里读不了。 */
+.msgrow .mg-text { margin: var(--space-1) 0 0; max-width: none; overflow-wrap: anywhere; }
+
+/* 可点的小标签。拉回来的模型名铺成一排 —— <datalist> 的建议按输入框内容过滤，
+   所以列表必须有一个不依赖过滤的出口，否则「拉到 40 个模型」之后下拉里是空的。 */
+.chip {
+  font-family: var(--font-mono); font-size: var(--text-xs);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-soft); border-radius: 6px;
+  background: var(--surface); color: var(--fg-2); cursor: pointer;
+}
+.chip:hover { color: var(--fg); border-color: var(--border); }
+
+/* 三态占位。没有这一条，飞行中的区域和请求失败后的区域长得一模一样。 */
+.state {
+  display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
+  padding: var(--space-3) var(--space-2); font-size: var(--text-sm); color: var(--fg-2);
+  border-bottom: 1px solid var(--border-soft);
+}
+.state.busy::before {
+  content: ""; width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--accent); animation: pulse 1.15s var(--ease-standard) infinite;
+}
+.state.fail { color: var(--ink-danger); }
+.state.fail b { font-weight: 700; }
+.state .why { color: var(--fg-2); font-family: var(--font-mono); font-size: var(--text-xs); overflow-wrap: anywhere; }
+@keyframes pulse { 0%, 100% { opacity: .3; } 50% { opacity: 1; } }
+
+/* 键值行：键名 / 控件 / 说明。改过的那一行自己变色，不弹 toast。 */
+.kv {
+  display: grid; grid-template-columns: 1fr 13em 9em; gap: var(--space-3); align-items: center;
+  padding: var(--space-2) var(--space-2); border-bottom: 1px solid var(--border-soft);
+}
+.kv code { font-size: var(--text-xs); color: var(--fg); overflow-wrap: anywhere; }
+.kv .hint { color: var(--muted); font-size: var(--text-xs); }
+.kv.dirty code { color: var(--fg); font-weight: 700; }
+.kv.dirty { background: color-mix(in oklab, var(--warn), var(--surface) 90%); }
+.kv.saved .hint { color: var(--ink-success); }
+.kv.failed .hint { color: var(--ink-danger); }
+.kv.locked code, .kv.locked .val { color: var(--fg-2); }
+.kv .val { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg-2); min-width: 0; overflow-wrap: anywhere; }
+
+/* ------------------------------------------------------------------ 控件 */
+button {
+  font-family: var(--font-body); font-size: var(--text-sm); font-weight: 500;
+  color: var(--fg); background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius-pill);
+  min-height: 36px; padding: 0 var(--space-5); cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard),
+              border-color var(--motion-fast) var(--ease-standard),
+              color var(--motion-fast) var(--ease-standard);
+}
+button:hover:not(:disabled) { background: var(--surface-warm); border-color: color-mix(in oklab, var(--border), var(--fg) 12%); }
+button:focus-visible { outline: 2px solid var(--focus-ink); outline-offset: 2px; box-shadow: var(--focus-ring); }
+button:disabled { color: var(--muted); background: color-mix(in oklab, var(--surface), var(--fg) 4%); cursor: default; }
+/* 主按钮：--accent 作底、--fg 作字（6.02:1）。令牌配的白字在这个橙上只有 2.84:1。 */
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--fg); font-weight: 600; }
+button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--fg); }
+button.primary:active:not(:disabled) { background: var(--accent-active); border-color: var(--accent-active); }
+button.primary:disabled { background: color-mix(in oklab, var(--accent), var(--surface) 72%); border-color: transparent; color: var(--fg-2); }
+/* 删除类动作静态就该可辨：键盘与触摸用户永远看不到 hover。 */
+button.danger { color: var(--ink-danger); border-color: color-mix(in oklab, var(--danger), var(--surface) 55%); }
+button.danger:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--danger), var(--surface) 90%);
+  border-color: var(--danger); color: color-mix(in oklab, var(--danger), black 38%);
+}
+button.danger:disabled { color: var(--muted); border-color: var(--border); }
+button.ghost { background: transparent; border-color: var(--glass-line); color: var(--fg-2); min-height: 32px; padding: 0 var(--space-4); font-size: var(--text-xs); }
+button.ghost:hover:not(:disabled) { background: color-mix(in oklab, var(--surface), transparent 30%); color: var(--fg); border-color: var(--border); }
+
+input, textarea, select {
+  font-family: var(--font-mono); font-size: var(--text-sm); color: var(--fg);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: var(--space-2) var(--space-3);
+  min-height: 36px; width: 100%;
+}
+input:focus, textarea:focus, select:focus {
+  outline: 2px solid var(--focus-ink); outline-offset: 1px; box-shadow: var(--focus-ring);
+}
+input:read-only, input:disabled, textarea:read-only, select:disabled {
+  background: color-mix(in oklab, var(--surface), var(--fg) 5%); color: var(--fg-2); cursor: default;
+}
+label { display: block; color: var(--fg-2); font-size: var(--text-xs); margin-bottom: var(--space-1); font-weight: 500; }
+
+/* 滑块自己一套。不写这一条它会继承上面那组输入框样式 —— 一个有边框的白盒子里装着
+   一条 UA 默认的蓝灰轨道，是整页唯一一个不在调色板里的控件。已走过的那一段用
+   --accent 填实（--fill 由脚本按 min/max 算出来写进来），不是空心描边。 */
+input[type="range"] {
+  -webkit-appearance: none; appearance: none;
+  background: transparent; border: none; padding: 0;
+  min-height: 36px; height: 36px; cursor: pointer;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 6px; border-radius: var(--radius-pill);
+  background: linear-gradient(to right, var(--accent) 0 var(--fill, 0%), var(--ring-track) var(--fill, 0%) 100%);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 20px; height: 20px; margin-top: -7px; border-radius: 50%;
+  background: var(--surface); border: 2px solid var(--accent); box-shadow: var(--elev-ring);
+}
+input[type="range"]::-moz-range-track { height: 6px; border-radius: var(--radius-pill); background: var(--ring-track); }
+input[type="range"]::-moz-range-progress { height: 6px; border-radius: var(--radius-pill); background: var(--accent); }
+input[type="range"]::-moz-range-thumb {
+  width: 20px; height: 20px; box-sizing: border-box; border-radius: 50%;
+  background: var(--surface); border: 2px solid var(--accent);
+}
+/* 拖动时不画环（鼠标用户不需要），键盘聚焦时画。属性选择器特异性高于上面的 input:focus。 */
+input[type="range"]:focus { outline: none; box-shadow: none; }
+input[type="range"]:focus-visible { outline: 2px solid var(--focus-ink); outline-offset: 3px; box-shadow: var(--focus-ring); }
+textarea { min-height: 11em; resize: vertical; line-height: var(--leading-body); }
+.line { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; }
+.line > input, .line > select { flex: 1; min-width: 9em; }
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
+.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); }
+/* 唤醒漏斗在出现第四格（「没进聆听」）时改成四列。让它单独掉到第二行占三分之一宽，
+   看起来像页面排错了 —— 而它出现的那一刻正是最需要被读懂的时候。 */
+.grid3.wide4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+/* 页面上唯一一个折叠块（声纹的「原始读数」）。默认的三角形在这套排版里太抢，
+   而它存在的意义正是**平时不占视线** —— 需要原始 JSON 的时候才展开。 */
+details > summary { cursor: pointer; list-style: none; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary::before { content: "▸ "; color: var(--muted); }
+details[open] > summary::before { content: "▾ "; }
+.out {
+  margin-top: var(--space-4); white-space: pre-wrap; font-family: var(--font-mono);
+  font-size: var(--text-xs); color: var(--fg-2);
+  background: color-mix(in oklab, var(--surface), var(--fg) 3%);
+  border-radius: var(--radius-sm); padding: var(--space-4); overflow-wrap: anywhere;
+}
+.out:empty { display: none; }
+.out b { display: block; color: var(--fg); font-weight: 700; margin-bottom: var(--space-2); }
+.out.ok b { color: var(--ink-success); }
+.out.bad b { color: var(--ink-danger); }
+
+/* 待确认横幅。确认面只有唤醒球一个，这里只报告，不给按钮。 */
+#pending {
+  margin-bottom: var(--space-6); border-radius: var(--radius-md); overflow: hidden;
+  background: color-mix(in oklab, var(--warn), var(--surface) 84%);
+  border: 1px solid color-mix(in oklab, var(--warn), var(--surface) 40%);
+  display: flex; align-items: stretch;
+}
+/* 和浮层同一个坑：作者源的 display:flex 会压过 UA 的 [hidden]{display:none}，
+   少了这一行，这条横幅从加载起就常驻可见 —— 而它说的是「有工具在等确认」。 */
+#pending[hidden] { display: none; }
+#pending .band { width: 5px; flex: none; background: var(--warn); }
+#pending p { margin: 0; padding: var(--space-3) var(--space-4); font-size: var(--text-sm); color: var(--fg); }
+
+/* 声纹三段 */
+.clip { border: 1px solid var(--border-soft); border-radius: var(--radius-md); padding: var(--space-3) var(--space-4); background: var(--surface); }
+/* 注册格子自己排：六句（或更多）不该被写死成三列。auto-fill + minmax 让它按可用宽度
+   决定几列，窄屏自然掉成一列 —— 而 `.grid3` 那种固定列数在 6 格上会挤成一条。 */
+.clips { display: grid; grid-template-columns: repeat(auto-fill, minmax(15em, 1fr)); gap: var(--space-3); }
+.clip .say { display: block; margin-top: 2px; font-size: var(--text-xs); color: var(--fg-2); font-family: inherit; }
+.clip .cond { display: block; font-size: var(--text-xs); color: var(--muted); font-family: inherit; }
+/* 下一句要录的那一格：只描边，不填色 —— 已录的格子用 .filled 的绿边，两者不该撞。 */
+.clip.next { border-color: var(--accent); }
+.clip.next b { color: var(--ink-accent, var(--fg)); }
+.clip b { display: block; font-size: var(--text-sm); font-weight: 600; color: var(--fg-2); }
+.clip span { font-size: var(--text-xs); color: var(--muted); font-family: var(--font-mono); }
+.clip.filled { border-color: color-mix(in oklab, var(--success), var(--surface) 55%); }
+.clip.filled b { color: var(--ink-success); }
+.clip.weak { border-color: color-mix(in oklab, var(--warn), var(--surface) 45%); }
+.clip.weak b { color: var(--fg); }
+/* 只有「没进聆听」用它，而那一格只在非零时出现 —— 它是「唤醒了却没有后文」本身，
+   和「声纹拒绝」（门在正常工作）不是一个量级，所以配色也不该是同一档。 */
+.clip.bad { border-color: color-mix(in oklab, var(--danger), var(--surface) 45%); }
+.clip.bad b { color: var(--ink-danger); }
+.level { flex: 1; min-width: 96px; height: 4px; border-radius: var(--radius-pill); background: var(--ring-track); overflow: hidden; }
+.level i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .1s linear; }
+
+/* 唤醒球尺寸预览：球体 = 布局盒 × 1/1.44。 */
+/* 这块预览是一把尺子，所以球体保持真实像素、不随容器缩放。代价是滑到 420px 时它会
+   比这一列宽（821–1080px 之间 .grid2 还是两列，单列内容宽约 362px）—— 让 stage 自己滚，
+   而不是让整个文档横向滚。居中用 #orb-box 的 margin:auto 而不是 place-items:center：
+   后者在内容溢出时会把左边那一半推到滚动区起点之外，怎么滚都回不去。 */
+#orb-stage {
+  border: 1px solid var(--border-soft); border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--surface), var(--fg) 3%);
+  display: flex; overflow: auto; padding: var(--space-5); min-height: 200px;
+}
+#orb-box { flex: none; margin: auto; position: relative; display: grid; place-items: center; outline: 1px dashed color-mix(in oklab, var(--fg), transparent 78%); }
+#orb-ball { border-radius: 50%; background: radial-gradient(circle at 38% 34%, color-mix(in oklab, var(--surface-warm), var(--surface) 40%) 0%, var(--accent) 46%, color-mix(in oklab, var(--accent), black 42%) 100%); }
+
+/* ------------------------------------------------------------------ 浮层 */
+.overlay {
+  position: fixed; inset: 0; z-index: 20; display: grid; place-items: center;
+  background: color-mix(in oklab, var(--fg), transparent 52%);
+  padding: var(--space-5);
+}
+/* 作者源的 display:grid 会压过 UA 的 [hidden]{display:none}，少了这一行浮层从加载起就常驻可见。 */
+.overlay[hidden] { display: none; }
+.overlay .card {
+  width: min(600px, 100%);
+  border: 1px solid var(--glass-line); border-radius: var(--radius-lg);
+  background: color-mix(in oklab, var(--surface), transparent 8%);
+  backdrop-filter: blur(24px) saturate(1.2);
+  -webkit-backdrop-filter: blur(24px) saturate(1.2);
+  box-shadow: var(--elev-raised);
+  padding: var(--space-6);
+}
+.overlay h4 { margin: 0 0 var(--space-3); font-family: var(--font-display); font-size: var(--text-lg); font-weight: 700; letter-spacing: var(--tracking-display); }
+.overlay .body {
+  font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg-2); white-space: pre-wrap;
+  /* 长正文（探测结果、命令原文）滚动而不是撑破视口。滚动不是截断 —— 原文一个字不少。 */
+  max-height: 48vh; overflow: auto; overflow-wrap: anywhere;
+}
+/* 只放输入框、不带正文的浮层（新建 / 复制方案）：空正文不该占一行的高度。 */
+.overlay .body:empty { display: none; }
+#ov-field { margin-top: var(--space-5); }
+.overlay .foot { display: flex; gap: var(--space-3); justify-content: flex-end; flex-wrap: wrap; margin-top: var(--space-5); }
+
+/* ------------------------------------------------------- 动效收敛与响应式 */
+/* 极光是数据编码而非装饰，但仍受系统偏好约束：这里停到一帧，脚本侧同步停 rAF。 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 1ms !important; animation-duration: 1ms !important; animation-iteration-count: 1 !important; }
+  .state.busy::before { animation: none; opacity: .85; }
+}
+
+@media (max-width: 1080px) {
+  /* stretch 不是可选的：.shell 的基线是 align-items:flex-start，那是给横排布局用的
+     （侧栏不该被拉到和正文一样高）。转成竖排之后交叉轴变成了**宽度**，flex-start 会让
+     侧栏与正文各自缩到内容宽 —— 侧栏的内容是九个 white-space:nowrap 的链接，量出来
+     1026px，于是它把整页撑宽、nav 的 overflow-x:auto 永远等不到一个确定宽度可裁。
+     实测：835px 视口下 documentElement.scrollWidth 1043 vs clientWidth 820，
+     整页横向滚动；加上 stretch 之后 820 = 820，nav 自己滚。 */
+  .shell { flex-direction: column; align-items: stretch; }
+  .rail {
+    position: static; width: auto; height: auto; border-radius: var(--radius-lg);
+    margin: var(--space-4) var(--space-4) 0;
+  }
+  .rail nav { flex-direction: row; overflow-x: auto; gap: var(--space-2); padding-bottom: var(--space-1); }
+  .rail nav a { white-space: nowrap; }
+  .rail-group { display: none; }
+  .rail-foot { border-top: 1px solid var(--hair); }
+  main { padding: var(--space-5) var(--space-4) var(--space-8); }
+}
+
+@media (max-width: 820px) {
+  .hero { min-height: 0; padding: var(--space-6) var(--space-5); }
+  .hero h1 { font-size: var(--text-xl); }
+  .hero-state .big { font-size: var(--text-2xl); }
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .board { grid-template-columns: 1fr; }
+  /* `.grid3.wide4` 的特称度比 `.grid3` 高，媒体查询本身不加特称度，所以它必须在这里
+     被点名，否则窄屏上那四格不会塌。 */
+  .kv, .grid2, .grid3, .grid3.wide4 { grid-template-columns: 1fr; }
+  .kv { gap: var(--space-1); align-items: start; padding-bottom: var(--space-3); }
+  /* 四列行在窄屏塌成两列：点占第一列，名字 / 说明 / 按钮依次落在第二列。 */
+  .row { grid-template-columns: 8px 1fr; gap: var(--space-1) var(--space-3); }
+  .row .name, .row .detail, .row .act { grid-column: 2; }
+  .row .act { margin-top: var(--space-2); }
+  /* 96 格 × (2px 最小宽 + 2px 间隙) 是 382px，窄屏放不下。压到 1px 后是 191px。 */
+  .ribbon { gap: 1px; height: 38px; }
+  .ribbon i { min-width: 1px; }
+  /* 触摸目标 44px；输入 16px 是为了压掉 iOS Safari 聚焦时的自动放大。 */
+  button, .rail nav a { min-height: 44px; }
+  input, select, textarea { min-height: 44px; font-size: 16px; }
+  /* 上面那条选中不了滑块：input[type="range"] 的特异性更高，跨 @media 也照样赢。
+     所以窄屏的 44px 触摸高度得单独再写一遍。 */
+  input[type="range"] { min-height: 44px; height: 44px; }
+}
+
+/* 这一段必须排在 820 之后：同特异性下后写的赢，否则两列会盖回来。 */
+@media (max-width: 560px) {
+  /* 读数砖里有一颗 62px 的环，两列在这个宽度下会把数字挤出去。 */
+  .tiles { grid-template-columns: 1fr; }
+  .hero { padding: var(--space-5) var(--space-4); }
+}
+</style>
+</head>
+<body>
+<div class="shell">
+
+<aside class="rail" data-od-id="rail">
+  <div class="brand" data-od-id="brand"><b>VOX</b><span>本机语音控制台</span></div>
+  <nav aria-label="模块">
+    <div class="rail-group">总览</div>
+    <a href="#overview" data-view="overview" data-od-id="nav-overview">运行态</a>
+    <div class="rail-group">六个模块</div>
+    <a href="#chat" data-view="chat" data-od-id="nav-chat">聊天</a>
+    <a href="#models" data-view="models" data-od-id="nav-models">模型配置</a>
+    <a href="#keywords" data-view="keywords" data-od-id="nav-keywords">唤醒词</a>
+    <a href="#speaker" data-view="speaker" data-od-id="nav-speaker">声纹</a>
+    <a href="#agents" data-view="agents" data-od-id="nav-agents">本机 Agent</a>
+    <a href="#profile" data-view="profile" data-od-id="nav-profile">本人档案</a>
+    <a href="#skills" data-view="skills" data-od-id="nav-skills">技能与 MCP</a>
+    <a href="#orb" data-view="orb" data-od-id="nav-orb">唤醒球</a>
+    <a href="#weixin" data-view="weixin" data-od-id="nav-weixin">微信</a>
+    <div class="rail-group">附属</div>
+    <a href="#limits" data-view="limits" data-od-id="nav-limits">安全边界</a>
+    <a href="#debug" data-view="debug" data-od-id="nav-debug">调试</a>
+  </nav>
+  <div class="rail-foot" data-od-id="rail-status">
+    <div class="line1">
+      <span class="lamp" id="lamp" role="img" aria-label="运行时状态：连接中"><i></i><b></b></span>
+      <span id="link" role="status"><b>连接中…</b></span>
+    </div>
+    <span id="tick"></span>
+  </div>
+</aside>
+
+<main>
+
+<!-- 刊头带。#sky 是 WebGL2 极光，它的能量与色相由运行时 state 驱动 ——
+     所以这块动效是读数的一种编码，不是装饰；拿不到 WebGL2 就退到 .no-gl 的静态渐变。 -->
+<header class="hero" id="hero" data-od-id="hero">
+  <canvas id="sky" aria-hidden="true"></canvas>
+  <div>
+    <p class="eyebrow">VOICE WAKE · 本机运行</p>
+    <h1>说一句话，到本机跑一条命令之间</h1>
+    <p class="say">六个模块的配置、边界与证据都在这一页。所有读数来自守护进程的 <code>/api/state</code>，没有一处是编的。</p>
+    <div class="hero-state">
+      <span class="big" id="hero-state">—</span>
+      <span class="tagline" id="hero-tag">正在问守护进程</span>
+    </div>
+  </div>
+  <div class="hero-foot">
+    <!-- 这一行刻意没有 role="status"。它每 2.3 秒重写一次、而 up=Ns 每次都不一样，
+         挂上 polite live region 等于让读屏器不停地念这一长串读数，队列永远排不空。
+         「连不上」这件事的播报通道是侧栏的 #link（它只在真的变了才改文本）。 -->
+    <p id="runline">—</p>
+    <!-- 唤醒词、模型方案、agent 配置都是启动时读的，所以改完必须重启。按钮放在这里而不是
+         各自那一栏里：重启是整个进程的事，一栏里放一颗会让人以为它只重载那一栏。 -->
+    <button id="restart" class="ghost" aria-label="按新配置重启" data-od-id="hero-restart">重启</button>
+    <button id="sky-toggle" class="ghost" aria-label="让极光静止" data-od-id="hero-motion-toggle">静止</button>
+    <span id="sky-note"></span>
+  </div>
+</header>
+
+<div id="pending" hidden role="status" data-od-id="pending-banner">
+  <div class="band" aria-hidden="true"></div>
+  <p id="pending-text"></p>
+</div>
+
+<!-- ========================================================== 0 总览 -->
+<section class="view" id="v-overview" data-od-id="view-overview" hidden>
+  <h2 data-od-id="overview-title">运行态</h2>
+  <p class="sub">四个读数、一条就绪板、一条本会话的状态色带。数据源只有 <code>/api/state</code> 一个。</p>
+
+  <div class="stack">
+    <div class="panel glass" data-od-id="overview-tiles">
+      <h3>读数</h3>
+      <div class="tiles" id="ov-tiles"></div>
+      <p class="note">
+        <code>就绪</code> 是 <code>readiness</code> 里 <code>ready=true</code> 的条数比总条数；
+        <code>轮次</code> 与 <code>运行</code> 直接来自 <code>turns</code> / <code>uptime_s</code>；
+        <code>工具</code> 是运行时 <code>describe()</code> 报的工具数加 agent 数。读不到就显示 <code>—</code>，不猜。
+      </p>
+    </div>
+
+    <div class="panel glass" data-od-id="overview-board">
+      <h3>就绪板</h3>
+      <div class="board" id="ov-board"></div>
+      <p class="note">每一格点开看 <code>detail</code> 与 <code>hint</code> 原文。颜色不是唯一载体 —— 判词（就绪 / 缺 / 坏）同时写成文字。</p>
+    </div>
+
+    <div class="panel glass" data-od-id="overview-ribbon">
+      <h3>状态色带</h3>
+      <div class="ribbon" id="ov-ribbon" role="img" aria-label="本会话状态色带"></div>
+      <div class="legend" id="ov-legend"></div>
+      <p class="note">
+        <b>这条带子只记本会话自己的轮询（每 2.3 秒一格，最多 96 格）。</b>
+        后端没有历史状态端点，页面一刷新它就从零开始 —— 它不是服务器侧的时间线。
+      </p>
+    </div>
+
+    <div class="panel glass" data-od-id="overview-warnings">
+      <h3>告警</h3>
+      <div class="rows" id="ov-warn"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================= 1 模型配置 -->
+<!-- ========================================================= 1 聊天 -->
+<section class="view" id="v-chat" data-od-id="view-chat" hidden>
+  <h2 data-od-id="chat-title">聊天</h2>
+  <p class="sub">
+    和麦克风走的是<b>同一条派发路径</b> —— 意图判定、工具快路径、agent 路由、记忆写入
+    全都一样，区别只有输入是打的还是说的。<b>朗读默认关</b>：合成是阻塞的，开着它一句
+    回答要等音频播完才出现在这里。
+  </p>
+
+  <div class="stack">
+    <div class="panel glass">
+      <div class="line" style="flex-wrap:wrap;gap:var(--space-3)">
+        <label class="check"><input type="checkbox" id="ch-speak"> 朗读回答</label>
+        <span class="note" style="margin:0">·</span>
+        <label for="ch-model" class="note" style="margin:0">模型</label>
+        <input id="ch-model" class="mono" placeholder="relay:claude-opus-5" style="max-width:20em"
+               aria-label="换模型" data-od-id="chat-model">
+        <button id="ch-switch" data-od-id="chat-switch">换</button>
+        <span class="note" style="margin:0" id="ch-model-now"></span>
+      </div>
+      <p class="note" style="margin-top:var(--space-3)">
+        换模型<b>不用重启</b>（这一项和别的配置不一样：它只是一个 URL 加一个名字）。
+        也可以在输入框里直接打 <code>/model relay:claude-opus-5</code>。
+      </p>
+    </div>
+
+    <div class="panel glass">
+      <div class="line" style="justify-content:space-between">
+        <h3 style="margin:0">会话</h3>
+        <button id="ch-reload" data-od-id="chat-reload">刷新</button>
+      </div>
+      <div class="rows" id="ch-sessions" style="margin-top:var(--space-3)"></div>
+    </div>
+
+    <div class="panel glass">
+      <div id="ch-log" role="log" aria-live="polite"
+           style="max-height:46vh;overflow:auto;display:flex;flex-direction:column;gap:var(--space-3)"></div>
+      <p class="note" id="ch-status" role="status" style="margin-top:var(--space-3)"></p>
+      <div class="line" style="margin-top:var(--space-3)">
+        <input id="ch-input" placeholder="说点什么，或者 /model 换模型" autocomplete="off"
+               aria-label="要发送的话" data-od-id="chat-input" style="flex:1">
+        <button id="ch-mic" data-od-id="chat-mic" title="按住说话：录一段，转写进输入框">🎙 说</button>
+        <button id="ch-send" class="primary" data-od-id="chat-send">发送</button>
+      </div>
+      <p class="note" style="margin-top:var(--space-2)">
+        🎙 走的是<b>Vox 自己那支麦克风</b>和本机 ASR（和唤醒时同一条信道），录完自动填进
+        输入框，发不发由你决定 —— 一个直接把转写发出去的按钮会让听错的那次没有挽回余地。
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="view" id="v-models" data-od-id="view-models" hidden>
+  <h2 data-od-id="models-title">模型配置</h2>
+  <p class="sub">一套 ASR + TTS + LLM 叫一个方案，多套并存，<code>active</code> 指向生效的那套。</p>
+  <p class="warn" id="models-degraded" role="status" hidden></p>
+
+  <div class="stack">
+    <div class="panel glass">
+      <h3>方案</h3>
+      <div class="line">
+        <select id="mp-select" data-od-id="models-profile-select" aria-label="选择方案"></select>
+        <button id="mp-new" data-od-id="models-new">新建</button>
+        <button id="mp-copy" data-od-id="models-copy">复制</button>
+        <button id="mp-del" class="danger" data-od-id="models-delete">删除</button>
+      </div>
+      <p class="note" id="mp-note"></p>
+      <!-- 「启用」是这一栏此前唯一缺的动作。能配十套方案但不能切换，等于只能配一套 ——
+           在它之前 mp-note 那一行写的是「保存后不会自动切换生效」，而切换只能手改文件。
+           它同时把这套方案的 ASR/TTS 推进 config/voice.toml：运行时读的是那个文件，
+           只改 active 的话语音那两条路一个字都不变。 -->
+      <div class="line">
+        <button id="mp-activate" class="primary" data-od-id="models-activate">启用这一套</button>
+        <span class="note" style="margin:0" id="mp-activate-note"></span>
+      </div>
+      <p class="warn" id="mp-diverged" role="status" hidden></p>
+      <p class="err" id="mp-activate-error" role="alert" hidden></p>
+    </div>
+
+    <div id="mp-kinds" class="stack"></div>
+
+    <div class="panel glass">
+      <h3>落盘</h3>
+      <div class="line">
+        <button id="mp-save" class="primary" data-od-id="models-save">保存方案</button>
+        <span class="note" style="margin:0" id="mp-save-note"></span>
+      </div>
+      <p class="note">
+        预设端点抄自各家公开文档与参考项目，<b>本项目没有复验过</b>。判据是「探一下」那颗按钮：
+        它只打一次 <code>GET {base}/models</code>，<code>401</code>/<code>403</code> 是好结果
+        （主机在、路径对、只是密钥不对），<code>404</code> 说明路径拼错，超时说明这条路不通。
+        这是本页唯一会出网的动作，而且由守护进程发出、不是从浏览器发出。
+      </p>
+      <p class="note">配置文件里永不写密钥，只写环境变量名（<code>key_env</code>），值从环境变量读。</p>
+    </div>
+
+    <div class="panel glass">
+      <h3>合成音色（云端 TTS）</h3>
+      <p class="note">
+        本机合成（<code>sherpa</code>）读 <code>models/</code> 下的 VITS 模型，没有音色可选。
+        换成 <code>dashscope</code> 之后音色才有意义 —— 下面这两栏写进
+        <code>config/voice.toml</code> 的 <code>[tts]</code>，<b>改完要重启</b>。
+      </p>
+      <div class="line" style="margin-top:11px">
+        <label class="note" for="tv-provider" style="align-self:center">provider</label>
+        <select id="tv-provider" data-od-id="tts-provider">
+          <option value="sherpa">sherpa（本机 VITS，不出网）</option>
+          <option value="dashscope">dashscope（阿里云百炼 CosyVoice）</option>
+        </select>
+      </div>
+      <div class="line" style="margin-top:11px">
+        <label class="note" for="tv-model" style="align-self:center">model</label>
+        <input id="tv-model" list="tv-models" placeholder="cosyvoice-v2" data-od-id="tts-model">
+        <datalist id="tv-models"></datalist>
+        <label class="note" for="tv-voice" style="align-self:center">voice</label>
+        <input id="tv-voice" list="tv-voices" placeholder="longyuan" data-od-id="tts-voice">
+        <datalist id="tv-voices"></datalist>
+      </div>
+      <div class="line" style="margin-top:11px">
+        <button id="tv-try" data-od-id="tts-try">试一句</button>
+        <button id="tv-save" class="primary" data-od-id="tts-save">保存</button>
+        <span class="note" style="margin:0" id="tv-note"></span>
+      </div>
+      <div class="rows" id="tv-rows" style="margin-top:var(--space-4)"></div>
+      <p class="note" id="tv-source"></p>
+      <p class="note">
+        <b>音色表不是实时拉的。</b>百炼没有列举系统预置音色的接口（有列表接口的是「声音复刻」，
+        只列你自己复刻出来的）。所以上面那两栏是<b>可输入的建议</b>而不是封闭下拉：表里没有的
+        音色照样能填，由「试一句」去判 —— 它真发一次合成请求，通不通看得见。
+      </p>
+      <p class="note" id="tv-key"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================= 2 唤醒词 -->
+<section class="view" id="v-keywords" data-od-id="view-keywords" hidden>
+  <h2 data-od-id="keywords-title">唤醒词</h2>
+  <p class="sub">说这些词才会唤醒。模型的建模单元是汉语拼音的声母／韵母，所以只收汉字。</p>
+
+  <div class="stack">
+    <div class="panel glass">
+      <h3>现在能喊什么</h3>
+      <div class="grid3" id="kw-list" style="margin-top:var(--space-4)"></div>
+      <p class="note" id="kw-source"></p>
+    </div>
+
+    <div class="panel glass">
+      <h3>改成自己的</h3>
+      <div class="line">
+        <input id="kw-input" placeholder="用空格、逗号或换行分隔，例如：小沃小沃 你好沃克" aria-label="自定义唤醒词" autocomplete="off" data-od-id="keywords-input">
+      </div>
+      <div class="line" style="margin-top:11px">
+        <button id="kw-save" class="primary" data-od-id="keywords-save">保存</button>
+        <button id="kw-reset" data-od-id="keywords-reset">恢复出厂</button>
+      </div>
+      <p class="note" id="kw-note"></p>
+      <p class="bad" id="kw-error" role="status" hidden></p>
+    </div>
+
+    <!-- 唤醒命中检测。三层分开报,因为「喊了没反应」有三个完全不同的根因,而它们在
+         使用者眼里长得一模一样:麦克风没进声音 / 唤醒词没命中 / 声纹把它拒了。 -->
+    <div class="panel glass">
+      <h3>命中检测</h3>
+      <p class="note">
+        对着麦克风喊唤醒词，这里逐层告诉你走到哪一步断的。<b>三层的症状一样，根因完全不同</b> ——
+        麦克风没进声音、唤醒词没命中、声纹把它拒了，页面上都是「没反应」。
+        需要麦克风在跑（用 <code>run_console.py --voice</code> 启动）。
+      </p>
+      <div class="line" style="margin-top:11px">
+        <label for="wk-follow" class="note" style="align-self:center">
+          <input type="checkbox" id="wk-follow" checked> 自动跟随（每秒一次）
+        </label>
+        <button id="wk-refresh" data-od-id="keywords-wake-refresh">刷新</button>
+      </div>
+      <div class="grid3" id="wk-funnel" style="margin-top:var(--space-4)"></div>
+      <p class="note" id="wk-input"></p>
+      <div class="rows" id="wk-rows" style="margin-top:var(--space-3)"></div>
+    </div>
+
+    <div class="panel glass">
+      <h3>其余语音参数（<code>config/voice.toml</code>）</h3>
+      <p class="note" style="margin-top:0">
+        这一栏渲染的是 <code>voice.toml</code> 里<b>没有专用控件</b>的那些可改键 ——
+        应答音那几句话、连续对话开关、解码束宽、自适应增益都在这里。
+        它按 <code>/api/config</code> 返回的内容自己长出来，所以以后加了新键**不会漏在页面外**。
+        专用控件另有其页：合成在「模型配置」，输入设备在「运行态」，球在「唤醒球」。
+      </p>
+      <div class="rows" id="vx-keys"></div>
+      <div class="line" style="margin-top:var(--space-4)">
+        <button id="vx-save" class="primary" data-od-id="voice-extra-save">保存</button>
+        <span class="note" style="margin:0">改完要重启才生效。</span>
+      </div>
+      <p class="bad" id="vx-error" role="status" hidden></p>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================= 3 声纹 -->
+<section class="view" id="v-speaker" data-od-id="view-speaker" hidden>
+  <h2 data-od-id="speaker-title">声纹</h2>
+  <p class="sub">六句各不相同的长句，从 <b>Vox 自己那支麦克风</b>录 —— 和唤醒时校验的是同一条信道。
+    音频只在内存里，永不落盘；写下去的只有向量。</p>
+
+  <div class="stack">
+    <div class="panel glass">
+      <h3>注册</h3>
+      <div class="line">
+        <input id="sp-name" placeholder="你的名字" aria-label="你的名字" autocomplete="off" style="max-width:13em" data-od-id="speaker-name">
+        <button id="sp-mic" hidden data-od-id="speaker-mic">开麦克风</button>
+        <button id="sp-record" data-od-id="speaker-record">录一段</button>
+        <button id="sp-clear" data-od-id="speaker-clear">清空</button>
+        <button id="sp-enroll" class="primary" disabled data-od-id="speaker-enroll">注册</button>
+      </div>
+      <div class="clips" id="sp-clips" style="margin-top:var(--space-4)"></div>
+      <p class="note" id="sp-count"></p>
+      <p class="bad" id="sp-error" role="status" hidden></p>
+      <!-- 输入音量：**这一格是 Windows 那一侧的设置**，不是软件增益。同一时刻实测
+           「耳机」0.01、「麦克风阵列」0.82 —— 唤不醒和一说就削波是同一个数字的两端，
+           而它此前在界面上完全不存在。「校准」是闭环的：量说话峰值 → 改音量 → 复测。 -->
+      <div class="line" style="margin-top:var(--space-4)">
+        <button id="sp-cal" data-od-id="speaker-calibrate">校准输入音量</button>
+        <span class="note" id="sp-level">读取输入设备…</span>
+      </div>
+      <p class="note" id="sp-cal-out" style="white-space:pre-line" hidden></p>
+      <!-- 输入设备清单。**后端 /api/devices 从一开始就在，页面从来没调过它** —— 于是
+           「机器上有哪几只麦克风、在用的是哪一只、它的系统音量多少」在界面上不存在，
+           而换设备只能去「其余语音参数」里手打一个名字片段。打错了不报错（栈会退回系统
+           默认），那正是使用者报「用笔记本内置麦克风时读不到设备」的形状。 -->
+      <div class="line" style="margin-top:var(--space-4)">
+        <button id="sp-dev-refresh" data-od-id="speaker-devices-refresh">刷新输入设备</button>
+        <span class="note" id="sp-dev-note">点一下列出这台机器上的麦克风</span>
+      </div>
+      <div class="rows" id="sp-devices"></div>
+      <p class="err" id="sp-dev-error" role="alert" hidden></p>
+      <!-- 为什么不再用浏览器录：注册和校验必须同信道，否则相似度比的是两条录音链路的
+           差别而不是两个人的差别。浏览器 getUserMedia 拿的是**浏览器认为的默认设备**
+           （不是 [input] device），还带它自己的 AGC / 降噪 / 回声消除和采样率。 -->
+      <p class="note">
+        录的是 Vox 采集缓冲里的音频，所以这里的读数能预测唤醒时的读数。
+        判断「有没有人在说话」用的是 VAD（silero），不是音量线 —— 峰值和 RMS 分不清
+        「轻的语音」和「放大后的底噪」，而那正是一段静音曾经拿到 0.979 的原因。
+      </p>
+    </div>
+
+    <div class="panel glass">
+      <h3>已注册</h3>
+      <div class="rows" id="sp-list"></div>
+      <!-- 一行「这道门当前是什么」+ 一个折叠起来的原始读数。此前这里是 describe() 的
+           整份 JSON 摊在一行里，于是最常问的那个问题（换型了没有？）反而看不出来 ——
+           2026-08-30 使用者的原话是「我无法快速的识别是否真的换了新的声纹模型」。 -->
+      <p class="note" id="sp-config"></p>
+      <p class="bad" id="sp-stale" hidden></p>
+      <!-- 「试一句」= 脚本里那段闭环校验，搬到页面上。它走的是和唤醒**同一条**路
+           （同一个采集缓冲、同一个门），所以这个分数能预测唤醒时的分数 —— 不必喊一声
+           唤醒词再去翻日志。 -->
+      <div class="line" style="margin-top:var(--space-3)">
+        <button id="sp-try" data-od-id="speaker-try">试一句</button>
+        <span class="note" id="sp-try-out">对着它说「你好小沃」再停下 —— 取的是尾部那一段，和唤醒时那个窗口同一个形状。</span>
+      </div>
+      <details id="sp-raw" hidden>
+        <summary class="note">原始读数</summary>
+        <p class="note" id="sp-raw-body" style="word-break:break-all;font-family:var(--font-mono)"></p>
+      </details>
+      <p class="note">
+        模型缺失、无人注册、校验抛异常，一律落在<b>拒绝</b>一侧 —— 这道门是 fail-closed 的，
+        拒绝也是它在工作。质量门（时长 / rms / 削波）挡的是不可用的录音，
+        它<b>不是</b>反录音回放（ADR 002 的已知局限）。
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================== 3 本机 Agent -->
+<section class="view" id="v-agents" data-od-id="view-agents" hidden>
+  <h2 data-od-id="agents-title">本机 Agent</h2>
+  <p class="sub">四种接法：<code>cli</code> <code>evox</code> <code>acp</code> <code>http</code>。可用性由 <code>check()</code> 报告。</p>
+
+  <div class="stack">
+    <div class="panel glass">
+      <h3>清单与试跑</h3>
+      <div class="line">
+        <input id="ag-text" placeholder="给 agent 说一句（会真的跑一轮进程）" aria-label="给 agent 说一句，会真的跑一轮进程" autocomplete="off" data-od-id="agents-test-text">
+      </div>
+      <div class="rows" id="ag-list" style="margin-top:var(--space-4)"></div>
+      <div id="ag-out" class="out" role="status"></div>
+      <p class="note">
+        命令不在 PATH 的条目<b>保留而不是隐藏</b>：丢掉它会让「少一个 agent」和「配错一个 agent」
+        变成同一种表现。<code>evox</code> 是一次阻塞 POST，不流式，界面不给它套增量外壳。
+      </p>
+    </div>
+
+    <div class="panel glass">
+      <h3>条目设置</h3>
+      <div id="ag-config"></div>
+      <p class="bad" id="ag-error" role="status" hidden></p>
+      <p class="note">
+        <code>command</code> / <code>args</code> / <code>url</code> / <code>env_passthrough</code> /
+        <code>name</code> / <code>kind</code> 显示但不可从网页改：前三个决定「跑哪个可执行文件、数据发到哪」，
+        从一个网页改它们等于远程代码执行。<code>agents.toml</code> 在 schema 层面就没有放密钥的键，
+        要给 agent 传 key 只能在 <code>env_passthrough</code> 里写变量名。
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================== 4 本人档案 -->
+<section class="view" id="v-profile" data-od-id="view-profile" hidden>
+  <h2 data-od-id="profile-title">本人档案</h2>
+  <p class="sub"><code>memory/facts/*.md</code> 就是事实本身，SQLite 只是它的索引（ADR 004）。</p>
+
+  <div class="stack">
+    <div class="panel glass">
+      <h3>文件</h3>
+      <div class="rows" id="pf-list"></div>
+      <div class="line" style="margin-top:var(--space-4)">
+        <input id="pf-name" placeholder="文件名，如 about-me.md" aria-label="档案文件名" autocomplete="off" style="max-width:18em" data-od-id="profile-name">
+        <button id="pf-open" data-od-id="profile-open">新建 / 打开</button>
+        <button id="pf-draft" data-od-id="profile-draft">插入常用字段草案</button>
+        <button id="pf-sync" data-od-id="profile-sync">折回索引</button>
+        <button id="pf-del" class="danger" data-od-id="profile-delete">删除</button>
+      </div>
+      <textarea id="pf-text" style="margin-top:var(--space-4)" aria-label="档案正文（Markdown）" placeholder="# 语言偏好&#10;&#10;和我说中文。" data-od-id="profile-text"></textarea>
+      <div class="line" style="margin-top:var(--space-4)">
+        <button id="pf-save" class="primary" data-od-id="profile-save">保存</button>
+      </div>
+      <p class="bad" id="pf-error" role="status" hidden></p>
+      <p class="note">
+        「常用字段草案」（姓名 / 称呼 / 时区 / 语言偏好 / 常用路径）是我拟的，<b>字段清单还没跟你确认</b>，
+        所以它只是往编辑器里插一段 Markdown，不是一个固定表单 —— 文件仍然是事实本身。
+      </p>
+      <p class="note">
+        写在这里的事实会被召回并拼进 agent 请求。凭据形状的文本<b>整条拒绝而不是打码</b>
+        （多行私钥正是打码会留下正文的例子）。记忆事件永不带文本，只带 id / 计数 / 标签。
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ==================================================== 5 技能与 MCP -->
+<section class="view" id="v-skills" data-od-id="view-skills" hidden>
+  <h2 data-od-id="skills-title">技能与 MCP</h2>
+  <p class="sub">技能 = 平台自有工具 + MCP 远端工具。两者走同一道政策门（ADR 005），所以放在一页。</p>
+
+  <div class="stack">
+    <div class="panel glass">
+      <h3>已注册的技能</h3>
+      <div class="rows" id="sk-tools"></div>
+      <p class="note">
+        仓库里没有独立的 skill 注册表（<code>config/</code> 下只有 voice / tools / speaker / models /
+        memory / mcp / agents 七个文件），所以这一列直接来自运行时 <code>describe()</code> 报的工具名。
+      </p>
+    </div>
+
+    <div class="panel glass">
+      <h3>MCP</h3>
+      <div id="mcp-host"></div>
+      <p class="bad" id="mcp-error" role="status" hidden></p>
+      <div class="line" style="margin-top:var(--space-4)">
+        <button id="mcp-save" class="primary" data-od-id="skills-save">保存 mcp.toml</button>
+      </div>
+      <p class="note">
+        <b>没有单独的「测连接」端点</b>，所以连接证据用的是运行时报的 <code>alive</code> 加工具数 ——
+        要一颗真正的探测按钮得在 <code>routes.py</code> 里加 <code>mcp_probe</code>。
+      </p>
+      <p class="note">
+        <code>require_confirmation</code> / <code>allow</code> / <code>auto_allow</code> /
+        <code>command</code> 不可从网页改：第一个是远端工具执行前的最后一道闸，
+        中间两个改了只会<b>放宽</b>（空 <code>allow</code> 等于放开该 server 的全部工具），最后一个决定跑什么。
+        写坏的 MCP 配置不许落盘，服务端先校验再写。
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ====================================================== 6 唤醒球 -->
+<section class="view" id="v-orb" data-od-id="view-orb" hidden>
+  <h2 data-od-id="orb-title">唤醒球</h2>
+  <p class="sub">桌面上那颗球的开关、尺寸与文字。</p>
+
+  <div class="stack">
+    <div class="panel glass">
+      <h3>开关（这两项真能存）</h3>
+      <div id="orb-keys"></div>
+      <div class="line" style="margin-top:var(--space-4)">
+        <button id="orb-save" class="primary" data-od-id="orb-save">保存 voice.toml</button>
+        <span class="note" style="margin:0">改完要重启才生效。</span>
+      </div>
+      <p class="bad" id="orb-error" role="status" hidden></p>
+    </div>
+
+    <div class="panel glass">
+      <h3>渲染层、尺寸与文字（写进 <code>config/voice.toml</code> 的 <code>[orb]</code>）</h3>
+      <div class="grid2">
+        <div>
+          <label for="orb-renderer">渲染层</label>
+          <select id="orb-renderer" data-od-id="orb-renderer">
+            <option value="seq" selected>AE 雪碧图（现行，第十一代）</option>
+            <option value="bot">bloub（第十二代，有脸的实体球）</option>
+          </select>
+          <p class="note">
+            两层<b>并存</b>，不是替换 —— 选 bloub 之后 <code>desktop/src/sequence.ts</code>、
+            <code>core.ts</code>、<code>public/orb/</code> 一个字节都没动，改回来只要把这里选回去。
+            bloub 那一层<b>零资产</b>（纯矢量，2837 行纯计算），所以它不会「加载失败」；
+            现行那层依赖 <code>public/orb/*.png</code> 约 4 MB。
+            两层各自完整，切换<b>要重启球</b>（值在启动时读一次）。
+            对比两层长什么样：<code>desktop/demo.html</code> 右上角那两个按钮，同一页上切。
+          </p>
+          <label for="orb-size" style="margin-top:var(--space-5)">大小（96–420，默认 140）</label>
+          <div class="line">
+            <input id="orb-size" type="range" min="96" max="420" step="4" value="140" data-od-id="orb-size">
+            <span class="mono" id="orb-size-out" style="min-width:9em;color:var(--fg-2)"></span>
+          </div>
+          <label for="orb-text" style="margin-top:var(--space-5)">显示文字</label>
+          <select id="orb-text" data-od-id="orb-text">
+            <option value="0" selected>关（默认）—— 平时不出文字</option>
+            <option value="1">开 —— 每一轮都显示识别与回复</option>
+          </select>
+          <p class="note">
+            默认关是定过的：平时不出文字，<b>只在报错 / 拒绝时才有</b>
+            （<code>task.failed</code> / <code>tool.refused</code> 走 <code>reportProblem()</code>，
+            不受这个总开关影响）。
+          </p>
+        </div>
+        <div>
+          <div id="orb-stage">
+            <div id="orb-box"><div id="orb-ball"></div></div>
+          </div>
+          <p class="note" id="orb-measure"></p>
+        </div>
+      </div>
+      <div class="block">
+        <h3>保存</h3>
+        <p class="note" style="margin-top:0">
+          三项都写进 <code>config/voice.toml</code> 的 <code>[orb]</code>，然后点刊头那颗
+          <b>重启</b> —— 球的这三个值是<b>启动时读一次</b>的（Rust 侧把它们拼进 URL query），
+          所以没有热切换这回事。
+        </p>
+        <div class="line">
+          <button id="orb-look-save" class="primary" data-od-id="orb-look-save">保存这三项</button>
+          <span class="note" style="margin:0" id="orb-look-note" role="status"></span>
+        </div>
+      </div>
+      <div class="block">
+        <h3>手动覆盖（调参用，不必须）</h3>
+        <p class="note" style="margin-top:0">
+          环境变量<b>仍然赢</b>过配置文件 —— 调一个值试一下、不想留在文件里的时候走这条路。
+          不设就以上面那三项为准。
+        </p>
+        <input id="orb-env" readonly class="mono" aria-label="启动环境变量行" data-od-id="orb-env">
+        <div class="line" style="margin-top:var(--space-3)">
+          <button id="orb-copy" data-od-id="orb-copy">复制</button>
+          <span class="note" style="margin:0" id="orb-copy-note" role="status"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================= 9 微信 -->
+<section class="view" id="v-weixin" data-od-id="view-weixin" hidden>
+  <h2 data-od-id="weixin-title">微信</h2>
+  <p class="sub">走腾讯 iLink Bot API。<b>扫码绑定</b>，不用填 token —— 那个 token 本来就是扫码换来的。
+    语音消息进来先用<b>本机识别器</b>转写（解不开的格式才退回微信自带的转写并标注来源），
+    回复带语音也带文字。<b>默认关</b>：打开它意味着出网。</p>
+
+  <div class="stack">
+    <div class="panel glass">
+      <h3>绑定</h3>
+      <p class="note" id="wx-state" style="margin-top:0">读取…</p>
+      <div class="line">
+        <button id="wx-login" class="primary" data-od-id="weixin-login">扫码登录</button>
+        <button id="wx-switch" data-od-id="weixin-switch">打开通道</button>
+        <button id="wx-unbind" class="danger" data-od-id="weixin-unbind">解绑</button>
+        <span class="note" id="wx-login-state" style="margin:0"></span>
+      </div>
+      <p class="note" style="margin:var(--space-3) 0 0">
+        扫完码通道<b>自己就开了</b>，不用改配置也不用重启 —— 用自己的微信扫一个码，
+        比编辑一个配置文件明确得多。「打开通道 / 关闭通道」这颗是给之后随时开关用的，
+        它同时写进 <code>config/channels.toml</code>，所以下次启动还记得。
+      </p>
+      <div id="wx-qr" hidden style="margin-top:var(--space-4);display:flex;gap:var(--space-4);align-items:flex-start;flex-wrap:wrap">
+        <div id="wx-qr-img" style="background:#fff;padding:10px;border-radius:12px;line-height:0"></div>
+        <p class="note" style="margin:0;max-width:26em">
+          用手机微信扫这张码，然后在微信里点确认。二维码会过期，过期了这里自动换一张（最多三次）。
+          扫完之后凭据存在 <code>.vox/channels/weixin.json</code>（已 gitignore），
+          <b>页面上永不显示 token</b>。
+        </p>
+      </div>
+      <p class="bad" id="wx-error" role="status" hidden></p>
+    </div>
+
+    <div class="panel glass">
+      <h3>实时收发</h3>
+      <p class="note" style="margin-top:0">
+        通道在跑的时候，进来的每一条和发出去的每一条都在这里。<b>环形缓冲、不落盘</b> ——
+        要长期留的那份由记忆层决定。左边选一个会话，下面那一行是<b>我自己说</b>（不走 agent，
+        所以它不会替你想一个回答）。
+      </p>
+      <div class="line">
+        <label class="check"><input type="checkbox" id="wx-follow" checked> 自动跟随（每 2 秒拉一次）</label>
+        <select id="wx-chat" aria-label="会话" style="min-width:14em"></select>
+        <button id="wx-refresh" data-od-id="weixin-refresh">刷新</button>
+      </div>
+      <div class="rows" id="wx-log" style="margin-top:var(--space-4);max-height:26em;overflow:auto"></div>
+      <div class="line" style="margin-top:var(--space-4)">
+        <input id="wx-text" placeholder="发给这个会话…" aria-label="要发的内容" autocomplete="off" style="flex:1;min-width:16em">
+        <button id="wx-send" class="primary" data-od-id="weixin-send">发送</button>
+      </div>
+      <p class="bad" id="wx-send-error" role="status" hidden></p>
+    </div>
+  </div>
+</section>
+
+<!-- ==================================================== 附属 安全边界 -->
+<section class="view" id="v-limits" data-od-id="view-limits" hidden>
+  <h2 data-od-id="limits-title">安全边界</h2>
+  <p class="sub">
+    「说了一句话」和「本机跑了一条命令」之间的全部距离。这一页<b>刻意只读</b> ——
+    关掉这些该是一次打开编辑器的动作。
+  </p>
+
+  <div class="stack">
+    <div class="panel glass">
+      <h3>本页能读到的（<code>config/tools.toml</code>，来自 <code>/api/config</code>）</h3>
+      <div id="lm-keys"></div>
+      <div class="line" style="margin-top:var(--space-4)">
+        <button id="lm-save" class="primary" data-od-id="limits-save">保存这几个键</button>
+        <span class="note" style="margin:0">只有出网检索那几项是可写的。</span>
+      </div>
+      <p class="bad" id="lm-error" role="status" hidden></p>
+    </div>
+
+    <div class="panel glass">
+      <h3>本页读不到的（下面是仓库<b>出厂值</b>，不是你机器上的当前值）</h3>
+      <p class="note" style="margin-top:0">
+        <code>/api/config</code> 只返回白名单里的键（<code>routes.py</code> 的 <code>EDITABLE</code>），
+        <code>shell.*</code> 与 <code>fs</code> 的白名单<b>根本不在返回里</b>，所以这一段是我从
+        <code>config/tools.toml</code> 的出厂内容抄来的静态呈现。要看真值请打开那个文件。
+      </p>
+      <div class="rows" id="lm-factory"></div>
+      <p class="note">
+        <code>shell.run</code> 的白名单<b>只能收窄不能放宽</b>；白名单外是<b>拒绝而非询问</b>
+        （询问会训练出无脑点确认的习惯）。13 条危险模式写在 <code>policy.py</code> 的代码里、
+        不在配置里，界面上也不做成可编辑。确认卡必须显示命令原文，不截断、不省略号。
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================== 附属 调试 -->
+<section class="view" id="v-debug" data-od-id="view-debug" hidden>
+  <h2 data-od-id="debug-title">调试</h2>
+  <p class="sub">
+    <b>不在你列的六个模块里。</b>留着的理由只有一个：它是唯一不用麦克风就能验证整条链路的入口，
+    走的是和麦克风完全同一条派发路径。要删说一声。
+  </p>
+  <div class="stack">
+    <div class="panel glass">
+      <h3>说一句</h3>
+      <div class="line">
+        <input id="dbg-text" placeholder="读一下 README" aria-label="要派发的一句话" autocomplete="off" data-od-id="debug-text">
+        <button id="dbg-go" class="primary" data-od-id="debug-send">发送</button>
+      </div>
+      <div id="dbg-out" class="out" role="status"></div>
+      <p class="note">
+        <code>shell.run</code> 会回 <code>needs_confirmation</code> —— 确认面只有唤醒球一个，
+        这里不提供确认按钮。
+      </p>
+    </div>
+
+    <div class="panel glass">
+      <h3>运行日志</h3>
+      <p class="note">
+        每一轮的意图判定、工具参数、agent 选择和失败原因。<b>事件流按契约不带参数</b>（它会扇出到
+        唤醒球和每一个消费者），所以「<code>fs.read</code> 收到的 path 到底是什么」只在这里查得到。
+        环形缓冲、不落盘。
+      </p>
+      <div class="line" style="margin-top:11px">
+        <label for="lg-follow" class="note" style="align-self:center">
+          <input type="checkbox" id="lg-follow" checked> 自动跟随（每 2 秒拉一次）
+        </label>
+        <label for="lg-level" class="note" style="align-self:center">
+          <select id="lg-level" aria-label="只看哪一级">
+            <option value="all">全部</option>
+            <option value="warn">警告及以上</option>
+            <option value="error">只看错误</option>
+          </select>
+        </label>
+        <label for="lg-source" class="note" style="align-self:center">
+          <select id="lg-source" aria-label="只看哪个来源">
+            <option value="">所有来源</option>
+          </select>
+        </label>
+        <input id="lg-q" placeholder="搜正文或字段…" aria-label="搜索日志"
+               autocomplete="off" style="max-width:14em">
+        <button id="lg-refresh" data-od-id="debug-log-refresh">刷新</button>
+        <button id="lg-clear" data-od-id="debug-log-clear">清空</button>
+      </div>
+      <div class="rows" id="lg-rows" style="margin-top:var(--space-4)"></div>
+      <p class="note" id="lg-note"></p>
+    </div>
+  </div>
+</section>
+
+</main>
+</div>
+
+<div class="overlay" id="overlay" hidden role="dialog" aria-modal="true" aria-labelledby="ov-title">
+  <div class="card">
+    <h4 id="ov-title"></h4>
+    <div class="body" id="ov-body"></div>
+    <div id="ov-field" hidden></div>
+    <div class="foot" id="ov-foot"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+/* token 来自 URL 的 ?t=。不写 localStorage：一个刷新就能重新拿到的东西没必要在磁盘上多留副本。 */
+const TOKEN = new URLSearchParams(location.search).get("t") || "";
+const $ = (id) => document.getElementById(id);
+
+function el(tag, props, text) {
+  const node = document.createElement(tag);
+  if (props) for (const [k, v] of Object.entries(props)) {
+    if (k === "class") node.className = v;
+    else if (k === "od") node.dataset.odId = v;
+    else node.setAttribute(k, v);
+  }
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+async function api(path, { method = "GET", body = null } = {}) {
+  const headers = {};
+  if (TOKEN) headers.Authorization = "Bearer " + TOKEN;
+  if (body) headers["Content-Type"] = "application/json";
+  let response;
+  try {
+    response = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : null });
+  } catch (cause) {
+    /* fetch 在网络层失败时抛的是 TypeError("Failed to fetch") —— 一句英文，而且没说是哪一层断了。
+       这一页会遇到它的原因只有一个：守护进程没在听。原文留在括号里当诊断，不丢。 */
+    const err = new Error("连不上守护进程（" + ((cause && cause.message) || "网络错误") + "）");
+    err.status = 0;
+    throw err;
+  }
+  let payload = null;
+  try { payload = await response.json(); } catch { payload = null; }
+  if (!response.ok) {
+    const err = new Error((payload && payload.error) || ("HTTP " + response.status));
+    err.status = response.status;
+    throw err;
+  }
+  return payload;
+}
+
+/* 同值就不写。role="status" 的节点每次 textContent 赋值都是一次 DOM 变更，
+   读屏器会照着念一遍 —— 而这一页每 2.3 秒轮询一次，写同一句话等于每 2.3 秒播报一次。 */
+function setText(node, text) {
+  if (node && node.textContent !== text) node.textContent = text;
+}
+
+/* klass 省略时回到 "bad"：这些节点全是报错位，上一次成功留下的 .good 不能染红字。 */
+function show(node, message, klass) {
+  if (!node) return;
+  node.textContent = message || "";
+  node.hidden = !message;
+  node.className = klass || "bad";
+}
+
+/* 侧栏那盏灯的文字。判词与技术原因分成两截，好让配色只染判词。
+   去重和 setText 同理：#link 是 role="status"，同一句话重播一遍就是噪音。 */
+function linkStatus(down, verdict, why) {
+  const host = $("link");
+  const next = verdict + (why ? " · " + why : "");
+  if (host.dataset.said === next) return;
+  host.dataset.said = next;
+  host.className = down ? "down" : "";
+  host.textContent = "";
+  host.appendChild(el("b", null, verdict));
+  if (why) host.appendChild(el("span", null, " · " + why));
+}
+
+function rowOf(klass, name, detail, actions, od) {
+  const row = el("div", { class: "row " + (klass || ""), od: od || null });
+  row.appendChild(el("span", { class: "dot" }));
+  row.appendChild(el("span", { class: "name" }, name));
+  row.appendChild(el("span", { class: "detail" }, detail == null ? "" : String(detail)));
+  const act = el("span", { class: "act" });
+  for (const a of actions || []) act.appendChild(a);
+  row.appendChild(act);
+  return row;
+}
+
+/* 三态：飞行中 / 失败带重试 / 有内容。
+
+   这一页开局并行打七八个端点，其中好几个后端还没实现。少了这两个助手，「正在等」和
+   「已经失败」在屏幕上是同一个样子 —— 一根 1px 的顶边和一片空白，读起来都像「本来就没有」。
+   失败态一定带一颗重试按钮：除了状态轮询，这一页原先没有任何重新发起请求的路径，
+   刷新整页是唯一出路，而那会连带丢掉编辑器里没保存的正文。 */
+function busy(host, text) {
+  host.textContent = "";
+  host.appendChild(el("div", { class: "state busy" }, text || "读取中…"));
+}
+
+function failed(host, message, retry) {
+  host.textContent = "";
+  const state = el("div", { class: "state fail" });
+  state.appendChild(el("b", null, "读不到 ·"));
+  state.appendChild(el("span", { class: "why" }, message || "未知错误"));
+  if (retry) {
+    const again = el("button", null, "重试");
+    again.onclick = () => retry();
+    state.appendChild(again);
+  }
+  host.appendChild(state);
+}
+
+/* 浮层的焦点：打开时记住来处，关闭时还回去。不还的话焦点会掉回 <body>，
+   下一次 Tab 从整页头部重新开始 —— 对键盘用户等于位置丢了。 */
+let ovReturn = null;
+
+function closeOverlay() {
+  if ($("overlay").hidden) return;
+  $("overlay").hidden = true;
+  const back = ovReturn;
+  ovReturn = null;
+  if (back && back.isConnected) back.focus();
+}
+
+/* 浮层里可聚焦的落点，按 DOM 顺序：正文（只在真的溢出时才收进 Tab 序）→ 输入框 → 页脚按钮。
+   正文那一条是必须的：探测结果和确认卡里的命令原文可能比 48vh 高，而一个只能用鼠标
+   滚的区域，对键盘用户等于被截断了 —— 这一页的硬约束偏偏是命令原文不许截断。
+   溢出要在可见之后才量得到，所以判定放在 Tab 按下的那一刻，不在 overlay() 里。 */
+function overlayStops() {
+  const body = $("ov-body");
+  const stops = [];
+  if (body.scrollHeight > body.clientHeight + 1) { body.tabIndex = 0; stops.push(body); }
+  else body.removeAttribute("tabindex");
+  stops.push(...$("ov-field").querySelectorAll("input"));
+  stops.push(...$("ov-foot").querySelectorAll("button"));
+  return stops;
+}
+
+/* field = { label, value, placeholder } 时浮层里长出一个输入框，run 收到修剪过的字符串。
+   页面自己有浮层组件，却还在用原生 prompt() 取名字 —— 原生弹窗在嵌入式预览里会被
+   直接掐掉并返回 null，按钮看起来就是坏的；而且它绕开了这一页的焦点归还与 Escape。 */
+function overlay(title, body, buttons, field) {
+  /* 只在浮层原本是关着的时候记来处。浮层里再开浮层（重名提示）时若覆盖，
+     来处会变成上一张浮层里那颗已经被移除的按钮，焦点就还不回去了。 */
+  if ($("overlay").hidden) ovReturn = document.activeElement;
+  $("ov-title").textContent = title;
+  $("ov-body").textContent = body || "";
+  const host = $("ov-field");
+  host.textContent = "";
+  let input = null;
+  if (field) {
+    input = el("input", { id: "ov-input", autocomplete: "off", spellcheck: "false" });
+    input.placeholder = field.placeholder || "";
+    input.value = field.value || "";
+    host.appendChild(el("label", { for: "ov-input" }, field.label));
+    host.appendChild(input);
+  }
+  host.hidden = !field;
+  const foot = $("ov-foot");
+  foot.textContent = "";
+  let primary = null;
+  for (const b of buttons || [{ label: "知道了", primary: true }]) {
+    const button = el("button", { class: b.primary ? "primary" : "" }, b.label);
+    button.onclick = () => {
+      const value = input ? input.value.trim() : undefined;
+      /* 空名字不关浮层：关掉了用户得重新点一次按钮，而他要改的只是这一个框。 */
+      if (input && b.primary && !value) { input.focus(); return; }
+      closeOverlay();
+      if (b.run) b.run(value);
+    };
+    if (b.primary) primary = button;
+    foot.appendChild(button);
+  }
+  $("overlay").hidden = false;
+  if (input) {
+    input.onkeydown = (e) => { if (e.key === "Enter" && primary) { e.preventDefault(); primary.click(); } };
+    input.focus();
+    input.select();
+  } else if (foot.firstChild) foot.firstChild.focus();
+}
+$("overlay").onclick = (e) => { if (e.target === $("overlay")) closeOverlay(); };
+document.addEventListener("keydown", (e) => {
+  /* aria-modal="true" 只是告诉读屏器「别读外面」，它不会真的拦住 Tab。
+     所以在这里手动把 Tab 圈起来。 */
+  if ($("overlay").hidden) return;
+  if (e.key === "Escape") { e.preventDefault(); closeOverlay(); return; }
+  if (e.key !== "Tab") return;
+  const stops = overlayStops();
+  if (!stops.length) return;
+  const first = stops[0];
+  const last = stops[stops.length - 1];
+  if (e.shiftKey && (document.activeElement === first || !stops.includes(document.activeElement))) {
+    e.preventDefault(); last.focus();
+  } else if (!e.shiftKey && (document.activeElement === last || !stops.includes(document.activeElement))) {
+    e.preventDefault(); first.focus();
+  }
+});
+/* =================================================================== 导航 */
+
+const VIEWS = ["overview", "chat", "models", "keywords", "speaker", "agents", "profile", "skills", "orb", "weixin", "limits", "debug"];
+const ITEM_VIEW = { wake: "keywords", asr: "models", tts: "models", speaker: "speaker" };
+
+let currentView = "overview";
+
+function setView(name) {
+  const view = VIEWS.includes(name) ? name : "overview";
+  currentView = view;
+  for (const item of VIEWS) $("v-" + item).hidden = item !== view;
+  for (const link of document.querySelectorAll(".rail a")) {
+    /* aria-current 的值是 token 而不是布尔。"page" 会被读成「当前页」；
+       "true" 只读成「当前项」，而 "false" 在这里等于什么都没说。 */
+    if (link.dataset.view === view) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+  /* 地址栏跟上，这样刷新和分享链接都落回同一个模块。用 replaceState 而不是改 location.hash：
+     后者会往历史里堆一条并把页面滚到锚点上。保留 path 与 search —— ?t= 的 token 在里面。 */
+  try { history.replaceState(null, "", location.pathname + location.search + "#" + view); } catch {}
+  try { localStorage.setItem("vox.console.view", view); } catch {}
+  syncSky();
+  /* 进「唤醒词」那一栏立刻拉一次，不要等下一个轮询周期 —— 人切过来就是为了看那三个数。
+     函数在下面才定义，所以这里判一下存在性（脚本是自上而下执行的一整块）。 */
+  if (view === "keywords" && typeof pullWakeFunnel === "function") pullWakeFunnel();
+}
+for (const link of document.querySelectorAll(".rail a")) {
+  link.onclick = (e) => { e.preventDefault(); setView(link.dataset.view); };
+}
+
+/* ============================================================= 运行时状态 */
+
+/* 灯色只用调色板里的四支语义色，没有新造的颜色。 */
+const LAMP = {
+  idle: "var(--success)", listening: "var(--accent)", thinking: "var(--accent)",
+  speaking: "var(--success)", waiting: "var(--warn)", confirming: "var(--warn)",
+  error: "var(--danger)", failed: "var(--danger)",
+};
+/* 状态名给人看的一面。原始值不丢：它同时以 state=xxx 的形式留在等宽读数行里。 */
+const STATE_CN = {
+  idle: "空闲", listening: "在听", thinking: "在想", speaking: "在说",
+  waiting: "等确认", confirming: "等确认", error: "出错", failed: "失败",
+};
+/* 色带分档。表外的值落到 idle 档，但文字仍然写原始值。 */
+const RIBBON_CLASS = {
+  idle: "s-idle", listening: "s-listening", thinking: "s-thinking", speaking: "s-speaking",
+  waiting: "s-waiting", confirming: "s-waiting", error: "s-error", failed: "s-error",
+};
+
+let skillSig = null;
+/* renderState 至少成功跑过一次。没跑过就没有读数，而没读过的东西不会「过期」——
+   首次就连不上时标 data-stale 会让屏幕上写着「读数已过期 · —」，那是在描述一个不存在的读数。 */
+let everRead = false;
+let tileSig = null;
+let boardSig = null;
+let warnSig = null;
+
+function upFmt(seconds) {
+  const s = Math.max(0, Math.floor(Number(seconds) || 0));
+  if (s < 60) return [String(s), "秒"];
+  if (s < 3600) return [String(Math.floor(s / 60)), "分 " + (s % 60) + " 秒"];
+  const h = Math.floor(s / 3600);
+  return [String(h), "小时 " + Math.floor((s % 3600) / 60) + " 分"];
+}
+
+function tile(key, value, unit, od, ring) {
+  const node = el("div", { class: "tile", od: od });
+  if (ring != null) {
+    const r = el("div", { class: "ring", "aria-hidden": "true" });
+    r.style.setProperty("--p", Math.round(ring * 100) + "%");
+    node.appendChild(r);
+  }
+  const col = el("div", { style: "min-width:0" });
+  col.appendChild(el("div", { class: "k" }, key));
+  col.appendChild(el("div", { class: "v" }, value));
+  if (unit) col.appendChild(el("div", { class: "u" }, unit));
+  node.appendChild(col);
+  return node;
+}
+
+/* 四块读数。整排每 2.3 秒被轮询碰一次，签名没变就不重画 —— 白做工之外，
+   重建还会把键盘焦点从就绪板那些 <button> 上掀掉、掉回 <body>。 */
+function renderTiles(state) {
+  const runtime = state.runtime || {};
+  const ready = (state.readiness || []).filter((i) => i.ready).length;
+  const total = (state.readiness || []).length;
+  const tools = (runtime.tools || []).length;
+  const agents = (runtime.agents || []).length;
+  const up = upFmt(state.uptime_s);
+  const sig = [ready, total, state.turns, state.uptime_s, tools, agents].join("|");
+  if (sig === tileSig) return;
+  tileSig = sig;
+  const host = $("ov-tiles");
+  host.textContent = "";
+  host.appendChild(tile("就绪", total ? ready + " / " + total : "—",
+    total ? "项检查通过" : "运行时没报就绪项", "tile-readiness", total ? ready / total : 0));
+  host.appendChild(tile("轮次", state.turns == null ? "—" : String(state.turns), "本次启动以来", "tile-turns"));
+  host.appendChild(tile("运行", up[0], up[1], "tile-uptime"));
+  host.appendChild(tile("工具", String(tools), tools + " 个工具 · " + agents + " 个 agent", "tile-tools"));
+}
+
+/* 就绪板。每一格是一颗 <button>，点开看 detail / hint 原文；
+   颜色不是唯一载体 —— 判词同时写成文字。 */
+function renderBoard(readiness) {
+  const sig = JSON.stringify(readiness.map((i) => [i.item, !!i.ready, i.detail || "", i.hint || ""]));
+  if (sig === boardSig) return;
+  boardSig = sig;
+  const host = $("ov-board");
+  host.textContent = "";
+  if (!readiness.length) {
+    host.appendChild(el("p", { class: "note" }, "运行时没报就绪项。"));
+    return;
+  }
+  for (const item of readiness) {
+    const card = el("button", { class: "item " + (item.ready ? "ok" : "gap"), type: "button", od: "ready-" + item.item });
+    const top = el("div", { class: "top" });
+    top.appendChild(el("span", { class: "who" }, item.item));
+    top.appendChild(el("span", { class: "verdict" }, item.ready ? "就绪" : "未就绪"));
+    card.appendChild(top);
+    const why = item.ready ? (item.detail || "就绪") : (item.hint || item.detail || "还没就绪");
+    card.appendChild(el("span", { class: "why" }, why));
+    const bar = el("span", { class: "bar", "aria-hidden": "true" });
+    bar.appendChild(el("i"));
+    card.appendChild(bar);
+    card.setAttribute("aria-label", item.item + "：" + (item.ready ? "就绪" : "未就绪") + " —— " + why + "。点开看原文");
+    card.onclick = () => {
+      const lines = [
+        "item   = " + item.item,
+        "ready  = " + (item.ready ? "true" : "false"),
+        "detail = " + (item.detail || "（运行时没给）"),
+        "hint   = " + (item.hint || "（运行时没给）"),
+      ].join("\n");
+      const buttons = [{ label: "知道了" }];
+      const jump = ITEM_VIEW[item.item];
+      if (jump) buttons.unshift({ label: "去对应的那一页", run: () => setView(jump) });
+      overlay("就绪项 " + item.item, lines, buttons);
+    };
+    host.appendChild(card);
+  }
+}
+
+/* 色带只记本会话自己的轮询：后端没有历史状态端点，刷新一次就从零开始。
+   这件事写在面板的说明里，不靠用户猜。 */
+const RIBBON_MAX = 96;
+const ribbonLog = [];
+
+function ribbonClass(name) {
+  return name === "down" ? "s-down" : (RIBBON_CLASS[name] || "s-idle");
+}
+
+/* 96 个槽位一开始就摆满（空槽是最淡的那档）。不这么做的话前几次轮询会把
+   两三格拉成整条宽的大色块 —— 那看起来像一张画坏的图表，而不是「才记了两格」。 */
+function initRibbon() {
+  const host = $("ov-ribbon");
+  host.textContent = "";
+  for (let i = 0; i < RIBBON_MAX; i++) host.appendChild(el("i", { class: "s-empty" }));
+}
+
+function pushRibbon(name) {
+  ribbonLog.push(name);
+  if (ribbonLog.length > RIBBON_MAX) ribbonLog.shift();
+  const host = $("ov-ribbon");
+  const slots = host.children;
+  if (slots.length !== RIBBON_MAX) initRibbon();
+  if (ribbonLog.length < RIBBON_MAX) {
+    /* 没满：只写新到的那一格，其余槽位一个都不碰。 */
+    slots[ribbonLog.length - 1].className = ribbonClass(name);
+  } else {
+    /* 满了才整条重写一遍类名 —— 96 次赋值，2.3 秒一次，不值得为它做环形缓冲。 */
+    for (let i = 0; i < RIBBON_MAX; i++) slots[i].className = ribbonClass(ribbonLog[i]);
+  }
+  const span = Math.round(ribbonLog.length * 2.3);
+  host.setAttribute("aria-label", "本会话状态色带：已记 " + ribbonLog.length + " / " + RIBBON_MAX +
+    " 格、约 " + span + " 秒，最新一格是 " + (name === "down" ? "连不上" : name));
+}
+
+function renderLegend() {
+  const host = $("ov-legend");
+  const pairs = [
+    ["s-idle", "空闲"], ["s-listening", "在听"], ["s-thinking", "在想"],
+    ["s-speaking", "在说"], ["s-waiting", "等确认"], ["s-error", "出错"], ["s-down", "连不上"],
+  ];
+  for (const pair of pairs) {
+    const item = el("span");
+    const swatch = el("em", { class: pair[0], "aria-hidden": "true" });
+    item.appendChild(swatch);
+    item.appendChild(document.createTextNode(pair[1]));
+    host.appendChild(item);
+  }
+}
+
+function renderWarnings(warnings) {
+  const sig = JSON.stringify(warnings);
+  if (sig === warnSig) return;
+  warnSig = sig;
+  const host = $("ov-warn");
+  host.textContent = "";
+  if (!warnings.length) {
+    host.appendChild(el("div", { class: "state" }, "运行时没报告告警。"));
+    return;
+  }
+  for (const w of warnings) host.appendChild(rowOf("gap", "warning", w, [], null));
+}
+
+function renderState(state) {
+  everRead = true;
+  const runtime = state.runtime || {};
+  $("lamp").style.setProperty("--lamp", LAMP[state.state] || "var(--accent)");
+  /* 灯是纯色光斑，颜色是它唯一的载体 —— 读屏器和色觉障碍用户都拿不到。
+     title 只在 hover 时出现，所以状态名同时写进 aria-label。 */
+  $("lamp").title = "state=" + state.state;
+  $("lamp").setAttribute("aria-label", "运行时状态：" + state.state);
+  setText($("hero-state"), STATE_CN[state.state] || state.state);
+  setText($("hero-tag"), "state=" + state.state +
+    (state.pending_confirmation ? " · 有一个工具在等确认" : "") +
+    (runtime.speaker_verified ? " · 声纹已核" : " · 声纹未核"));
+  $("runline").removeAttribute("data-stale");
+  $("runline").textContent =
+    "state=" + state.state + " turns=" + state.turns +
+    " verified=" + (runtime.speaker_verified ? "yes" : "no") +
+    "(" + (runtime.gate_source || "?") + ")" +
+    " tools=" + (runtime.tools || []).length +
+    " agents=" + (runtime.agents || []).length +
+    " memory=" + (runtime.memory_attached ? "on" : "off") +
+    " up=" + state.uptime_s + "s" +
+    ((state.warnings || []).length ? "  ·  " + state.warnings.join(" · ") : "");
+
+  renderTiles(state);
+  renderBoard(state.readiness || []);
+  renderWarnings(state.warnings || []);
+  pushRibbon(state.state);
+  skyState(state.state, (state.warnings || []).length, !!state.pending_confirmation);
+
+  const pending = state.pending_confirmation;
+  $("pending").hidden = !pending;
+  if (pending) {
+    setText($("pending-text"),
+      "有一个 " + pending.tool + " 在等确认 —— 请到唤醒球上确认。确认面只有一个，控制台不提供按钮。");
+  }
+}
+
+async function refreshState() {
+  try {
+    const state = await api("/api/state");
+    renderState(state);
+    linkStatus(false, "已连接", location.host);
+    setText($("tick"), "上次读到 " + new Date().toLocaleTimeString("zh-CN", { hour12: false }));
+    renderSkillTools(state.runtime || {});
+  } catch (err) {
+    linkStatus(true, "连接失败", err.message);
+    setText($("tick"), everRead ? "读数停在上一次成功的轮询" : "还没成功读到过");
+    /* 连不上时把灯灭掉。留着语义色会读成「空闲待命」，而真相是这一页现在什么都不知道。 */
+    $("lamp").style.setProperty("--lamp", "var(--ring-track)");
+    $("lamp").title = "连接不上，灯不代表运行时状态";
+    $("lamp").setAttribute("aria-label", "连接不上，灯不代表运行时状态");
+    setText($("hero-state"), "连不上");
+    setText($("hero-tag"), err.message);
+    /* 上一次成功的读数还留在屏幕上。灯在侧栏底部，这一行在刊头里 ——
+       视线停在读数上就该在读数那一行标出它已经过期。 */
+    if (everRead) $("runline").dataset.stale = "1";
+    else setText($("runline"), "还没读到运行时状态 —— 守护进程没应答。");
+    pushRibbon("down");
+    skyState("down", 0, false);
+    /* 一次都没读到过时，读数砖和就绪板还挂着「读取中…」。不换掉它，
+       「正在等」和「连不上」在这两块上是同一个样子，而且没有重发的入口。 */
+    if (!everRead) {
+      failed($("ov-tiles"), err.message, refreshState);
+      failed($("ov-board"), err.message, refreshState);
+      failed($("ov-warn"), err.message, refreshState);
+    }
+    /* 技能表是 /api/state 的副产物，从来没有自己的请求。它空着时用户看不出是
+       「运行时没报工具」还是「这一页连不上」—— 只有前者才是有信息的空。 */
+    if (!$("sk-tools").children.length || $("sk-tools").querySelector(".state")) {
+      failed($("sk-tools"), err.message, refreshState);
+    }
+  }
+}
+
+/* ============================================================ 刊头极光
+
+   这块动效不是装饰：它的能量、色相与抖动全部由运行时 state 驱动 ——
+   空闲时慢而暖，在听/在想时快而亮，等确认转成琥珀，出错或连不上转成红并压低起伏。
+   所以它是同一份读数的第三种编码（另两种是等宽读数行和状态色带）。
+
+   颜色一律从 :root 的 token 读出来再转成 float，不在着色器里另造颜色。
+   底色有一道亮度下限，保证最亮的一帧上刊头的深色字仍然压得住。 */
+
+const sky = {
+  canvas: null, gl: null, prog: null, u: {}, raf: 0,
+  t0: 0, paused: false, frames: 0, fpsAt: 0, fps: 0,
+  energy: 0.25, alert: 0.0, hue: 0.0, dead: false,
+};
+
+const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function hexToRgb(hex) {
+  const h = String(hex).trim().replace("#", "");
+  const full = h.length === 3 ? h[0] + h[0] + h[1] + h[1] + h[2] + h[2] : h;
+  const n = parseInt(full.slice(0, 6), 16);
+  if (!Number.isFinite(n)) return [1, 1, 1];
+  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+}
+
+function token(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name);
+}
+
+const SKY_VERT = [
+  "#version 300 es",
+  "void main() {",
+  /* 三个顶点盖满裁剪空间，不建顶点缓冲。 */
+  "  vec2 p = vec2(float(gl_VertexID == 1) * 4.0 - 1.0, float(gl_VertexID == 2) * 4.0 - 1.0);",
+  "  gl_Position = vec4(p, 0.0, 1.0);",
+  "}",
+].join("\n");
+
+const SKY_FRAG = [
+  "#version 300 es",
+  "precision highp float;",
+  "uniform vec2 u_res;",
+  "uniform float u_time;",
+  "uniform float u_energy;",
+  "uniform float u_alert;",
+  "uniform vec3 u_bg;",
+  "uniform vec3 u_warm;",
+  "uniform vec3 u_accent;",
+  "uniform vec3 u_flag;",
+  "out vec4 outColor;",
+  "float hash(vec2 p) { return fract(sin(dot(p, vec2(41.3, 289.1))) * 43758.5453); }",
+  "float noise(vec2 p) {",
+  "  vec2 i = floor(p); vec2 f = fract(p);",
+  "  vec2 w = f * f * (3.0 - 2.0 * f);",
+  "  float a = hash(i);",
+  "  float b = hash(i + vec2(1.0, 0.0));",
+  "  float c = hash(i + vec2(0.0, 1.0));",
+  "  float d = hash(i + vec2(1.0, 1.0));",
+  "  return mix(mix(a, b, w.x), mix(c, d, w.x), w.y);",
+  "}",
+  "float fbm(vec2 p) {",
+  "  float s = 0.0; float a = 0.5;",
+  "  for (int i = 0; i < 5; i++) { s += a * noise(p); p = p * 2.03 + vec2(11.7, 3.1); a *= 0.5; }",
+  "  return s;",
+  "}",
+  "void main() {",
+  "  vec2 uv = gl_FragCoord.xy / u_res;",
+  "  vec2 p = vec2(uv.x * (u_res.x / max(u_res.y, 1.0)), uv.y);",
+  "  float t = u_time * (0.05 + u_energy * 0.22);",
+  /* 域扭曲：先用两层 fbm 把坐标本身推开，再拿推开后的坐标去采第三层。 */
+  "  vec2 q = vec2(fbm(p * 1.6 + vec2(0.0, t)), fbm(p * 1.6 + vec2(5.2, -t * 0.8)));",
+  "  float f = fbm(p * 2.1 + q * (1.1 + u_energy * 0.9) + vec2(t * 0.6, -t * 0.35));",
+  "  float band = smoothstep(0.18, 0.95, f + (1.0 - uv.y) * 0.45);",
+  /* 底色的重心压回 --bg：smoothstep 的下限从 0.0 提到 0.15，中低段整片留在奶油色上，
+     --surface-warm 只在带子真的起来时才顶上来。 */
+  "  vec3 col = mix(u_bg, u_warm, smoothstep(0.15, 1.0, band));",
+  /* --accent 是重音，不是一整片场。指数 2.4 → 3.0、峰值 0.30 → 0.14：橙色被挤回丝缕的
+     波峰，不再糊满 1500px 的刊头。空闲时（energy 0.18）峰值约 0.20，说话时（0.62）约 0.35 ——
+     还是能被读出「它在动」，但已经不是全页最响的那一块。 */
+  "  col = mix(col, u_accent, pow(band, 3.0) * (0.14 + u_energy * 0.34));",
+  /* 语义色同理，而且必须更狠：原来断连时 u_alert=1.0，--danger 以 0.55 的比例刷过整块，
+     再被亮度地板抬成一片桃橙 —— 又吵又传达不了「红」，两头都输。指数 1.8 → 3.2、
+     比例 0.55 → 0.22 之后，故障只在波峰上泛出红边；「连不上」这件事的主载体本来就是
+     侧栏的灯和面板里的文字，刊头只负责染个色温。 */
+  "  col = mix(col, u_flag, u_alert * pow(band, 3.2) * 0.22);",
+  "  col += (noise(p * 90.0 + t * 3.0) - 0.5) * 0.02;",
+  /* 亮度下限。刊头的字是 --fg（很深），抬最暗处才保证任何一帧都压得住。
+     0.80 → 0.86：一是刊头本来就该贴近奶油底而不是当一块深色板，二是余量给足，
+     --fg 在最差一帧上也稳过 10:1。 */
+  "  float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));",
+  "  col += max(0.0, 0.86 - lum);",
+  "  outColor = vec4(clamp(col, 0.0, 1.0), 1.0);",
+  "}",
+].join("\n");
+
+function compile(gl, type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    /* 编译失败必须把 infoLog 打出来。没有它，屏幕上只有一块静态渐变，
+       而「显卡不支持」和「我把着色器写错了」看起来一模一样。 */
+    console.error("[sky] 着色器编译失败：\n" + gl.getShaderInfoLog(shader));
+    gl.deleteShader(shader);
+    return null;
+  }
+  return shader;
+}
+
+function skyDown(why) {
+  sky.dead = true;
+  /* gl 一定要跟着清掉。留着它，skyState 会走进 skyDraw、而 canvas 已经被摘了。 */
+  sky.gl = null;
+  if (sky.raf) { cancelAnimationFrame(sky.raf); sky.raf = 0; }
+  $("hero").classList.add("no-gl");
+  if (sky.canvas) sky.canvas.remove();
+  sky.canvas = null;
+  $("sky-toggle").hidden = true;
+  setText($("sky-note"), why);
+}
+
+function skyResize() {
+  if (!sky.gl || !sky.canvas) return;
+  /* DPR 上限 2。视网膜屏上 3 倍的话这块整屏片元着色器的填充率翻 2.25 倍，
+     换来的清晰度在一团渐变上看不出来。 */
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(1, Math.round(sky.canvas.clientWidth * dpr));
+  const h = Math.max(1, Math.round(sky.canvas.clientHeight * dpr));
+  if (sky.canvas.width === w && sky.canvas.height === h) return;
+  sky.canvas.width = w;
+  sky.canvas.height = h;
+  sky.gl.viewport(0, 0, w, h);
+}
+
+function skyDraw(nowMs) {
+  const gl = sky.gl;
+  if (!gl) return;
+  skyResize();
+  const seconds = (nowMs - sky.t0) / 1000;
+  gl.uniform2f(sky.u.res, sky.canvas.width, sky.canvas.height);
+  gl.uniform1f(sky.u.time, seconds);
+  gl.uniform1f(sky.u.energy, sky.energy);
+  gl.uniform1f(sky.u.alert, sky.alert);
+  gl.uniform3fv(sky.u.flag, sky.flag);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+function skyFrame(nowMs) {
+  sky.raf = 0;
+  skyDraw(nowMs);
+  sky.frames += 1;
+  if (nowMs - sky.fpsAt >= 1000) {
+    sky.fps = Math.round((sky.frames * 1000) / (nowMs - sky.fpsAt));
+    sky.frames = 0;
+    sky.fpsAt = nowMs;
+    setText($("sky-note"), "极光 " + sky.fps + " fps · 能量随 state 走");
+  }
+  sky.raf = requestAnimationFrame(skyFrame);
+}
+
+/* 三个停机条件：用户按了静止、标签页在后台、当前不在总览页。
+   后两个的理由和 2.3 秒轮询一样 —— 没人看的时候它只是在烧 GPU。 */
+function syncSky() {
+  if (sky.dead || !sky.gl) return;
+  const shouldRun = !sky.paused && !reduceMotion && !document.hidden && currentView === "overview";
+  if (shouldRun && !sky.raf) {
+    sky.fpsAt = performance.now();
+    sky.frames = 0;
+    sky.raf = requestAnimationFrame(skyFrame);
+  } else if (!shouldRun && sky.raf) {
+    cancelAnimationFrame(sky.raf);
+    sky.raf = 0;
+    if (reduceMotion) setText($("sky-note"), "极光已按系统的减少动效偏好停在一帧");
+    else if (sky.paused) setText($("sky-note"), "极光已静止");
+    else setText($("sky-note"), "极光在后台已暂停");
+  }
+  /* 停着也要先画一帧，否则减少动效偏好下刊头是一块没画过的黑板。 */
+  if (!shouldRun) skyDraw(performance.now());
+}
+
+/* 读数进着色器。energy 决定流速与亮度，alert 决定往哪支语义色偏。 */
+function skyState(name, warnCount, pending) {
+  const energyOf = {
+    idle: 0.18, listening: 0.72, thinking: 0.85, speaking: 0.62,
+    waiting: 0.35, confirming: 0.35, error: 0.28, failed: 0.28, down: 0.06,
+  };
+  sky.energy = energyOf[name] == null ? 0.3 : energyOf[name];
+  if (name === "error" || name === "failed" || name === "down") {
+    sky.alert = 1.0;
+    sky.flag = hexToRgb(token("--danger"));
+  } else if (pending || name === "waiting" || name === "confirming" || warnCount > 0) {
+    sky.alert = 0.8;
+    sky.flag = hexToRgb(token("--warn"));
+  } else {
+    sky.alert = 0.0;
+    sky.flag = hexToRgb(token("--accent"));
+  }
+  if (sky.gl && !sky.raf) skyDraw(performance.now());
+}
+
+function initSky() {
+  sky.canvas = $("sky");
+  sky.flag = hexToRgb(token("--accent"));
+  /* alpha:false —— 刊头背后没有需要透出来的东西，不透明的后备缓冲少一次合成。 */
+  const gl = sky.canvas.getContext("webgl2", { alpha: false, antialias: false, powerPreference: "low-power" });
+  if (!gl) {
+    skyDown("这台机器上拿不到 WebGL2，刊头退到静态渐变。");
+    return;
+  }
+  sky.gl = gl;
+  const vs = compile(gl, gl.VERTEX_SHADER, SKY_VERT);
+  const fs = compile(gl, gl.FRAGMENT_SHADER, SKY_FRAG);
+  if (!vs || !fs) {
+    skyDown("着色器没编过（详情在控制台），刊头退到静态渐变。");
+    return;
+  }
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error("[sky] 程序链接失败：\n" + gl.getProgramInfoLog(prog));
+    skyDown("着色器没链上（详情在控制台），刊头退到静态渐变。");
+    return;
+  }
+  gl.useProgram(prog);
+  sky.prog = prog;
+  sky.u = {
+    res: gl.getUniformLocation(prog, "u_res"),
+    time: gl.getUniformLocation(prog, "u_time"),
+    energy: gl.getUniformLocation(prog, "u_energy"),
+    alert: gl.getUniformLocation(prog, "u_alert"),
+    flag: gl.getUniformLocation(prog, "u_flag"),
+  };
+  /* 三支底色是常量，取一次就够。 */
+  gl.uniform3fv(gl.getUniformLocation(prog, "u_bg"), hexToRgb(token("--bg")));
+  gl.uniform3fv(gl.getUniformLocation(prog, "u_warm"), hexToRgb(token("--surface-warm")));
+  gl.uniform3fv(gl.getUniformLocation(prog, "u_accent"), hexToRgb(token("--accent")));
+  sky.t0 = performance.now();
+  sky.fpsAt = sky.t0;
+  window.addEventListener("resize", () => { if (!sky.raf) { skyResize(); skyDraw(performance.now()); } });
+  syncSky();
+}
+
+$("sky-toggle").onclick = () => {
+  sky.paused = !sky.paused;
+  const button = $("sky-toggle");
+  /* 不挂 aria-pressed：这颗按钮的可见文字本身就在换（写的是「按下去会发生什么」），
+     两者叠起来会被念成「流动，已按下」—— 状态和动作互相矛盾。只换名字，
+     并且 aria-label 里包含可见文字（WCAG 2.5.3 Label in Name）。 */
+  button.textContent = sky.paused ? "流动" : "静止";
+  button.setAttribute("aria-label", sky.paused ? "让极光流动" : "让极光静止");
+  syncSky();
+};
+if (reduceMotion) {
+  /* 系统已经要求减少动效，那颗按钮此时没有可切换的东西。 */
+  $("sky-toggle").hidden = true;
+}
+/* ======================================================= 通用键值编辑器 */
+
+const dirty = new Map();
+
+function parseValue(type, raw) {
+  if (type === "bool") return raw === "true";
+  if (type === "int") {
+    if (!/^-?\d+$/.test(raw.trim())) throw new Error("要一个整数");
+    return parseInt(raw, 10);
+  }
+  if (type === "float") {
+    const value = Number(raw);
+    if (!Number.isFinite(value)) throw new Error("要一个数");
+    return Number.isInteger(value) ? value + 0.0 : value;
+  }
+  if (type === "list") {
+    let parsed;
+    try { parsed = JSON.parse(raw); } catch { throw new Error('要一个 JSON 数组，如 ["code"]'); }
+    if (!Array.isArray(parsed) || parsed.some((i) => typeof i !== "string")) throw new Error("只支持字符串数组");
+    return parsed;
+  }
+  return raw;
+}
+
+/* entry: {key,name?,type,value,editable,locked?}。scope 用来把脏值分组到各自的保存按钮。 */
+function kvRow(entry, scope) {
+  const key = entry.key;
+  const label = entry.name || key;
+  const editable = entry.editable && !entry.locked;
+  const row = el("div", { class: "kv" + (editable ? "" : " locked"), od: "kv-" + key });
+  row.dataset.key = key;
+  row.appendChild(el("code", null, label));
+  if (!editable) {
+    row.appendChild(el("div", { class: "val" },
+      Array.isArray(entry.value) ? JSON.stringify(entry.value) : String(entry.value)));
+  } else if (entry.type === "bool" || (Array.isArray(entry.choices) && entry.choices.length)) {
+    /* 固定几个值的键渲染成下拉框，不是文本框。`asr.provider` 是这条的由来：写错的 provider
+       不会报错，`_open_asr` 会按本机 sherpa 处理 —— 保存成功、页面显示你写的那个值、识别
+       悄悄退回本机模型（而本机模型正是「转写不准」的根因）。打不出来的错才是修好了。 */
+    const options = entry.type === "bool" ? ["true", "false"] : entry.choices.map(String);
+    const now = entry.type === "bool" ? String(entry.value === true) : String(entry.value);
+    const select = el("select", { "aria-label": label });
+    /* 文件里的值不在清单里时把它也放进去并选中 —— 否则下拉框会显示第一项，
+       而那是在**撒谎**：页面说 dashscope，文件里写的是别的东西。 */
+    if (!options.includes(now)) options.unshift(now);
+    for (const value of options) {
+      const option = el("option", { value }, value);
+      option.selected = value === now;
+      select.appendChild(option);
+    }
+    select.onchange = () => mark(row, key, scope, select, entry.type);
+    row.appendChild(select);
+  } else {
+    const input = el("input", { "aria-label": label });
+    input.value = entry.type === "list"
+      ? JSON.stringify(entry.value == null ? [] : entry.value)
+      : (entry.value == null ? "" : String(entry.value));
+    if (entry.type === "int" || entry.type === "float") input.inputMode = "decimal";
+    input.oninput = () => mark(row, key, scope, input, entry.type);
+    row.appendChild(input);
+  }
+  row.appendChild(el("div", { class: "hint" }, editable ? entry.type : "改文件"));
+  return row;
+}
+
+function mark(row, key, scope, input, type) {
+  row.classList.remove("saved", "failed");
+  row.classList.add("dirty");
+  dirty.set(scope + "|" + key, { scope, key, input, type, row });
+}
+
+async function saveScope(scope, request, button, errorNode) {
+  show(errorNode, "");
+  const updates = {};
+  const rows = [];
+  for (const item of dirty.values()) {
+    if (item.scope !== scope) continue;
+    try { updates[item.key] = parseValue(item.type, item.input.value); rows.push(item); }
+    catch (err) {
+      item.row.classList.add("failed");
+      item.row.querySelector(".hint").textContent = err.message;
+      return;
+    }
+  }
+  if (!rows.length) { show(errorNode, "没有改动。", "note"); return; }
+  button.disabled = true;
+  try {
+    await request(updates);
+    for (const item of rows) {
+      item.row.classList.remove("dirty", "failed");
+      item.row.classList.add("saved");
+      item.row.querySelector(".hint").textContent = "已写入 · 重启生效";
+      dirty.delete(scope + "|" + item.key);
+    }
+    show(errorNode, "已写入，重启后生效。", "good");
+  } catch (err) {
+    for (const item of rows) item.row.classList.add("failed");
+    show(errorNode, err.message, "bad");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/* ============================================================= 模型配置 */
+
+/* 后端的 models_view / models_update / models_probe 已经实现（routes.py + core/models_config.py）。
+   下面这两份留作**后备**：端点缺失或守护进程是旧版时，用它把界面点亮而不是留一片空白。
+   内容是**仓库真实的出厂值**，不是编的：预设抄自 core/console/providers.py，
+   两套方案抄自 config/models.toml。走后备时明写「保存会失败」。 */
+const PRESETS = {
+  llm: [
+    { slug: "openai", name: "OpenAI", base: "https://api.openai.com/v1", proto: "openai", key_env: "VOX_LLM_KEY" },
+    { slug: "anthropic", name: "Anthropic", base: "https://api.anthropic.com/v1", proto: "anthropic", key_env: "VOX_LLM_KEY" },
+    { slug: "deepseek", name: "DeepSeek", base: "https://api.deepseek.com/v1", proto: "openai", key_env: "VOX_LLM_KEY", domestic: true },
+    { slug: "moonshot", name: "月之暗面 Kimi", base: "https://api.moonshot.cn/v1", proto: "openai", key_env: "VOX_LLM_KEY", domestic: true },
+    { slug: "zhipu", name: "智谱 GLM", base: "https://open.bigmodel.cn/api/paas/v4", proto: "openai", key_env: "VOX_LLM_KEY", domestic: true },
+    { slug: "dashscope", name: "阿里云百炼", base: "https://dashscope.aliyuncs.com/compatible-mode/v1", proto: "openai", key_env: "VOX_LLM_KEY", domestic: true },
+    { slug: "volcengine", name: "火山方舟", base: "https://ark.cn-beijing.volces.com/api/v3", proto: "openai", key_env: "VOX_LLM_KEY", domestic: true },
+    { slug: "siliconflow", name: "硅基流动", base: "https://api.siliconflow.cn/v1", proto: "openai", key_env: "VOX_LLM_KEY", domestic: true },
+    { slug: "minimax", name: "MiniMax", base: "https://api.minimax.chat/v1", proto: "openai", key_env: "VOX_LLM_KEY", domestic: true },
+    { slug: "ollama", name: "Ollama（本机）", base: "http://127.0.0.1:11434/v1", proto: "ollama", key_env: "", local: true, note: "本机服务，不需要密钥；明文 HTTP 只许回环地址" },
+    { slug: "custom", name: "自定义", base: "", proto: "custom", key_env: "VOX_LLM_KEY", note: "端点、协议、密钥环境变量全部自己填" },
+  ],
+  asr: [
+    { slug: "sherpa-local", name: "sherpa-onnx（本机，默认）", base: "", proto: "custom", key_env: "", local: true, note: "流式 zipformer-zh-14M，模型在 models/ 下；本地优先是第一条红线" },
+    { slug: "openai-whisper", name: "OpenAI Whisper", base: "https://api.openai.com/v1", proto: "openai", key_env: "VOX_ASR_KEY" },
+    { slug: "dashscope", name: "阿里云百炼 Paraformer", base: "https://dashscope.aliyuncs.com/compatible-mode/v1", proto: "openai", key_env: "VOX_ASR_KEY", domestic: true },
+    { slug: "custom", name: "自定义", base: "", proto: "custom", key_env: "VOX_ASR_KEY" },
+  ],
+  tts: [
+    { slug: "sherpa-local", name: "sherpa-onnx（本机，默认）", base: "", proto: "custom", key_env: "", local: true, note: "VITS 中文单说话人，模型在 models/ 下" },
+    { slug: "openai", name: "OpenAI TTS", base: "https://api.openai.com/v1", proto: "openai", key_env: "VOX_TTS_KEY" },
+    { slug: "dashscope", name: "阿里云百炼 CosyVoice", base: "https://dashscope.aliyuncs.com/compatible-mode/v1", proto: "openai", key_env: "VOX_TTS_KEY", domestic: true },
+    { slug: "custom", name: "自定义", base: "", proto: "custom", key_env: "VOX_TTS_KEY" },
+  ],
+};
+
+const FACTORY_MODELS = {
+  active: "local",
+  profiles: {
+    "local": {
+      label: "全本机（离线）",
+      asr: { provider: "sherpa-local", model: "zipformer-zh-14M" },
+      tts: { provider: "sherpa-local", model: "vits-zh-single" },
+      llm: { provider: "ollama", model: "qwen2.5:7b" },
+    },
+    "cloud-llm": {
+      label: "本机语音 + 云端 LLM",
+      asr: { provider: "sherpa-local", model: "zipformer-zh-14M" },
+      tts: { provider: "sherpa-local", model: "vits-zh-single" },
+      llm: { provider: "deepseek", model: "deepseek-chat", key_env: "VOX_LLM_KEY" },
+    },
+  },
+};
+
+const KIND_LABEL = { asr: "ASR · 语音识别", tts: "TTS · 语音合成", llm: "LLM · 大语言模型" };
+let models = null;
+let modelsLive = false;
+let currentProfile = null;
+
+async function loadModels() {
+  busy($("mp-kinds"), "读取 /api/models…");
+  try {
+    models = await api("/api/models");
+    modelsLive = true;
+    if (models.presets) Object.assign(PRESETS, models.presets);
+    show($("models-degraded"), "");
+  } catch (err) {
+    models = JSON.parse(JSON.stringify(FACTORY_MODELS));
+    modelsLive = false;
+    show($("models-degraded"),
+      `读不到 /api/models（${err.message}）。下面显示的是仓库出厂的两套方案与预设表，` +
+      `改动只留在这一页，点保存会失败。守护进程是旧版（没有这个端点）时会走到这里 —— ` +
+      `重启一次控制台即可。`, "warn");
+  }
+  currentProfile = models.active in models.profiles ? models.active : Object.keys(models.profiles)[0];
+  renderModels();
+}
+
+function renderModels() {
+  const select = $("mp-select");
+  select.textContent = "";
+  for (const [name, profile] of Object.entries(models.profiles)) {
+    const option = el("option", { value: name }, `${name} —— ${profile.label || "(无标签)"}`);
+    option.selected = name === currentProfile;
+    select.appendChild(option);
+  }
+  $("mp-note").textContent =
+    `生效的是 active = "${models.active}"。` +
+    (currentProfile === models.active ? "你正在看的就是它。" : "你正在看的是另一套 —— 保存只写文件，要它生效得点「启用这一套」。");
+  $("mp-save-note").textContent = modelsLive ? "写回 config/models.toml，重启生效。" : "后端未就绪，这颗按钮会报错。";
+
+  /* 启用按钮：正在看的就是生效那套时没什么可切的，禁掉并说明。 */
+  const isActive = currentProfile === models.active;
+  const activate = $("mp-activate");
+  activate.disabled = isActive || !modelsLive;
+  $("mp-activate-note").textContent = !modelsLive
+    ? "后端未就绪。"
+    : isActive
+      ? "它已经是生效的那一套了。"
+      : `把 active 指到 ${currentProfile}，并把它的 ASR / TTS 写进 config/voice.toml。重启生效。`;
+
+  /* 分岔警告。**运行时读 voice.toml，这一栏改 models.toml** —— 只有前者算，所以两处
+     不一致必须说出来，否则页面显示的模型名和实际在用的不是同一个。 */
+  const voice = models.voice || {};
+  const lines = [];
+  if (voice.error) lines.push(voice.error);
+  for (const row of voice.diff || []) {
+    lines.push(`${row.key}：config/voice.toml 是「${row.voice || "(空)"}」，这套方案写的是「${row.profile}」`);
+  }
+  for (const note of voice.notes || []) lines.push(note);
+  if (lines.length) {
+    /* 用「 · 」而不是换行：show() 写的是 textContent，而这几个 <p> 没有 white-space:pre-line，
+       换行会被折叠成空格 —— 那样读起来像一句跑不通的长句。 */
+    show($("mp-diverged"),
+      "运行时读的是 config/voice.toml，不是这一栏。当前不一致：" + lines.join(" · ") +
+      (isActive ? " · 点一次「启用这一套」就会把能同步的那几项写过去。" : ""), "warn");
+  } else {
+    show($("mp-diverged"), "");
+  }
+
+  const host = $("mp-kinds");
+  host.textContent = "";
+  const profile = models.profiles[currentProfile] || {};
+  for (const kind of ["asr", "tts", "llm"]) host.appendChild(kindBlock(kind, profile[kind] || {}));
+}
+
+function kindBlock(kind, section) {
+  /* 每一类（ASR / TTS / LLM）自己一块玻璃板，不再靠一根 border-top 分段。 */
+  const block = el("div", { class: "panel glass", od: "models-" + kind });
+  block.appendChild(el("h3", null, KIND_LABEL[kind]));
+
+  const list = PRESETS[kind] || [];
+  const select = el("select", { "aria-label": KIND_LABEL[kind] + " 服务商", od: "models-" + kind + "-provider" });
+  /* 配置里写的服务商不在预设表内时，先把它自己补成一个选项。
+     否则 <select> 会静默落到第一项上，等于这个页面一打开就悄悄改了配置。 */
+  if (section.provider && !list.some((p) => p.slug === section.provider)) {
+    const orphan = el("option", { value: section.provider }, section.provider + " · 配置里的值，不在预设表内");
+    orphan.selected = true;
+    select.appendChild(orphan);
+  }
+  for (const preset of list) {
+    const option = el("option", { value: preset.slug },
+      preset.name + (preset.local ? " · 本机" : preset.domestic ? " · 国内" : ""));
+    option.selected = preset.slug === section.provider;
+    select.appendChild(option);
+  }
+
+  const model = el("input", { placeholder: "模型名，如 deepseek-chat", "aria-label": "模型名", od: "models-" + kind + "-model" });
+  model.value = section.model || "";
+  /* 拉回来的模型名进这里。用原生 <datalist> 而不是把输入框换成 <select>：列表是
+     「拉到的」不是「全部的」—— 有些网关只列一部分，把手打的自由收掉会让一个真实
+     存在但没被列出的模型变成填不进去。 */
+  const options = el("datalist", { id: "mk-" + kind + "-models" });
+  model.setAttribute("list", options.id);
+  const base = el("input", { placeholder: "端点，含版本段", "aria-label": "端点" });
+  const proto = el("select", { "aria-label": "协议" });
+  const protos = ["openai", "anthropic", "ollama", "custom"];
+  if (section.proto && !protos.includes(section.proto)) protos.push(section.proto);
+  for (const value of protos) proto.appendChild(el("option", { value }, value));
+  /* 占位符跟着这一段的用途走。原来三段都写 VOX_LLM_KEY —— 在 ASR 那一格里它是个错的示范。 */
+  const keyEnv = el("input", { placeholder: "VOX_" + kind.toUpperCase() + "_KEY", "aria-label": "密钥环境变量名" });
+  const note = el("p", { class: "note" });
+  /* 真实密钥进这里，不进上面那个框。上面那个要的是**变量名** —— 一个把 key 粘进去的人
+     会撞上 looks_like_secret 的拒绝，而拒绝信息里并没有告诉他该去哪填。这一行就是那个
+     「哪」。值不写进 config/models.toml（那会进版本库、日志、事件流），默认只进本进程
+     环境；勾了「记住」才落到 .env（gitignored）。 */
+  const secret = el("input", {
+    type: "password", autocomplete: "off", spellcheck: "false",
+    placeholder: "把真实密钥粘在这里", "aria-label": "密钥值",
+  });
+  const remember = el("input", { type: "checkbox", id: "mk-" + kind + "-remember" });
+  const setKey = el("button", null, "设置密钥");
+  const keyState = el("p", { class: "note" });
+  /* 端点少了版本段是本机踩过的坑：请求打到 /models 而不是 /v1/models，而很多网关在那个
+     路径上返回自己的 Web 页面 —— 200 加一段 HTML，报出来是「响应不是 JSON」，看不出是
+     路径少了一段。 */
+  const endpointNote = el("p", { class: "note" });
+
+  function sync() {
+    const preset = list.find((p) => p.slug === select.value);
+    const custom = select.value === "custom";
+    const orphan = !preset && !custom;
+    base.value = (custom || orphan) ? (section.base || "") : (preset.base || "");
+    proto.value = (custom || orphan) ? (section.proto || "custom") : (preset.proto || "custom");
+    keyEnv.value = custom
+      ? (section.key_env || "")
+      : orphan ? (section.key_env || "") : (preset.key_env || "");
+    for (const node of [base, proto, keyEnv]) {
+      if (node === proto) node.disabled = !custom; else node.readOnly = !custom;
+    }
+    note.textContent = custom
+      ? "自定义：端点、协议、密钥环境变量三项自己填。明文 HTTP 只许回环地址。"
+      : orphan
+        ? `配置里写的 ${select.value} 不在预设表内 —— 三项照原样显示、不可改；要动它请选「自定义」。`
+        : (preset.note || (preset.local ? "本机服务，不出网。" : "端点来自预设表，只读；要改就选「自定义」。"));
+    section.provider = select.value;
+    section.base = base.value;
+    section.proto = proto.value;
+    section.key_env = keyEnv.value;
+    /* 换了服务商，上一家的模型名就不再是可选项。留着会让下拉里混进一个这家根本没有
+       的名字，而它看起来和真的一模一样。 */
+    options.textContent = "";
+    endpointNote.textContent = missingVersionSegment(base.value)
+      ? "这个端点没有版本段（如 /v1）。少了它请求会打到 /models —— 很多网关在那个路径上返回自己的网页，拿回来的是 200 加一段 HTML，报出来会是「响应不是 JSON」。"
+      : "";
+  }
+  select.onchange = sync;
+  for (const node of [model, base, keyEnv]) {
+    node.oninput = () => {
+      section.model = model.value;
+      if (select.value === "custom") { section.base = base.value; section.key_env = keyEnv.value; }
+    };
+  }
+  proto.onchange = () => { section.proto = proto.value; };
+
+  const grid = el("div", { class: "grid2" });
+  /* 原来这些 <label> 既没有 for、也没有包住控件 —— 视觉上是标签，语义上是一段散文。
+     控件自己的 aria-label 会盖掉 <label>，所以两边都给：id/for 建立关联，
+     aria-label 留一个更短的可读名。 */
+  const fields = [["服务商", select], ["模型名", model], ["端点", base], ["协议", proto]];
+  fields.push(["密钥环境变量名（这里永远不写密钥本身）", keyEnv]);
+  for (const [index, [label, node]] of fields.entries()) {
+    const id = `mk-${kind}-${index}`;
+    node.id = id;
+    const wrap = el("div");
+    wrap.appendChild(el("label", { for: id }, label));
+    wrap.appendChild(node);
+    grid.appendChild(wrap);
+  }
+  block.appendChild(grid);
+
+  const probe = el("button", null, "探一下能不能连");
+  probe.onclick = () => probeEndpoint(kind, select.value, base.value, proto.value, probe);
+  const pull = el("button", null, "拉取可用模型");
+  pull.onclick = () => pullModelNames(kind, select.value, base.value, proto.value, keyEnv.value, options, pull);
+  /* 第三颗按钮而不是把它折进「探一下」：探测不发凭据、不读 body，只看状态码；这一颗发
+     一句真话并把回答带回来。能列出 /models 不等于能对话 —— 列表端点和推理端点常在不同
+     网关后面，配额也常分开算。 */
+  const shot = el("button", null, "试一句");
+  shot.onclick = () => tryOneShot(kind, select.value, base.value, proto.value, keyEnv.value, model.value, shot);
+  const line = el("div", { class: "line", style: "margin-top:11px" });
+  line.appendChild(probe);
+  line.appendChild(pull);
+  line.appendChild(shot);
+  block.appendChild(line);
+
+  setKey.onclick = () => setSecret(keyEnv.value, secret, remember.checked, setKey, keyState);
+  const keyLine = el("div", { class: "line", style: "margin-top:11px" });
+  const keyWrap = el("div", { style: "flex:1 1 16em" });
+  keyWrap.appendChild(el("label", { for: "mk-" + kind + "-secret" }, "密钥值（不写进配置文件）"));
+  secret.id = "mk-" + kind + "-secret";
+  keyWrap.appendChild(secret);
+  keyLine.appendChild(keyWrap);
+  const rememberWrap = el("label", { for: remember.id, class: "note", style: "align-self:center" });
+  rememberWrap.appendChild(remember);
+  rememberWrap.appendChild(document.createTextNode(" 记住它（写进 .env，重启后仍在）"));
+  keyLine.appendChild(rememberWrap);
+  keyLine.appendChild(setKey);
+  block.appendChild(keyLine);
+  block.appendChild(keyState);
+
+  block.appendChild(options);
+  /* 拉回来的模型名铺在这里（见 pullModelNames 里的注释：datalist 会按输入框内容过滤，
+     所以不能只靠它）。空的时候不占地方。 */
+  block.appendChild(el("div", { class: "line", id: "mk-" + kind + "-fetched" }));
+  block.appendChild(endpointNote);
+  block.appendChild(note);
+  sync();
+  return block;
+}
+
+/* OpenAI 兼容端点几乎都以版本段结尾。这个判断只看结尾，不去猜该补哪一段 —— 自动补
+   /v1 会在遇到 /v2 或 /openai/v1 的部署时改错，而提示不会。 */
+function missingVersionSegment(base) {
+  const value = String(base || "").trim().replace(/\/+$/, "");
+  if (!value) return false;
+  return !/\/v\d+(\.\d+)?$/.test(value);
+}
+
+async function setSecret(name, input, remember, button, state) {
+  const key = String(name || "").trim();
+  if (!key) { state.textContent = "先填上面那个「密钥环境变量名」，密钥要挂在一个名字上。"; return; }
+  if (!input.value) { state.textContent = "密钥值是空的。"; return; }
+  button.disabled = true;
+  try {
+    const result = await api("/api/secrets", {
+      method: "POST", body: { name: key, value: input.value, remember: !!remember },
+    });
+    /* 立刻清空输入框：一个把密钥留在 DOM 里的页面会把它带进截图、带进 devtools、
+       带进下一个看这台机器的人眼里。 */
+    input.value = "";
+    state.textContent = result.remembered
+      ? `$${result.name} 已设置，并写进了 .env —— 重启之后仍然在。`
+      : `$${result.name} 已设置，只在当前进程里 —— 重启就没了（要留下就勾「记住它」）。`;
+  } catch (err) {
+    state.textContent = err.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function tryOneShot(kind, slug, base, proto, keyEnv, model, button) {
+  if (!base) {
+    overlay("这一条试不了", `${KIND_LABEL[kind]} 选的是本机服务，不走 HTTP。`, null);
+    return;
+  }
+  if (!String(model || "").trim()) {
+    overlay("先填模型名", "试一句话得指定拿哪个模型试 —— 「拉取可用模型」那颗按钮会把可选的填进下拉里。", null);
+    return;
+  }
+  button.disabled = true;
+  const label = button.textContent;
+  button.textContent = "发送中…";
+  try {
+    const result = await api("/api/models/try", {
+      method: "POST", body: { kind, provider: slug, base, proto, key_env: keyEnv, model },
+    });
+    const how = result.authenticated ? `带 $${result.key_env} 的凭据` : "没带凭据";
+    overlay("它回话了",
+      `POST ${result.url}\n${result.status} · ${result.elapsed_ms}ms · ${how} · 模型 ${result.model}\n\n` +
+      `${result.reply}\n\n这是真实的一次调用 —— 能列出模型不等于能对话，这一句才是判据。`,
+      null);
+  } catch (err) {
+    overlay("试不通", `${err.message}`, null);
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
+async function probeEndpoint(kind, slug, base, proto, button) {
+  if (!base) {
+    overlay("这一条不需要探测", `${KIND_LABEL[kind]} 选的是本机服务，没有 HTTP 端点可打。`, null);
+    return;
+  }
+  /* 百炼原生协议没有 /models —— 探它一定回 404，而下面把 404 解释成「路径拼错了」。
+     一个必然给出错误结论的探针比没有探针糟：人会照着那句话去改一个本来正确的 base。
+     所以在前端就拦住，连请求都不发。 */
+  if (String(proto || "").toLowerCase() === "dashscope") {
+    overlay("这条协议探不了",
+      `百炼原生接口只有各自的业务路径，没有 GET ${base}/models —— 探它一定回 404，` +
+      `而 404 在这一栏的含义是「路径拼错了」。\n\n判据是真发一次：合成用右边那颗「试一句」，` +
+      `识别用 .vox-ref/asr_cloud_probe.py（它会真的发一段音频并把转写打出来）。`, null);
+    return;
+  }
+  button.disabled = true;
+  try {
+    const result = await api("/api/models/probe", { method: "POST", body: { kind, provider: slug, base, proto } });
+    const verdict = result.status === 404
+      ? "404 —— 路径拼错了，主机在但这个路径不对。"
+      : (result.status === 401 || result.status === 403)
+        ? `${result.status} —— 这是好结果：主机在、路径对，只是密钥不对或没带。`
+        : `${result.status} —— 通了。`;
+    overlay("探测结果", `GET ${base}/models\n\n${verdict}\n耗时 ${result.elapsed_ms}ms`, null);
+  } catch (err) {
+    if (err.status === 404 || err.status === 405) {
+      overlay("这个守护进程没有探测端点",
+        `它没有 /api/models/probe，所以这颗按钮现在探不了 —— 通常是控制台还跑在旧版进程里，重启一次即可。\n\n` +
+        `不改成浏览器直连是刻意的：那样请求会从你的浏览器出网、而不是从守护进程出网，` +
+        `跨域也会先失败一次，两个都会让结果变得不可解读。`, null);
+    } else {
+      overlay("探测失败", `GET ${base}/models\n\n${err.message}\n超时或连不上，说明这条路当前不通。`, null);
+    }
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/* 拉取和探测是两件事，所以是两颗按钮：探测**不带凭据**（401 是它的好结果），拉取
+   必须带（401 在这里是失败）。合成一颗就得在「要不要发密钥」上二选一，而不发正是
+   探测存在的意义。密钥也不经过这个页面 —— 传出去的是环境变量名，值由守护进程读。 */
+async function pullModelNames(kind, slug, base, proto, keyEnv, options, button) {
+  if (!base) {
+    overlay("这一条拉不了", `${KIND_LABEL[kind]} 选的是本机服务 —— 模型在 models/ 目录里，不由端点列举。`, null);
+    return;
+  }
+  button.disabled = true;
+  const label = button.textContent;
+  button.textContent = "拉取中…";
+  try {
+    const result = await api("/api/models/fetch", {
+      method: "POST",
+      body: { kind, provider: slug, base, proto, key_env: keyEnv },
+    });
+    options.textContent = "";
+    for (const name of result.models) options.appendChild(el("option", { value: name }));
+    /* 光填 <datalist> 不够，这是使用者报的「拉取到多个模型时下拉框不显示模型」的真因：
+       datalist 的建议是**按输入框当前内容过滤**的。而这个框在渲染时已经被填成配置里的
+       模型名（例如 deepseek-chat），拉回来的名字几乎没有一个包含那段文本，于是过滤完
+       是空的 —— 列表在那里，只是被过滤掉了。
+
+       所以除了 datalist，再把名字铺成一排可点的行：它不依赖任何过滤行为，点一下就填进去。
+       datalist 保留，手打仍然有补全。 */
+    const list = document.getElementById("mk-" + kind + "-fetched");
+    if (list) {
+      list.textContent = "";
+      for (const name of result.models) {
+        const row = el("button", { class: "chip", type: "button" }, name);
+        row.onclick = () => {
+          const box = list.parentElement.querySelector("input[list]");
+          if (box) { box.value = name; box.dispatchEvent(new Event("input")); }
+        };
+        list.appendChild(row);
+      }
+      list.appendChild(el("span", { class: "note" },
+        `　拉到 ${result.count} 个 —— 点一个就填进上面那个框。`));
+    }
+    const how = result.authenticated ? `带 $${result.key_env} 的凭据拉到的` : "不带凭据就能列出";
+    const shown = result.models.slice(0, 12).join("\n");
+    const rest = result.count > 12 ? `\n…另外还有 ${result.count - 12} 个` : "";
+    overlay(`拉到 ${result.count} 个模型`,
+      `GET ${result.url}\n${result.status} · ${result.elapsed_ms}ms · ${how}\n\n` +
+      `已经填进「模型名」那个输入框的下拉里 —— 点开它就能选，也照样能手打。\n\n${shown}${rest}`,
+      null);
+  } catch (err) {
+    if (err.status === 404 || err.status === 405) {
+      overlay("这个守护进程没有拉取端点",
+        `它没有 /api/models/fetch，所以这颗按钮现在拉不了 —— 通常是控制台还跑在旧版进程里，重启一次即可。`,
+        null);
+    } else {
+      overlay("拉不到模型列表", `GET ${base}/models\n\n${err.message}`, null);
+    }
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
+/* ================================================================= 运行日志
+
+   游标而不是时间戳：两条同毫秒的日志用时间戳会漏读一条。只在「调试」那一栏可见时轮询 ——
+   一个没人看的日志视图每 2 秒敲一次守护进程，只是在给它添活儿。 */
+
+let logCursor = 0;
+const logSeen = [];
+
+function logLevelClass(level) {
+  return level === "error" ? "bad" : level === "warn" ? "warn" : "note";
+}
+
+function renderLog() {
+  const host = $("lg-rows");
+  /* **不再在这里滤级别** —— 筛选整个交给服务端了（见 pullLog）。两处都滤的后果是
+     「选了错误却还看到 info」或者反过来，而那种不一致查起来要先想清楚是哪一层在滤。 */
+  const rows = logSeen;
+  host.textContent = "";
+  /* 最新的在上：查「刚才那次为什么失败」的人不该先滚到底。 */
+  for (const entry of rows.slice(-400).reverse()) {
+    const row = el("div", { class: "logrow" });
+    const when = new Date(entry.at * 1000).toTimeString().slice(0, 8);
+    const head = el("div", { class: "lg-head" });
+    head.appendChild(el("code", null, when));
+    head.appendChild(el("b", { class: logLevelClass(entry.level) }, entry.source));
+    head.appendChild(el("span", null, entry.message));
+    row.appendChild(head);
+    const fields = Object.entries(entry.fields || {}).filter(
+      ([, value]) => value !== "" && value !== null && value !== false &&
+        !(Array.isArray(value) && value.length === 0) &&
+        !(value && typeof value === "object" && Object.keys(value).length === 0)
+    );
+    if (fields.length) {
+      row.appendChild(el("p", { class: "note lg-fields" },
+        fields.map(([key, value]) =>
+          `${key} = ${typeof value === "object" ? JSON.stringify(value) : value}`).join("　·　")));
+    }
+    host.appendChild(row);
+  }
+  if (!rows.length) {
+    host.appendChild(el("p", { class: "note" },
+      onlyErrors ? "还没有错误。" : "还没有日志 —— 说一句话或者对着麦克风喊唤醒词。"));
+  }
+}
+
+async function pullLog() {
+  try {
+    /* **筛选走服务端**：缓冲里有两千条而屏幕上放得下几十条，把两千条拉回来自己滤等于
+       每两秒传一遍整个缓冲。级别 / 来源 / 关键词都作为查询参数交给 /api/log。
+
+       游标与筛选**无关**（后端按原始序号取窗再滤），所以改筛选条件不会让日志卡住 ——
+       但本地已经攒的那些是按上一套条件滤过的，所以改条件时要清掉重新拉。 */
+    const level = $("lg-level").value === "all" ? "" : $("lg-level").value;
+    const source = $("lg-source").value;
+    const q = $("lg-q").value.trim();
+    const url = `/api/log?cursor=${logCursor}&limit=300`
+      + (level ? `&level=${encodeURIComponent(level)}` : "")
+      + (source ? `&source=${encodeURIComponent(source)}` : "")
+      + (q ? `&q=${encodeURIComponent(q)}` : "");
+    const page = await api(url);
+    if (page.dropped) {
+      /* 缓冲被裁过：说出来，不然那段空白看起来像「什么都没发生」。 */
+      logSeen.push({
+        at: Date.now() / 1000, level: "warn", source: "log",
+        message: `中间有 ${page.dropped} 条被环形缓冲挤掉了`, fields: {},
+      });
+    }
+    for (const entry of page.entries) logSeen.push(entry);
+    logCursor = page.next;
+    if (logSeen.length > 1200) logSeen.splice(0, logSeen.length - 1200);
+    /* 来源下拉由后端报的清单填 —— 一个要人手打 `weixin` 的筛选框没人会用。 */
+    const select = $("lg-source");
+    const known = new Set(Array.from(select.options).map((o) => o.value));
+    for (const name of page.sources || []) {
+      if (known.has(name)) continue;
+      const option = document.createElement("option");
+      option.value = name; option.textContent = name;
+      select.appendChild(option);
+    }
+    const filtered = level || source || q;
+    $("lg-note").textContent =
+      `共 ${page.total} 条（缓冲里留着 ${page.held} 条），本地 ${logSeen.length} 条`
+      + (filtered ? " · 正在按条件筛选" : "");
+    renderLog();
+  } catch (err) {
+    $("lg-note").textContent =
+      err.status === 404
+        ? "这个守护进程没有 /api/log —— 控制台还跑在旧版进程里，重启一次即可。"
+        : `拉不到日志：${err.message}`;
+  }
+}
+
+/* 改筛选条件 = 换了一套要看的东西，所以清空本地重新拉。不清的话屏幕上会是两套条件
+   混在一起的结果，而那比没有筛选更难读。 */
+function refilterLog() {
+  logCursor = 0;
+  logSeen.length = 0;
+  pullLog();
+}
+
+$("lg-refresh").onclick = () => pullLog();
+/* 三个筛选都走服务端，所以改任何一个都要清掉本地重新拉（见 refilterLog）。
+   搜索框做 300 ms 防抖：每敲一个字母就打一次接口，而人打字的速度比那快。 */
+$("lg-level").onchange = () => refilterLog();
+$("lg-source").onchange = () => refilterLog();
+let logSearchTimer = null;
+$("lg-q").addEventListener("input", () => {
+  if (logSearchTimer) clearTimeout(logSearchTimer);
+  logSearchTimer = setTimeout(refilterLog, 300);
+});
+$("lg-clear").onclick = async () => {
+  try {
+    await api("/api/log/clear", { method: "POST", body: {} });
+  } catch { /* 清不掉也把本地那份清了 */ }
+  logSeen.length = 0;
+  logCursor = 0;
+  renderLog();
+};
+
+/* 只在这一栏可见、标签页在前台时才拉。 */
+setInterval(() => {
+  if (document.hidden || currentView !== "debug") return;
+  if (!$("lg-follow").checked) return;
+  pullLog();
+}, 2000);
+
+$("mp-select").onchange = () => { currentProfile = $("mp-select").value; renderModels(); };
+
+/* ================================================================ 合成音色
+
+   音色表是钉住的（百炼没有列举系统音色的接口），所以这里做成 datalist 建议而不是
+   封闭下拉 —— 表外的音色能填，由「试一句」去判。 */
+async function pullVoices() {
+  try {
+    const view = await api("/api/voices");
+    $("tv-provider").value = view.provider === "dashscope" ? "dashscope" : "sherpa";
+    $("tv-model").value = view.model || "";
+    $("tv-voice").value = view.voice || "";
+    const models = $("tv-models");
+    models.textContent = "";
+    for (const name of view.models) models.appendChild(el("option", { value: name }));
+    const voices = $("tv-voices");
+    voices.textContent = "";
+    const host = $("tv-rows");
+    host.textContent = "";
+    for (const item of view.voices) {
+      voices.appendChild(el("option", { value: item.voice }, `${item.name} · ${item.languages}`));
+      const row = el("div", { class: "logrow" });
+      const head = el("div", { class: "lg-head" });
+      head.appendChild(el("code", null, item.voice));
+      head.appendChild(el("b", null, item.name));
+      head.appendChild(el("span", null, item.languages));
+      row.appendChild(head);
+      if (item.scenes) row.appendChild(el("p", { class: "note lg-fields" }, item.scenes));
+      host.appendChild(row);
+    }
+    $("tv-source").textContent =
+      `音色表出处：${view.source}（${view.checked} 核实，共 ${view.voices.length} 个）`;
+    $("tv-key").textContent = view.key_present
+      ? `密钥 ${view.key_env} 已有值。`
+      : `密钥 ${view.key_env} 还没有值 —— 到「密钥」那一栏存进去，或写进 .env。`;
+  } catch (err) {
+    $("tv-note").textContent = `读不到音色表：${err.message}`;
+  }
+}
+
+$("tv-try").onclick = async () => {
+  $("tv-note").textContent = "合成中（云端两次往返，可能要几秒）…";
+  try {
+    const out = await api("/api/voices/try", {
+      method: "POST",
+      body: { model: $("tv-model").value.trim(), voice: $("tv-voice").value.trim() },
+    });
+    $("tv-note").textContent = out.ok
+      ? `通了：${out.model} + ${out.voice}，${out.elapsed_ms}ms，${out.seconds}s 音频，${out.sample_rate}Hz`
+      : `不通：${out.reason}`;
+  } catch (err) {
+    $("tv-note").textContent = `试不了：${err.message}`;
+  }
+};
+
+$("tv-save").onclick = async () => {
+  const updates = {
+    "tts.provider": $("tv-provider").value,
+    "tts.model": $("tv-model").value.trim(),
+    "tts.voice": $("tv-voice").value.trim(),
+  };
+  try {
+    await api("/api/config", { method: "PUT", body: { file: "voice.toml", updates } });
+    $("tv-note").textContent = "已写进 config/voice.toml —— [tts] 是启动时读的，要重启才生效。";
+  } catch (err) {
+    $("tv-note").textContent = `保存失败：${err.message}`;
+  }
+};
+
+/* ================================================================= 重启
+
+   token 不变（守护进程把它交给自己的替身），所以这一页重启后照常能用，只需要等它
+   重新起来。轮询 /api/state 而不是定时刷新：模型加载要十几秒，一个固定的等待时间要么
+   太短（看到 401）要么太长（干等）。 */
+$("restart").onclick = () => {
+  overlay("按新配置重启？",
+    "控制台、语音栈、agent 注册表和唤醒球全部重建 —— 唤醒词、模型方案、agent 配置都是启动时读的，" +
+    "这是让它们生效的唯一路径。\n\n球会消失十几秒再回来。这一页不用刷新：token 不变。",
+    [
+      { label: "先不" },
+      {
+        label: "重启",
+        primary: true,
+        run: async () => {
+          const button = $("restart");
+          button.disabled = true;
+          button.textContent = "重启中…";
+          try {
+            await api("/api/restart", { method: "POST", body: {} });
+          } catch (err) {
+            /* 连接被掐断也算成功：进程正在被替换，响应发不出来是预期的。 */
+            if (err.status && err.status !== 0) {
+              button.disabled = false;
+              button.textContent = "重启";
+              overlay("重启没起来", err.message, null);
+              return;
+            }
+          }
+          for (let attempt = 0; attempt < 60; attempt++) {
+            await new Promise((done) => setTimeout(done, 1000));
+            try {
+              await api("/api/state");
+              button.disabled = false;
+              button.textContent = "重启";
+              await Promise.all([loadModels(), loadWake(), refreshState()]);
+              overlay("已按新配置起来了", "唤醒词、模型方案、agent 都是重新读的。", null);
+              return;
+            } catch { /* 还没起来，继续等 */ }
+          }
+          button.disabled = false;
+          button.textContent = "重启";
+          overlay("等了 60 秒还没回来",
+            "守护进程可能起失败了 —— 去启动它的那个终端看输出。", null);
+        },
+      },
+    ]);
+};
+$("mp-new").onclick = () => {
+  overlay("新建一套方案", "这个名字会成为 models.toml 里的段名，用英文短名。新方案从「全本机」那一套起步，建好再逐项改。", [
+    { label: "取消" },
+    { label: "建", primary: true, run: (name) => {
+      if (models.profiles[name]) { overlay("重名了", `已经有一套叫 ${name} 的方案。`, null); return; }
+      models.profiles[name] = {
+        label: name,
+        asr: { provider: "sherpa-local", model: "zipformer-zh-14M" },
+        tts: { provider: "sherpa-local", model: "vits-zh-single" },
+        llm: { provider: "ollama", model: "qwen2.5:7b" },
+      };
+      currentProfile = name;
+      renderModels();
+    } },
+  ], { label: "方案名", placeholder: "cloud-all" });
+};
+$("mp-copy").onclick = () => {
+  overlay("复制这套方案", `从 ${currentProfile} 复制一份，端点与模型名照抄，之后各改各的。`, [
+    { label: "取消" },
+    { label: "复制", primary: true, run: (name) => copyProfileAs(name) },
+  ], { label: "新名字", value: currentProfile + "-copy" });
+};
+function copyProfileAs(name) {
+  /* 原来这里重名也是静默 return，点了「确定」什么都不发生 —— 会被读成按钮坏了。
+     「新建」那颗一直是有反馈的，两颗按钮的失败必须长得一样。 */
+  if (models.profiles[name]) { overlay("重名了", `已经有一套叫 ${name} 的方案。换一个名字，或者直接改那一套。`, null); return; }
+  models.profiles[name] = JSON.parse(JSON.stringify(models.profiles[currentProfile]));
+  models.profiles[name].label = (models.profiles[name].label || name) + "（副本）";
+  currentProfile = name;
+  renderModels();
+}
+$("mp-del").onclick = () => {
+  if (Object.keys(models.profiles).length <= 1) { overlay("不能删", "至少留一套方案。", null); return; }
+  const name = currentProfile;
+  overlay("删掉这套方案？", `${name} —— ${models.profiles[name].label || ""}\n\n` +
+    (name === models.active ? "它正是当前生效的那套，删掉后 active 会指向不存在的方案。" : "它不是当前生效的那套。"), [
+    { label: "取消" },
+    { label: "删掉", primary: true, run: () => {
+      delete models.profiles[name];
+      currentProfile = Object.keys(models.profiles)[0];
+      renderModels();
+    } },
+  ]);
+};
+$("mp-save").onclick = async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const profile = models.profiles[currentProfile];
+    for (const kind of ["asr", "tts", "llm"]) {
+      /* label 一起送：新建的方案在这一页上有标签，不送的话保存完再刷新就成了「(无标签)」。 */
+      await api("/api/models", {
+        method: "PUT",
+        body: { profile: currentProfile, kind, fields: profile[kind], label: profile.label || "" },
+      });
+    }
+    show($("models-degraded"), "已写入 config/models.toml，重启生效。", "good");
+  } catch (err) {
+    show($("models-degraded"),
+      `保存失败：${err.message}。` + (modelsLive ? "" : "后端的 models_update 还没实现，这是预期结果。"), "bad");
+  } finally {
+    button.disabled = false;
+  }
+};
+
+/* 启用一套方案。**两步一起做才叫切换** —— 后端写 active，并把这套的 ASR/TTS 推进
+   config/voice.toml（运行时读的是那个文件）。key_env 不推：它决定把哪个凭据发出去。 */
+$("mp-activate").onclick = async (event) => {
+  const button = event.currentTarget;
+  const target = currentProfile;
+  button.disabled = true;
+  show($("mp-activate-error"), "");
+  try {
+    const result = await api("/api/models/active", { method: "POST", body: { profile: target } });
+    const wrote = Object.keys(result.voice || {});
+    show($("models-degraded"),
+      `已启用 ${target}。` +
+      (wrote.length ? `同步进 config/voice.toml：${wrote.join("、")}。` : "voice.toml 没有需要改的。") +
+      "重启生效。", "good");
+    await loadModels();
+  } catch (err) {
+    show($("mp-activate-error"), `启用失败：${err.message}`, "bad");
+  } finally {
+    button.disabled = false;
+  }
+};
+
+/* ================================================================= 唤醒词
+
+   「唤不醒」最常见的原因是喊了个不在表里的词，而这份表以前在界面上没有出口 ——
+   模型自带 8 个，页面一个都不显示，用户只能靠猜。所以这一栏第一件事是把现在能喊的词
+   列出来，改词是第二件。
+
+   词表是**启动时**喂给 KWS 的，所以保存完必须重启。这句话写在按钮边上而不是只写在
+   文档里：不说的话，用户会改完就对着麦克风反复喊一个还没生效的词。 */
+
+let wake = null;
+
+async function loadWake() {
+  busy($("kw-list"), "读取 /api/wake…");
+  try {
+    wake = await api("/api/wake");
+  } catch (err) {
+    $("kw-list").textContent = "";
+    $("kw-source").textContent =
+      `读不到 /api/wake（${err.message}）—— 通常是控制台还跑在旧版进程里，重启一次即可。`;
+    return;
+  }
+  renderWake();
+}
+
+function renderWake() {
+  const host = $("kw-list");
+  host.textContent = "";
+  for (const word of wake.words) {
+    const cell = el("div", { class: "clip filled", od: "keyword-" + word });
+    cell.appendChild(el("b", null, word));
+    cell.appendChild(el("span", null, `${word.length} 个字`));
+    host.appendChild(cell);
+  }
+  $("kw-source").textContent = wake.custom
+    ? `生效的是你自己那份：${wake.custom_path} · 命中阈值 ${wake.threshold}`
+    : `生效的是模型出厂那份：${wake.active_path} · 命中阈值 ${wake.threshold}`;
+  /* 只在自定义生效时回填输入框。出厂那 8 个词回填进去会让「保存」把它们抄成一份
+     自定义词表 —— 那之后模型换了词表，这份抄件不会跟着变。 */
+  $("kw-input").value = wake.custom ? wake.words.join(" ") : "";
+  $("kw-note").textContent =
+    `每个词 ${wake.limits.min_chars}–${wake.limits.max_chars} 个汉字，最多 ${wake.limits.max_words} 个。` +
+    `只收汉字：这个模型的建模单元是拼音的声母／韵母，英文和数字拼不出它认识的音。` +
+    `保存后**要重启控制台才生效**。`;
+}
+
+/* ---------------------------------------------------- 唤醒命中检测（三层分离）
+
+   为什么值得单独一块：「喊了没反应」有三个完全不同的根因，而它们在使用者眼里长得
+   一模一样 —— ① 麦克风没进声音（Windows 上被静音/被隐私设置拒绝的设备**不报错**，
+   样本全零）② 唤醒词没命中 ③ 声纹把它拒了。实机诊断读出「KWS 命中 16/16、声纹接受
+   0/16」正是靠这个分离，合成一个数字就什么也答不了。
+
+   数据来自 /api/state 的 wake 与 input_level 两块，都不带音频、不带向量。 */
+let wakeFunnelTimer = null;
+
+function funnelCell(label, value, tone) {
+  const cell = el("div", { class: tone ? `clip ${tone}` : "clip" });
+  cell.appendChild(el("b", null, String(value)));
+  cell.appendChild(el("span", null, label));
+  return cell;
+}
+
+function renderWakeFunnel(payload) {
+  const host = $("wk-funnel");
+  host.textContent = "";
+  const funnel = (payload && payload.wake) || { kws: 0, accepted: 0, rejected: 0, recent: [] };
+  /* KWS 那一格永远不着色：它是「听见了」而不是「成了」。接受为绿、拒绝为琥珀（等你处理）。 */
+  host.appendChild(funnelCell("唤醒词命中", funnel.kws, null));
+  host.appendChild(funnelCell("声纹通过", funnel.accepted, funnel.accepted ? "filled" : null));
+  host.appendChild(funnelCell("声纹拒绝", funnel.rejected, funnel.rejected ? "weak" : null));
+  /* 第四格只在非零时出现：它是「通过了声纹但识别器没开起来」—— 也就是「唤醒了却没有
+     后文」本身。平时是 0，占一格纯属噪声；一旦非零它是最重要的那个数字。 */
+  host.classList.toggle("wide4", Boolean(funnel.listen_refused));
+  if (funnel.listen_refused) {
+    host.appendChild(funnelCell("没进聆听", funnel.listen_refused, "bad"));
+  }
+
+  /* 输入电平单独一行文字而不是第四格：它是连续量，而上面三个是计数。 */
+  const level = payload && payload.input_level;
+  const note = $("wk-input");
+  if (!payload || !payload.mic_running) {
+    note.textContent = "麦克风没在跑 —— 用 run_console.py --voice 启动，否则这三个数永远是 0。";
+  } else if (!level) {
+    note.textContent = "麦克风在跑，还没有电平数据。";
+  } else if (level.silent) {
+    note.textContent =
+      `输入设备在出零（峰值 ${level.peak}，已听 ${level.seconds}s）—— 唤醒不可能命中。` +
+      `检查麦克风是否被静音，或「设置 → 隐私和安全性 → 麦克风 → 允许桌面应用访问麦克风」。`;
+  } else {
+    /* 设备名和 OS 音量排在峰值前面：峰值是结果，那两个是原因。实测同一时刻「耳机」的
+       Windows 输入音量是 1%、「麦克风阵列」是 82% —— 唤不醒和一说就削波是同一个数字的
+       两端，而在这一行出现之前它们都只表现为「峰值不对」。 */
+    const os = level.os;
+    note.textContent =
+      `设备 ${level.device || "(认不出)"}` +
+      (os ? `　·　Windows 输入音量 ${Math.round(os.level * 100)}%${os.muted ? "（已静音）" : ""}` : "") +
+      `　·　输入峰值 ${level.peak}（已听 ${level.seconds}s）` +
+      (level.too_quiet ? `　·　低于 ${level.want_peak}，太轻 —— 去「声纹」页点「校准输入音量」` : "") +
+      (level.peak >= 0.999 ? "　·　到轨了（削波），去「声纹」页点「校准输入音量」" : "");
+  }
+  if (funnel.last_listen_refusal) {
+    note.textContent += `　·　没进聆听：${funnel.last_listen_refusal}`;
+  }
+  /* 注册模式排在最前面：这一格非空时上面那三个计数**必然**全是 0，而那不是故障。
+     不说出来的话，「唤醒判定被按住」和「KWS 根本没装上」在页面上长得一模一样。 */
+  if (funnel.enroll_only) {
+    note.textContent =
+      "还没有人注册 —— 现在是注册模式：麦克风在跑、缓冲在填，但唤醒判定被按住，" +
+      "所以上面三个数会一直是 0。去「声纹」页录那几句并注册，注册成功即刻解开（不用重启）。　·　" +
+      note.textContent;
+  }
+
+  const rows = $("wk-rows");
+  rows.textContent = "";
+  const recent = funnel.recent || [];
+  if (!recent.length) {
+    rows.appendChild(el("p", { class: "note" }, "还没有唤醒尝试 —— 对着麦克风喊一声。"));
+    return;
+  }
+  for (const entry of recent) {
+    const row = el("div", { class: "logrow" });
+    const head = el("div", { class: "lg-head" });
+    head.appendChild(el("code", null, new Date(entry.at * 1000).toTimeString().slice(0, 8)));
+    const verdict = entry.verdict === "accepted" ? ["note", "通过"]
+      : entry.verdict === "rejected" ? ["warn", "声纹拒绝"]
+      : entry.verdict === "listen_refused" ? ["bad", "没进聆听"]
+      : entry.verdict === "listen_expired" ? ["note", "没人说话"]
+      : ["note", "命中"];
+    head.appendChild(el("b", { class: verdict[0] }, verdict[1]));
+    head.appendChild(el("span", null, entry.keyword ? `「${entry.keyword}」` : ""));
+    row.appendChild(head);
+    const bits = [];
+    if (entry.score !== null && entry.score !== undefined) bits.push(`相似度 = ${entry.score}`);
+    if (entry.reason) bits.push(`原因 = ${entry.reason}`);
+    if (entry.verdict === "kws") bits.push("这一层通过了，接下来看声纹");
+    if (bits.length) row.appendChild(el("p", { class: "note lg-fields" }, bits.join("　·　")));
+    rows.appendChild(row);
+  }
+}
+
+async function pullWakeFunnel() {
+  try {
+    renderWakeFunnel(await api("/api/state"));
+  } catch (err) {
+    $("wk-input").textContent = `读不到 /api/state：${err.message}`;
+  }
+}
+
+$("wk-refresh").onclick = () => pullWakeFunnel();
+
+/* 一秒一次，只在这一栏可见且标签页在前台时 —— 唤醒是个瞬时事件，两秒的间隔会让人
+   喊完之后盯着一个没动的页面怀疑是不是没记上。 */
+setInterval(() => {
+  if (document.hidden || currentView !== "keywords") return;
+  if (!$("wk-follow").checked) return;
+  pullWakeFunnel();
+}, 1000);
+
+/* 空白、半角逗号、全角逗号、顿号、分号都当分隔符 —— 用户从别处粘一行词进来，
+   分隔符是哪个取决于他从哪粘的，挑一个当唯一合法的会把这件事变成猜谜。 */
+function parseWakeInput(raw) {
+  return String(raw || "").split(/[\s,，、;；]+/).map((s) => s.trim()).filter(Boolean);
+}
+
+$("kw-save").onclick = async () => {
+  const words = parseWakeInput($("kw-input").value);
+  if (!words.length) {
+    show($("kw-error"), "没填词。要回到出厂那份就点「恢复出厂」。", "warn");
+    return;
+  }
+  $("kw-save").disabled = true;
+  try {
+    const result = await api("/api/wake", { method: "PUT", body: { words } });
+    show($("kw-error"), "");
+    await loadWake();
+    overlay(`已写下 ${result.words.length} 个唤醒词`,
+      `${result.words.join("\n")}\n\n` +
+      `要重启控制台才生效 —— 词表是启动时喂给唤醒模型的，现在对着麦克风喊还是旧词。`,
+      null);
+  } catch (err) {
+    /* 校验失败的原文直接显示：后端的消息已经写明是哪个词、为什么不行。 */
+    show($("kw-error"), err.message, "bad");
+  } finally {
+    $("kw-save").disabled = false;
+  }
+};
+
+$("kw-reset").onclick = () => {
+  const count = wake ? wake.shipped_words.length : 8;
+  overlay("恢复出厂词表？", `自定义那份会被删掉，回到模型自带的 ${count} 个词。`, [
+    { label: "取消" },
+    {
+      label: "删掉自定义那份",
+      primary: true,
+      run: async () => {
+        try {
+          await api("/api/wake", { method: "PUT", body: { words: [] } });
+          show($("kw-error"), "");
+          await loadWake();
+        } catch (err) {
+          show($("kw-error"), err.message, "bad");
+        }
+      },
+    },
+  ]);
+};
+
+/* ================================================================= 声纹
+
+   **录音在服务端，不在浏览器里。** 上一版走 getUserMedia → 自己降采样 → 自己写 WAV 头
+   → base64 上传，那条路的问题不是代码，是**信道**：注册和校验必须来自同一条录音链路，
+   否则相似度比的是两条链路的差别而不是两个人的差别。浏览器拿的是**浏览器认为的默认
+   设备**（不是 `[input] device`），还带它自己的 AGC / 降噪 / 回声消除和采样率；而校验
+   读的是 `SounddeviceWakeCapture` 那条流。
+
+   现在页面只发一个请求，服务端从**门读的那个环形缓冲**取 3 秒。同信道因此是构造上成立
+   的，不靠谁记得选对设备；顺带音频也不再经过 HTTP。降采样、WAV 编码、base64 三段代码
+   随之删掉 —— 它们各自都对，但那条路整体是错的。 */
+
+const CLIP_SECONDS = 3.0;
+/* 每段的读数（duration_s / rms / peak / clip_ratio），由 /api/speaker/capture 返回。
+   样本本身留在服务端内存里，浏览器这边只有数字。 */
+const clips = [];
+/* 要念的那几句，由 /api/speaker 给（出处 core/audio/enroll_prompts.py）。
+   页面不自己写一份 —— 脚本和页面共用同一份，两条路的提示才不会各自漂移。 */
+let enrollPrompts = [];
+/* 麦克风在不在跑，以及是不是「注册模式」（一个人都没注册时唤醒判定被永久按住）。
+   第一次注册**要能在这一页里做完** —— 此前那是个死锁：门不许开麦，而注册要从采集缓冲
+   取音频，于是只能先开终端跑脚本。 */
+let micRunning = false;
+let enrollOnly = false;
+
+function renderClips() {
+  const host = $("sp-clips");
+  host.textContent = "";
+  /* 格子数 = 服务端给的那几句（core/audio/enroll_prompts.py），不写死。每格显示**要念哪句**：
+     六句各不相同是刻意的 —— 同一句念六遍练出来的质心对那一句的音素组合过拟合，而唤醒时
+     说的是唤醒词、之后说的是任意请求。 */
+  const plan = enrollPrompts.length ? enrollPrompts : [{ condition: "", text: "" }];
+  for (let i = 0; i < plan.length; i++) {
+    const clip = clips[i];
+    const weak = clip && clip.rms < 0.01;
+    const next = i === clips.length;
+    const div = el("div", {
+      class: "clip" + (clip ? (weak ? " filled weak" : " filled") : (next ? " next" : "")),
+      od: "clip-" + (i + 1),
+    });
+    div.appendChild(el("b", null, clip ? `第 ${i + 1} 段 · 已录` : next ? `第 ${i + 1} 段 · 下一句` : `第 ${i + 1} 段`));
+    div.appendChild(el("span", { class: "say" }, "「" + plan[i].text + "」"));
+    div.appendChild(el("span", { class: "cond" }, plan[i].condition));
+    div.appendChild(el("span", null, clip
+      ? `${clip.duration_s.toFixed(2)}s · rms ${clip.rms.toFixed(4)} · peak ${clip.peak.toFixed(3)}` +
+        (weak ? " · 偏轻，建议重录" : "") +
+        (clip.peak >= 0.999 ? " · 到轨了，调低麦克风音量" : clip.clip_ratio > 0.05 ? " · 削波" : "")
+      : next ? "点「录一段」，念上面这句" : "还没到"));
+    host.appendChild(div);
+  }
+  /* 画着 N 个格子，但 1 段就能提交 —— 空格子不该由用户自己去猜是「还差」还是「可选」。
+     这里只说进度和倾向，不编后端的阈值。实测支撑：1 段 0.706 / 2 段 0.772 / 3 段 0.794。 */
+  const n = clips.filter(Boolean).length;
+  const total = plan.length;
+  $("sp-count").textContent = n === 0
+    ? `还没录。建议录满 ${total} 段，每段念格子里那一句，正常音量、正常语速 —— 后两句请退开两步。`
+    : n < total
+      ? `已录 ${n} / ${total} 段。少于 ${total} 段也能提交，但样本越少质心越飘（实测 1 段 0.706 / 2 段 0.772 / 3 段 0.794），声纹门就越容易把你本人也拒掉 —— 拒的那一侧是 fail-closed，不会放错人进来。`
+      : `${total} 段齐了。注册后音频不落盘，只留下向量。`;
+  if (enrollOnly) {
+    $("sp-count").textContent += " 现在是注册模式：麦克风开着，但唤醒判定被按住 —— 注册成功后立刻解开，不用重启。";
+  }
+  const mic = $("sp-mic");
+  mic.hidden = micRunning;
+  $("sp-record").disabled = !micRunning;
+  $("sp-enroll").disabled = clips.length === 0 || !$("sp-name").value.trim();
+}
+
+async function renderSpeakers() {
+  const host = $("sp-list");
+  busy(host, "读取已注册的声纹…");
+  let view;
+  try { view = await api("/api/speaker"); }
+  catch (err) { failed(host, err.message, renderSpeakers); $("sp-config").textContent = ""; return; }
+  host.textContent = "";
+  /* 要念的那几句跟着这份状态一起来。拿到之后重画格子 —— 服务端加一句，页面自动多一格。 */
+  if (Array.isArray(view.prompts) && view.prompts.length) {
+    enrollPrompts = view.prompts;
+    micRunning = !!view.mic_running;
+    enrollOnly = !!view.enroll_only;
+    renderClips();
+  }
+  const names = view.speakers || [];
+  if (!names.length) {
+    host.appendChild(rowOf("gap", "(无)", view.available
+      ? "还没有人注册 —— 声纹门会拒绝一切唤醒（这是 fail-closed 的正常表现）"
+      : (view.reason || "不可用")));
+  } else {
+    for (const name of names) {
+      const drop = el("button", { class: "danger" }, "删除");
+      drop.onclick = () => overlay("删掉这个人的声纹？", `${name}\n\n删掉后他唤醒不了。这一步不可撤销 —— 要恢复只能重新录一遍那几句。`, [
+        { label: "取消" },
+        { label: "删掉", primary: true, run: async () => {
+          try { await api("/api/speaker/remove", { method: "POST", body: { name } }); await renderSpeakers(); await refreshState(); }
+          catch (err) { show($("sp-error"), err.message); }
+        } },
+      ]);
+      host.appendChild(rowOf("ok", name, "已注册", [drop], "speaker-" + name));
+    }
+  }
+  /* describe() 给什么就显示什么：计数与配置。向量永不出现在这里。
+     但**不是原样摊开** —— 一行 300 字符的 JSON 里，「用的是哪个模型」这个最常问的问题
+     反而是最难找的。所以先给一句人话，原始读数折起来。 */
+  const gate = view.gate || {};
+  /* 「未加载」单独说清楚是哪一种：文件不在（要去下载）和文件在但还没进内存（懒加载，
+     开麦时才加载）都会让 loaded=false，而这两件事该做的事完全不同。 */
+  const loadState = view.available === false
+    ? "模型文件缺失"
+    : view.loaded ? "已加载" : "未加载（开麦时才加载）";
+  const summary = [
+    view.model_label ? `模型 ${view.model_label}` : "",
+    view.dim ? `dim ${view.dim}` : "",
+    loadState,
+    view.threshold === undefined ? "" : `阈值 ${view.threshold}`,
+    gate.cooldown_s === undefined ? "" : `冷却 ${gate.cooldown_s}s`,
+  ].filter(Boolean);
+  $("sp-config").textContent = summary.join("　·　");
+
+  /* 作废的档案要单独喊：它非空的时候，上面那份「已注册」名单是骗人的 —— 名字在文件里，
+     但向量对当前模型无意义，门会照常拒绝。 */
+  const stale = view.needs_reenrollment || [];
+  show($("sp-stale"), stale.length
+    ? `这些人的档案是上一个模型留下的，必须重新注册：${stale.join("、")}`
+    : "");
+
+  const rest = Object.entries(view).filter(([k]) =>
+    !["speakers", "available", "reason", "model_label", "dim", "loaded", "threshold"].includes(k));  $("sp-raw-body").textContent = rest.map(([k, v]) => `${k}=${JSON.stringify(v)}`).join("  ");
+  $("sp-raw").hidden = rest.length === 0;
+}
+
+$("sp-record").onclick = async (event) => {
+  const button = event.currentTarget;
+  /* 上限 = 服务端给的那几句的条数（core/audio/enroll_prompts.py），页面不写死。
+     2026-09-01 实机：这里曾硬编码 3，于是页面画着 6 个格子、录到第 4 段被自己拦下 ——
+     后两句「往后退两步」永远录不到，而那两句正是「不同距离也能唤醒」的全部依据。
+     条数还没拿到时**不拦**：真正的那道闸在服务端（capture_clip 的 409），一个客户端
+     猜出来的上限只会和它不一致。 */
+  const cap = enrollPrompts.length;
+  if (cap && clips.length >= cap) { show($("sp-error"), `已经录了 ${cap} 段，先注册或清空`, "warn"); return; }
+  show($("sp-error"), "");
+  button.disabled = true;
+  button.textContent = "录音中…";
+  /* 服务端从采集缓冲取 3 秒，所以这次请求会阻塞那么久 —— 交互和原来一样：
+     点一下、说一句、拿到读数。区别在于录的是**门读的那条流**。 */
+  try { clips.push(await api("/api/speaker/capture", { method: "POST", body: { seconds: CLIP_SECONDS } })); renderClips(); }
+  catch (err) { show($("sp-error"), err.message); }
+  finally { button.disabled = false; button.textContent = "录一段"; }
+};
+$("sp-clear").onclick = async () => {
+  clips.length = 0;
+  renderClips();
+  show($("sp-error"), "");
+  try { await api("/api/speaker/capture_clear", { method: "POST", body: {} }); } catch { /* 清空失败不值得打断 */ }
+};
+$("sp-name").oninput = renderClips;
+$("sp-enroll").onclick = async (event) => {
+  const button = event.currentTarget;
+  show($("sp-error"), "");
+  button.disabled = true;
+  try {
+    const result = await api("/api/speaker/enroll_captured", {
+      method: "POST",
+      body: { name: $("sp-name").value.trim() },
+    });
+    clips.length = 0;
+    renderClips();
+    await renderSpeakers();
+    await refreshState();
+    show($("sp-error"),
+      `已注册 ${result.speaker}：${result.samples_used} 个向量 · ${result.total_seconds}s · ` +
+      `dim=${result.dim} · audio_saved=${result.audio_saved}` +
+      (result.wake_armed ? " · 唤醒判定已解开，现在可以喊唤醒词了（不用重启）" : ""), "good");
+  } catch (err) { show($("sp-error"), err.message, "bad"); }
+  finally { button.disabled = false; }
+};
+
+$("sp-mic").onclick = async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = "打开中…";
+  show($("sp-error"), "");
+  try {
+    const out = await api("/api/mic/start", { method: "POST", body: {} });
+    micRunning = !!out.running;
+    enrollOnly = !!out.enroll_only;
+    renderClips();
+    await refreshState();
+    await renderInputLevel();
+  } catch (err) {
+    show($("sp-error"), err.message, "bad");
+  } finally {
+    button.disabled = false;
+    button.textContent = "开麦克风";
+  }
+};
+
+/* 输入设备 + Windows 那一侧的输入音量。**软件增益救不了削波**（它发生在 ADC 里），
+   所以这一端只能在 OS 那一侧解决，而这里就是那一侧。 */
+async function renderInputLevel() {
+  const out = $("sp-level");
+  try {
+    const state = await api("/api/state");
+    const level = state.input_level;
+    if (!state.mic_running || !level) { out.textContent = "麦克风没在跑 —— 先点「开麦克风」。"; return; }
+    const os = level.os;
+    /* **配置点名了一只、实际用的是另一只时必须说出来。** 使用者报过这一格写着「设备：耳机」
+       而耳机根本没插 —— 那时页面读的是配置里的名字，不是真在用的那只，所以既撒了谎又
+       连带说「音量读不到」（拿一个不存在的设备名去问 Windows 当然读不到）。 */
+    const fellBack = level.device_wanted
+      ? `　·　配置写的是「${level.device_wanted}」，没匹配到（没插？），已退回系统默认`
+      : "";
+    /* 峰值那一格怎么读，取决于 **VAD 有没有听到人说话** —— 这两件事此前混在一起，而混在
+       一起就会误判。使用者的内置麦克风实机唤醒是正常的，而这一行当时写着「实时峰值
+       0.000397（低于 0.1，太轻）」，那是他还没开口时的读数（`input_peak` 是 start() 以来的
+       **运行最大值**，那一刻它就是一段环境声的最大值）。用峰值去回答「够不够响」而不问
+       有没有人在说话，正是 core/audio/vad.py 模块头说过答不了的那个问题。
+       所以「太轻」这句话现在只在真的听到语音之后才出现，措辞也只说下一步做什么，
+       不再替这只麦克风下「它听不见」的结论。 */
+    const deaf = level.too_quiet && os && !os.muted && os.level >= 0.9
+      ? `　·　系统音量已经 ${Math.round(os.level * 100)}% 了说话还是这么轻 —— 先「校准输入音量」，` +
+        `还是轻再考虑换一只（下面「刷新输入设备」）`
+      : "";
+    out.textContent =
+      `设备：${level.device || "(认不出)"}　·　` +
+      (os ? `Windows 输入音量 ${Math.round(os.level * 100)}%${os.muted ? "（已静音！）" : ""}` : `音量读不到：${level.os_reason || "不支持"}`) +
+      `　·　${level.heard_speech ? "说话峰值" : "环境峰值"} ${level.peak}` +
+      (level.heard_speech
+        ? (level.too_quiet ? `（低于 ${level.want_peak}，偏轻）` : "")
+        : "　·　还没听到有人说话（这段时间都是环境声）—— 说一句再看这个数") +
+      fellBack + deaf;
+  } catch (err) { out.textContent = err.message; }
+}
+
+/* 输入设备清单 + 「用这一只」。**这是「换麦克风」这件事在界面上的唯一入口** ——
+   在它之前只能去「其余语音参数」里手打一个名字片段，而打错不报错（栈退回系统默认）。
+   写的是设备**全名**：`_match_device` 会在同名的多个 host API 条目里按固定优先级挑
+   （WASAPI 优先），所以不必让人去理解 MME / DirectSound 的区别。 */
+async function renderDevices() {
+  const host = $("sp-devices");
+  const note = $("sp-dev-note");
+  show($("sp-dev-error"), "");
+  busy(host, "枚举输入设备…");
+  let data;
+  try { data = await api("/api/devices"); }
+  catch (err) { failed(host, err.message, renderDevices); return; }
+  host.textContent = "";
+  if (!data.available) {
+    note.textContent = "";
+    show($("sp-dev-error"), `列不出设备：${data.reason}`, "bad");
+    return;
+  }
+  note.textContent = data.wanted
+    ? `配置点名「${data.wanted}」，但没匹配到 —— 现在用的是系统默认「${data.in_use || "(认不出)"}」`
+    : `在用：${data.in_use || "(认不出)"}`;
+  /* 同一只物理麦克风在四种 host API 下各出现一次。按名字去重再列 —— 十六行里有十二行
+     是同一只麦克风的重复，那种清单没人看得下去，而「用哪个 API」不是使用者该决定的事。
+     去重时**优先留能用的那一条**：同名条目里 WDM-KS 那份是开不起来的，留它会让整只
+     麦克风看起来不可用。 */
+  const seen = new Map();
+  for (const row of data.devices) {
+    const prev = seen.get(row.name);
+    const better = !prev
+      || (row.in_use && !prev.in_use)
+      || (!row.unusable && prev.unusable && !prev.in_use);
+    if (better) seen.set(row.name, row);
+  }
+  let hidden = 0;
+  for (const row of seen.values()) {
+    /* 开不起来的条目**不给按钮**，而且默认收起来。「电脑扬声器」「立体声混音」在清单里
+       长得像麦克风，给它们一颗「用这一只」等于请人去选一只听不见的设备 —— 而那之后栈会
+       静默退回系统默认，正是这次报告的形状。 */
+    if (row.unusable && !row.in_use) { hidden += 1; continue; }
+    const line = el("div", { class: "kv" + (row.in_use ? "" : " locked") });
+    const vol = row.os
+      ? `系统音量 ${Math.round(row.os.level * 100)}%${row.os.muted ? " · 已静音！" : ""}`
+      : "读不到系统音量";
+    line.appendChild(el("code", null, row.name + (row.in_use ? "　← 在用" : "")));
+    line.appendChild(el("div", { class: "val" }, `${row.channels} 声道　·　${vol}`));
+    if (row.in_use) {
+      line.appendChild(el("div", { class: "hint" }, "当前"));
+    } else {
+      const use = el("button", null, "用这一只");
+      use.onclick = async () => {
+        use.disabled = true;
+        try {
+          await api("/api/config", {
+            method: "PUT",
+            body: { file: "voice.toml", updates: { "input.device": row.name } },
+          });
+          show($("sp-dev-error"),
+            `已把 input.device 写成「${row.name}」。**要重启 Vox 才换过去** —— ` +
+            `采集流是在启动时按这一行打开的。`, "good");
+          await renderDevices();
+        } catch (err) {
+          show($("sp-dev-error"), `写不进去：${err.message}`, "bad");
+        } finally { use.disabled = false; }
+      };
+      line.appendChild(use);
+    }
+    host.appendChild(line);
+  }
+  if (hidden) {
+    host.appendChild(el("p", { class: "note" },
+      `另有 ${hidden} 条按 ${"16 kHz 单声道"} 打不开（WDM-KS 内核流、扬声器回环、立体声混音这类），` +
+      `没有列出来 —— 选中它们只会得到一只听不见的设备。真要用的话在「其余语音参数」里写索引。`));
+  }
+}
+
+$("sp-dev-refresh").onclick = renderDevices;
+
+$("sp-cal").onclick = async (event) => {
+  const button = event.currentTarget;
+  const out = $("sp-cal-out");
+  button.disabled = true;
+  button.textContent = "校准中，请一直说话…";
+  show(out, "念注册格子里的任意一句，别停 —— 它要量你说话时的峰值，每轮 2 秒。", "note");
+  try {
+    const r = await api("/api/mic/calibrate", { method: "POST", body: { seconds: 2.0 } });
+    /* 把整条轨迹显示出来。校准是闭环的，「调了几轮、每轮量到多少」正是判断它有没有
+       真的生效的唯一依据 —— 只报一个结果的诊断没法和「什么都没做」区分。 */
+    const steps = (r.trail || []).map((s) => s.silent
+      ? `${Math.round(s.level * 100)}% → 没听到说话`
+      : `${Math.round(s.level * 100)}% → 峰值 ${s.peak}`).join("　→　");
+    show(out,
+      `${r.device}：${Math.round(r.before.level * 100)}% → ${Math.round(r.after.level * 100)}%` +
+      `　·　目标带 ${r.band[0]}–${r.band[1]}　·　${r.settled ? "已进目标带" : "未进目标带"}` +
+      (steps ? `\n${steps}` : "") + (r.hint ? `\n${r.hint}` : ""),
+      r.settled ? "good" : "warn");
+    await renderInputLevel();
+  } catch (err) { show(out, err.message, "bad"); }
+  finally { button.disabled = false; button.textContent = "校准输入音量"; }
+};
+
+$("sp-try").onclick = async (event) => {
+  const button = event.currentTarget;
+  const out = $("sp-try-out");
+  button.disabled = true;
+  button.textContent = "听着…";
+  out.className = "note";
+  out.textContent = "说一句话…";
+  try {
+    const r = await api("/api/test/speaker_live", { method: "POST", body: { seconds: CLIP_SECONDS } });
+    const bits = [
+      r.accepted ? "通过" : "拒绝",
+      `相似度 ${r.score}${r.threshold === null || r.threshold === undefined ? "" : " / 阈值 " + r.threshold}`,
+      r.speaker ? r.speaker : "",
+      r.reason,
+      `窗长 ${r.window_s}s（和唤醒时一致）`,
+      `peak ${Number(r.peak || 0).toFixed(3)} · rms ${Number(r.rms || 0).toFixed(4)}`,
+    ].filter(Boolean);
+    out.textContent = bits.join("　·　");
+    out.className = r.accepted ? "note good" : "note bad";
+  } catch (err) {
+    out.textContent = err.message;
+    out.className = "note bad";
+  } finally {
+    button.disabled = false;
+    button.textContent = "试一句";
+  }
+};
+
+/* ============================================================ 本机 Agent */
+
+async function renderAgents() {
+  const host = $("ag-list");
+  busy(host, "读取 agent 清单…");
+  let payload;
+  /* 原来这里的错误写进 #ag-error，而那个节点住在下面「条目设置」那一块里 ——
+     清单读失败，红字出现在另一个区段的底部，等于把错误挂到了不相干的东西上。 */
+  try { payload = await api("/api/agents"); }
+  catch (err) { failed(host, err.message, renderAgents); return; }
+  host.textContent = "";
+  const rows = payload.agents || [];
+  if (!rows.length) {
+    host.appendChild(rowOf("", "(无)", "config/agents.toml 里没有启用的条目"));
+    return;
+  }
+  for (const row of rows) {
+    const test = el("button", null, "测一句");
+    /* 上一版这里总是拿 rows[0]，多个 agent 时点哪一行都在测第一个。这一版按行传名字。 */
+    test.onclick = () => testAgent(row.name, test);
+    host.appendChild(rowOf(
+      row.available ? "ok" : "gap", row.name,
+      row.available ? "可用" : (row.reason || "不可用"), [test], "agent-" + row.name));
+  }
+}
+
+async function testAgent(name, button) {
+  const out = $("ag-out");
+  out.className = "out";
+  out.textContent = "";
+  out.appendChild(el("b", null, `${name} 试跑中…`));
+  button.disabled = true;
+  try {
+    const r = await api("/api/test/agent", { method: "POST", body: { agent: name, text: $("ag-text").value } });
+    out.className = "out " + (r.ok ? "ok" : "bad");
+    out.textContent = "";
+    out.appendChild(el("b", null, `${r.agent} ${r.ok ? "答了" : "没答"} · ${r.elapsed_ms}ms · ${r.level}`));
+    out.appendChild(document.createTextNode(r.ok
+      ? `${r.chars} 字 / ${r.chunks} 个 chunk\n${r.text}`
+      : `${r.error}\n受阻不等于没试过 —— 这条记录本身就是证据。`));
+  } catch (err) {
+    out.className = "out bad";
+    out.textContent = "";
+    out.appendChild(el("b", null, "试跑失败"));
+    out.appendChild(document.createTextNode(err.message));
+  } finally { button.disabled = false; }
+}
+
+async function renderAgentConfig() {
+  const host = $("ag-config");
+  busy(host, "读取 agents.toml…");
+  let view;
+  try { view = await api("/api/agents/config"); }
+  catch (err) { failed(host, err.message, renderAgentConfig); return; }
+  host.textContent = "";
+  if (!view.present) {
+    host.appendChild(el("p", { class: "note" }, "config/agents.toml 不存在。"));
+    return;
+  }
+  for (const entry of view.entries || []) {
+    const block = el("div", { class: "block", od: "agent-cfg-" + entry.section });
+    block.appendChild(el("h3", null, `${entry.name || entry.section} · ${entry.kind || "?"}`));
+    for (const key of entry.keys) block.appendChild(kvRow(key, "agents"));
+    host.appendChild(block);
+  }
+  const save = el("button", { class: "primary", style: "margin-top:13px", od: "agents-save" }, "保存 agents.toml");
+  save.onclick = () => saveScope("agents",
+    (updates) => api("/api/agents/config", { method: "PUT", body: { updates } }), save, $("ag-error"));
+  host.appendChild(save);
+}
+
+/* ============================================================ 本人档案 */
+
+const DRAFT = [
+  "# 关于我",
+  "",
+  "- 姓名：",
+  "- 希望被怎么称呼：",
+  "- 时区：Asia/Shanghai",
+  "- 语言偏好：中文回复",
+  "- 常用路径：",
+  "",
+  "<!-- 以上字段是控制台拟的草案，还没跟你确认过。文件本身才是事实，随便改。 -->",
+].join("\n");
+
+async function renderProfile() {
+  const host = $("pf-list");
+  busy(host, "读取 memory/facts…");
+  let view;
+  try { view = await api("/api/profile"); }
+  catch (err) { failed(host, err.message, renderProfile); return; }
+  host.textContent = "";
+  if (!view.present) {
+    host.appendChild(rowOf("gap", "(无目录)", view.dir + " 还不存在，保存一个文件就会建"));
+    return;
+  }
+  if (!(view.files || []).length) {
+    host.appendChild(rowOf("gap", "(空)", "还没有档案。写一条，agent 下一轮就能召回它。"));
+    return;
+  }
+  for (const file of view.files) {
+    const open = el("button", null, "打开");
+    open.onclick = () => openProfile(file.file);
+    host.appendChild(rowOf("ok", file.file,
+      `${file.title || "(无标题)"} · ${file.bytes}B`, [open], "profile-" + file.file));
+  }
+}
+
+async function openProfile(name) {
+  if (!name) return;
+  show($("pf-error"), "");
+  try {
+    const view = await api("/api/profile/file?name=" + encodeURIComponent(name));
+    $("pf-name").value = view.file;
+    $("pf-text").value = view.text;
+  } catch (err) {
+    /* 新文件：名字留着，正文清空，让「保存」直接创建它。 */
+    $("pf-name").value = name;
+    $("pf-text").value = "";
+    show($("pf-error"), err.message, "note");
+  }
+}
+
+$("pf-open").onclick = () => openProfile($("pf-name").value.trim());
+$("pf-draft").onclick = () => {
+  const area = $("pf-text");
+  area.value = area.value.trim() ? area.value.replace(/\s*$/, "\n\n") + DRAFT : DRAFT;
+  area.focus();
+};
+$("pf-save").onclick = async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const result = await api("/api/profile/save", {
+      method: "POST", body: { name: $("pf-name").value.trim(), text: $("pf-text").value },
+    });
+    show($("pf-error"), `已保存 ${result.file}（${result.bytes}B）` +
+      (result.synced ? " · 已折回索引" : " · 记忆未接，只写了文件"), "good");
+    await renderProfile();
+  } catch (err) { show($("pf-error"), err.message, "bad"); }
+  finally { button.disabled = false; }
+};
+$("pf-del").onclick = () => {
+  const name = $("pf-name").value.trim();
+  if (!name) return;
+  overlay("删掉这个档案文件？", `${name}\n\n文件就是事实本身，删掉等于让 agent 忘掉这一段。索引会跟着删。`, [
+    { label: "取消" },
+    { label: "删掉", primary: true, run: async () => {
+      try {
+        await api("/api/profile/delete", { method: "POST", body: { name } });
+        $("pf-text").value = "";
+        await renderProfile();
+        show($("pf-error"), `已删除 ${name}`, "good");
+      } catch (err) { show($("pf-error"), err.message, "bad"); }
+    } },
+  ]);
+};
+$("pf-sync").onclick = async () => {
+  try {
+    const result = await api("/api/profile/sync", { method: "POST", body: { prune: true } });
+    show($("pf-error"), result.synced ? "已折回索引：" + JSON.stringify(result.counts) : "记忆未接，无法折回",
+      result.synced ? "good" : "warn");
+  } catch (err) { show($("pf-error"), err.message, "bad"); }
+};
+
+/* ========================================================== 技能与 MCP */
+
+function renderSkillTools(runtime) {
+  const host = $("sk-tools");
+  const tools = runtime.tools || [];
+  /* 同上：这张表是 /api/state 的副产物，每 2.3 秒重建一次除了掀掉焦点没有别的作用。
+     `.state` 那一条要放行 —— 占位态（读取中 / 读不到）必须被真内容顶掉。 */
+  const sig = JSON.stringify(tools);
+  if (sig === skillSig && !host.querySelector(".state")) return;
+  skillSig = sig;
+  host.textContent = "";
+  if (!tools.length) {
+    host.appendChild(rowOf("gap", "(空)", "运行时没有报出任何工具"));
+    return;
+  }
+  for (const name of tools) {
+    /* 平台自有工具的前缀表。**必须和 core/tools/__init__.py 注册的那些同步** ——
+       漏一个前缀的后果不是排版问题：页面会告诉使用者他自己的内置工具「可能来自 MCP」，
+       而那一栏正是他用来回答「这台机器上多了个第三方工具吗」的地方。2026-09-05 实测这里
+       漏了五个（app / system / time / timer / weather），于是六个内置工具全被标成了可疑。 */
+    const own = ["fs", "web", "shell", "memory", "app", "system", "time", "timer", "weather"];
+    const remote = name.includes(".") && !own.includes(name.split(".")[0]);
+    host.appendChild(rowOf("ok", name, remote ? "可能来自 MCP（按前缀猜的）" : "平台自有工具", null, "tool-" + name));
+  }
+}
+
+async function renderMcp() {
+  const host = $("mcp-host");
+  busy(host, "读取 mcp.toml…");
+  let view;
+  try { view = await api("/api/mcp"); }
+  catch (err) { failed(host, err.message, renderMcp); return; }
+  host.textContent = "";
+  if (!view.present) {
+    host.appendChild(el("p", { class: "note" }, "config/mcp.toml 不存在，MCP 全关。"));
+    return;
+  }
+  for (const entry of view.settings || []) host.appendChild(kvRow(entry, "mcp"));
+  const live = (view.runtime && view.runtime.servers) || [];
+  for (const server of view.servers || []) {
+    const block = el("div", { class: "block", od: "mcp-" + (server.name || server.section) });
+    const found = live.find((s) => s.name === server.name);
+    block.appendChild(el("h3", null, (server.name || server.section) + " · " +
+      (found ? `${found.alive ? "运行中" : "已停"} · ${(found.tools || []).length} 个工具` : "未启动")));
+    for (const key of server.keys) block.appendChild(kvRow(key, "mcp"));
+    host.appendChild(block);
+  }
+  if (!(view.servers || []).length) {
+    host.appendChild(el("p", { class: "note" },
+      "还没有 server 条目。加一个要改 config/mcp.toml（文件里有注释掉的示例）—— " +
+      "command 和 args 决定跑什么，那是一次打开编辑器的动作，不做成网页表单。"));
+  }
+}
+$("mcp-save").onclick = (event) => saveScope("mcp",
+  (updates) => api("/api/mcp", { method: "PUT", body: { updates } }), event.currentTarget, $("mcp-error"));
+
+/* ============================================================== 唤醒球 */
+
+const ORB_RATIO = 1.44;  /* 布局盒 ÷ 球体直径，第九代留边给光晕与阴影 */
+
+function renderOrbPreview() {
+  const slider = $("orb-size");
+  const size = parseInt(slider.value, 10);
+  const ball = Math.round(size / ORB_RATIO);
+  /* 填充比例从 min/max 现算，不写死 96/420：改 HTML 上的范围时这里不用跟着改。 */
+  const lo = Number(slider.min), hi = Number(slider.max);
+  slider.style.setProperty("--fill", (((size - lo) / (hi - lo)) * 100).toFixed(1) + "%");
+  $("orb-box").style.width = size + "px";
+  $("orb-box").style.height = size + "px";
+  $("orb-ball").style.width = ball + "px";
+  $("orb-ball").style.height = ball + "px";
+  $("orb-size-out").textContent = `${size}px`;
+  $("orb-measure").textContent =
+    `布局盒 ${size}px（虚线），球体约 ${ball}px —— 盒比球大是第九代刻意留的边，光晕与阴影住在里面。` +
+    `这里用的是同一颗柔光斑当尺寸标尺，不是球的渲染器。`;
+  $("orb-env").value = `VOX_ORB_SIZE=${size}`
+    + ($("orb-text").value === "1" ? " VOX_SHOW_TEXT=1" : "")
+    // 只在选了 bloub 时出现这一项 —— 不带这个变量就是现行的那一层，所以「默认」不需要
+    // 在环境里写任何东西。写成 `VOX_ORB_RENDERER=seq` 也能跑（Rust 只认 `bot`），但那会
+    // 让人以为不写就没有默认值。
+    + ($("orb-renderer").value === "bot" ? " VOX_ORB_RENDERER=bot" : "");
+}
+$("orb-size").oninput = renderOrbPreview;
+$("orb-text").onchange = renderOrbPreview;
+$("orb-renderer").onchange = renderOrbPreview;
+$("orb-copy").onclick = async () => {
+  try { await navigator.clipboard.writeText($("orb-env").value); $("orb-copy-note").textContent = "已复制。"; }
+  catch { $("orb-env").select(); $("orb-copy-note").textContent = "复制被拦，已选中，按 Ctrl+C。"; }
+};
+
+/* 三项写回 config/voice.toml 的 [orb]。**类型要对**：`orb.size` 是整数、
+   `orb.show_text` 是布尔 —— voice.toml 的加载器按默认值的类型逐个校验，
+   `"140"` 这个字符串会被它拒掉（拒掉是对的，一个字符串型的尺寸不是尺寸）。
+
+   **按钮 id 不能叫 `orb-save`**：那个 id 已经属于下面那张通用键值表
+   （`saveScope("orb", …)`），而后赋的 onclick 会把先赋的静默顶掉 —— 表现是点了没反应。 */
+$("orb-look-save").onclick = async () => {
+  const note = $("orb-look-note");
+  const updates = {
+    "orb.renderer": $("orb-renderer").value,
+    "orb.size": parseInt($("orb-size").value, 10),
+    "orb.show_text": $("orb-text").value === "1",
+  };
+  note.textContent = "写入中…";
+  try {
+    await api("/api/config", { method: "PUT", body: { file: "voice.toml", updates } });
+    note.textContent = "已写进 config/voice.toml —— 点刊头那颗「重启」生效。";
+  } catch (err) {
+    note.textContent = "写不进去：" + err.message;
+  }
+};
+
+/* ====================================================================== 聊天
+
+   和麦克风走同一条派发路径（`/api/text` → `VoiceRuntime.say`），所以这一页没有第二套
+   对话逻辑 —— 它只是那条路的另一个输入口。三个决定写在这里：
+
+   1. **朗读默认关。** `speak_segments` 是阻塞的：开着它，一句 40 字的回答要等音频播完
+      才回到页面上，而聊天界面里那几秒读起来像卡住了。
+   2. **🎙 只填输入框，不发送。** 一个直接把转写派发出去的按钮会让听错的那次没有挽回
+      余地（`打开记事本` / `打开记账本` 在 14M 的识别器上是同一个音）。
+   3. **换模型不重启。** 它是唯一「换一下只是换个名字」的配置，见 `/api/model`。
+*/
+
+let chatSession = "";
+
+function chatBubble(role, text, note) {
+  const mine = role === "user";
+  const wrap = el("div", { class: "kv", style:
+    "display:block;border-left:3px solid " + (mine ? "var(--accent)" : "var(--ring-track)") +
+    ";padding:var(--space-3) var(--space-4)" });
+  wrap.appendChild(el("div", { class: "note", style: "margin:0 0 var(--space-2)" },
+    (mine ? "我" : "Vox") + (note ? "  ·  " + note : "")));
+  const body = el("div", null, text);
+  body.style.whiteSpace = "pre-wrap";
+  wrap.appendChild(body);
+  return wrap;
+}
+
+async function loadChat(session) {
+  const host = $("ch-log");
+  busy(host, "读取会话…");
+  let payload;
+  try { payload = await api("/api/chat/history" + (session ? "?session=" + encodeURIComponent(session) : "")); }
+  catch (err) { failed(host, err.message, () => loadChat(session)); return; }
+  chatSession = payload.session || "";
+  host.textContent = "";
+  if (!payload.attached) {
+    host.appendChild(el("p", { class: "note" }, "记忆没接上，所以这一页没有历史 —— 发出去的话仍然会被回答。"));
+    return;
+  }
+  if (!(payload.turns || []).length) {
+    host.appendChild(el("p", { class: "note" }, "这个会话还没有对话。"));
+    return;
+  }
+  for (const turn of payload.turns) host.appendChild(chatBubble(turn.role, turn.text, turn.at));
+  host.scrollTop = host.scrollHeight;
+}
+
+async function loadChatSessions() {
+  const host = $("ch-sessions");
+  busy(host, "读取…");
+  let payload;
+  try { payload = await api("/api/chat/sessions"); }
+  catch (err) { failed(host, err.message, loadChatSessions); return; }
+  host.textContent = "";
+  if (!(payload.sessions || []).length) {
+    host.appendChild(el("p", { class: "note" }, "还没有任何会话。"));
+    return;
+  }
+  for (const row of payload.sessions) {
+    const current = row.session === payload.current;
+    const line = el("div", { class: "kv" + (current ? "" : " locked") });
+    line.appendChild(el("code", null, (current ? "● " : "") + (row.first_text || row.session)));
+    const open = el("button", null, current ? "当前" : "看");
+    open.onclick = () => loadChat(row.session);
+    line.appendChild(el("div", { class: "val" }, row.turns + " 轮  ·  " + (row.last || "").slice(0, 19)));
+    line.appendChild(open);
+    host.appendChild(line);
+  }
+}
+
+async function switchModel(text) {
+  const note = $("ch-model-now");
+  const wanted = (text || "").trim();
+  if (!wanted) { note.textContent = "先填一个模型名。"; return; }
+  note.textContent = "换…";
+  try {
+    const out = await api("/api/model", { method: "POST", body: { model: wanted } });
+    note.textContent = `现在是 ${out.agent}:${out.model}` + (out.persisted ? "（已写回配置）" : "（仅本次运行）");
+  } catch (err) { note.textContent = "换不了：" + err.message; }
+}
+
+async function sendChat() {
+  const box = $("ch-input");
+  const text = box.value.trim();
+  if (!text) return;
+  /* 斜杠命令在发送之前拦下来 —— 借的是 Hermes 的 `/model provider:model`。 */
+  if (text.startsWith("/model")) {
+    await switchModel(text.slice("/model".length));
+    box.value = "";
+    return;
+  }
+  const log = $("ch-log");
+  log.appendChild(chatBubble("user", text, ""));
+  log.scrollTop = log.scrollHeight;
+  box.value = "";
+  $("ch-send").disabled = true;
+  setText($("ch-status"), "在想…");
+  try {
+    const out = await api("/api/text", { method: "POST", body: { text, speak: $("ch-speak").checked } });
+    const note = [out.route, out.ok ? "" : "失败", out.elapsed_ms ? out.elapsed_ms + "ms" : ""]
+      .filter(Boolean).join("  ·  ");
+    log.appendChild(chatBubble("assistant", out.text || out.reason || "（没有内容）", note));
+    setText($("ch-status"), out.needs_confirmation
+      ? "它要一次确认 —— 确认面只有唤醒球，这一页不提供按钮。" : "");
+  } catch (err) {
+    log.appendChild(chatBubble("assistant", "出错了：" + err.message, "error"));
+    setText($("ch-status"), "");
+  } finally {
+    $("ch-send").disabled = false;
+    log.scrollTop = log.scrollHeight;
+    loadChatSessions();
+  }
+}
+
+$("ch-send").onclick = sendChat;
+$("ch-input").onkeydown = (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendChat(); } };
+$("ch-switch").onclick = () => switchModel($("ch-model").value);
+$("ch-reload").onclick = () => { loadChatSessions(); loadChat(chatSession); };
+$("ch-mic").onclick = async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  setText($("ch-status"), "在听（4 秒）…");
+  try {
+    const out = await api("/api/chat/dictate", { method: "POST", body: { seconds: 4.0 } });
+    $("ch-input").value = out.text || "";
+    setText($("ch-status"), out.text ? `听到：${out.text}（${out.elapsed_ms}ms，发不发由你）` : "没听到内容。");
+    $("ch-input").focus();
+  } catch (err) {
+    setText($("ch-status"), "转写失败：" + err.message);
+  } finally { button.disabled = false; }
+};
+
+/* ================================================== 配置读取（两处共用） */
+
+async function loadConfigFiles() {
+  const orbHost = $("orb-keys");
+  const limHost = $("lm-keys");
+  const vxHost = $("vx-keys");
+  busy(orbHost, "读取 voice.toml…");
+  busy(limHost, "读取 tools.toml…");
+  busy(vxHost, "读取 voice.toml…");
+  let payload;
+  try { payload = await api("/api/config"); }
+  catch (err) {
+    /* 一次请求供两个区段用，所以两边都得各自报一遍 —— 用户只看得见其中一页。 */
+    failed(orbHost, err.message, loadConfigFiles);
+    failed(limHost, err.message, loadConfigFiles);
+    failed(vxHost, err.message, loadConfigFiles);
+    return;
+  }
+  const byFile = {};
+  for (const file of payload.files || []) byFile[file.file] = file;
+
+  /* 唤醒球：voice.toml 里 orb.enabled / orb.visible 是真在 EDITABLE 里的两个键。 */
+  orbHost.textContent = "";
+  const voice = byFile["voice.toml"];
+  const orbKeys = ((voice && voice.keys) || []).filter((k) => k.key.startsWith("orb."));
+  if (orbKeys.length) for (const key of orbKeys) orbHost.appendChild(kvRow(key, "orb"));
+  else orbHost.appendChild(el("p", { class: "note" }, "voice.toml 里没读到 orb 段。"));
+
+  /* 上面那张外观面板的三个控件也从同一份读数回填。**不回填的后果是它撒谎**：
+     页面永远显示出厂默认（seq / 140 / 关），而文件里可能是 bot —— 于是使用者以为
+     自己已经切过去了，或者一保存就把真实值改回默认。 */
+  const orbNow = {};
+  for (const key of orbKeys) orbNow[key.key] = key.value;
+  if (orbNow["orb.renderer"] !== undefined) {
+    $("orb-renderer").value = String(orbNow["orb.renderer"]) === "bot" ? "bot" : "seq";
+  }
+  if (orbNow["orb.size"] !== undefined) {
+    const px = parseInt(orbNow["orb.size"], 10);
+    if (Number.isFinite(px)) $("orb-size").value = String(px);
+  }
+  if (orbNow["orb.show_text"] !== undefined) {
+    $("orb-text").value = (orbNow["orb.show_text"] === true || String(orbNow["orb.show_text"]) === "true") ? "1" : "0";
+  }
+  renderOrbPreview();
+
+  /* 其余语音参数：**减法而不是加法** —— 列的是「所有可改键」减掉「已有专用控件的」。
+     用加法（在这里写一张要显示的键名表）的话，以后加一个新键只会静默不出现在页面上，
+     而那正是使用者说的「很多配置不能直接更改」的形状。DEDICATED 是那几个专用面板已经
+     覆盖的前缀。 */
+  vxHost.textContent = "";
+  const DEDICATED = ["orb.", "tts.", "input.device"];
+  const extraKeys = ((voice && voice.keys) || []).filter(
+    (k) => !DEDICATED.some((prefix) => k.key.startsWith(prefix))
+  );
+  if (extraKeys.length) for (const key of extraKeys) vxHost.appendChild(kvRow(key, "vx"));
+  else vxHost.appendChild(el("p", { class: "note" }, "voice.toml 里没有其他可改键。"));
+
+  /* 安全边界：tools.toml 里能读到的就那几个键，其余根本不在返回里。 */
+  limHost.textContent = "";
+  const tools = byFile["tools.toml"];
+  if (tools && tools.present) for (const key of tools.keys || []) limHost.appendChild(kvRow(key, "limits"));
+  else limHost.appendChild(el("p", { class: "note" }, "config/tools.toml 不存在，用的是内置默认值。"));
+}
+
+$("orb-save").onclick = (event) => saveScope("orb",
+  (updates) => api("/api/config", { method: "PUT", body: { file: "voice.toml", updates } }),
+  event.currentTarget, $("orb-error"));
+$("vx-save").onclick = (event) => saveScope("vx",
+  (updates) => api("/api/config", { method: "PUT", body: { file: "voice.toml", updates } }),
+  event.currentTarget, $("vx-error"));
+$("lm-save").onclick = (event) => saveScope("limits",
+  (updates) => api("/api/config", { method: "PUT", body: { file: "tools.toml", updates } }),
+  event.currentTarget, $("lm-error"));
+
+/* 出厂值静态呈现。每一条都抄自 config/tools.toml，是**出厂内容**而不是当前机器的值 ——
+   没有任何端点会返回这些键，所以界面上也不能装作读到了。 */
+const FACTORY_TOOLS = [
+  /* 这两条判 ok 而不是 bad：它们出厂就是关的，而关着正是它们该有的样子。
+     上一版给了红点加红字，把一道立着的闸读成了一处故障 —— 用户会想「去修一下」。 */
+  ["shell.enabled", "false", "ok", "默认关，关着就是对的。「说一句话就能在本机跑命令」是这个项目最大的攻击面。"],
+  ["shell.allow", "[]", "ok", "空白名单：即使 enabled=true 也什么都不许跑。这个名单只能收窄，不能放宽。"],
+  ["shell.require_confirmation", "true", "ok", "白名单内的命令仍需一次显式确认，命令原文显示在唤醒球上。"],
+  ["shell.require_verified_speaker", "true", "ok", "未过声纹的来源不许跑命令；agent 来源天然没有 speaker，进不来。"],
+  ["fs.enabled", "true", "ok", "文件工具开着，但被下面三条围住。"],
+  ["fs.roots", '["."]', "ok", "沙箱根只有工作区。先 resolve 再判断，符号链接逃逸也拒。"],
+  ["fs.denied_names", "15 条", "ok", ".env / .env.* / *.pem / *.key / id_rsa* / id_ed25519* / credentials.json / *secret* / *.voiceprint / voiceprints.json / *.pfx / *.p12 / .netrc / .npmrc / .git-credentials"],
+  ["fs.denied_dirs", "6 条", "ok", "enrollment（生物特征）、memory（个人数据）、.git、.venv、node_modules、__pycache__"],
+  ["web.enabled", "true", "ok", "检索工具开着，但两个后端默认都是关的。"],
+  ["web.blocked_domains", "[]", "ok", "域名黑名单，后缀匹配含子域。出厂为空 —— 因为两个检索后端出厂都没开。"],
+  ["policy.DANGEROUS_PATTERNS", "13 条（在代码里）", "ok", "写在 policy.py 而不是配置里，所以界面上不做成可编辑。"],
+];
+
+function renderFactory() {
+  const host = $("lm-factory");
+  host.textContent = "";
+  for (const [key, value, klass, note] of FACTORY_TOOLS) {
+    host.appendChild(rowOf(klass, key, `${value} —— ${note}`, null, "factory-" + key));
+  }
+}
+
+/* ================================================================ 调试 */
+
+async function sendText() {
+  const input = $("dbg-text");
+  const text = input.value.trim();
+  if (!text) return;
+  const out = $("dbg-out");
+  const button = $("dbg-go");
+  button.disabled = true;
+  out.className = "out";
+  out.textContent = "";
+  out.appendChild(el("b", null, "派发中…"));
+  try {
+    const r = await api("/api/text", { method: "POST", body: { text } });
+    out.className = "out " + (r.ok ? "ok" : "bad");
+    out.textContent = "";
+    out.appendChild(el("b", null,
+      `route=${r.route} ok=${r.ok}` + (r.tool ? ` tool=${r.tool}` : "") +
+      ((r.agents || []).length ? ` agents=${r.agents.join(",")}` : "") +
+      (r.elapsed_ms != null ? ` ${r.elapsed_ms}ms` : "")));
+    out.appendChild(document.createTextNode(r.text || r.reason || "(没有结果)"));
+    input.value = "";
+    await refreshState();
+  } catch (err) {
+    out.className = "out bad";
+    out.textContent = "";
+    out.appendChild(el("b", null, "失败"));
+    out.appendChild(document.createTextNode(err.message));
+  } finally { button.disabled = false; }
+}
+$("dbg-go").onclick = sendText;
+$("dbg-text").onkeydown = (e) => { if (e.key === "Enter") sendText(); };
+
+/* ================================================================ 启动 */
+
+renderLegend();
+initRibbon();
+initSky();
+
+/* =========================================================== 微信那一栏
+   两件事：扫码绑定（QR 由**服务端**渲成 SVG —— 一个从 CDN 拉 JS 二维码库的登录页等于把
+   登录流程交给第三方，而这一页上过的是使用者的微信账号），以及实时收发。
+   轮询游标是**序号**不是时间戳：同一秒里可能有两条。 */
+let wxCursor = 0;
+let wxPolling = null;
+
+async function renderWeixin() {
+  let view;
+  try { view = await api("/api/weixin"); }
+  catch (err) { setText($("wx-state"), "读不到：" + err.message); return; }
+  const cred = view.credentials || {};
+  const runner = view.runner;
+  const check = view.check || {};
+  const bits = [];
+  bits.push(cred.bound ? `已绑定 ${cred.account_id}（${cred.saved_at}）` : "未绑定");
+  /* 「跑没跑」和「配置写着开没开」是两件事，分开说。上一版只报后者，于是一个
+     enabled=true 但根本没起来的通道在页面上写着「通道已开」—— 那句话是假的。 */
+  if (runner && runner.running) {
+    bits.push("正在收消息");
+    bits.push(`处理 ${runner.handled} 条 · 失败 ${runner.failures}`);
+    bits.push(`语音回复 ${runner.voice_out ? "开" : "关"} · 本机转写 ${runner.local_asr ? "开" : "关"}`);
+    if (runner.last_error) bits.push("最近一次错误：" + runner.last_error);
+  } else if (!cred.bound) {
+    bits.push("没在收消息 —— 先点「扫码登录」");
+  } else if (!check.available) {
+    bits.push("没在收消息 —— " + (check.reason || "凭据不可用"));
+  } else if (view.enabled) {
+    /* 绑了、配置也开着，却没有 runner：这一格只在启动时通道起不来时出现。 */
+    bits.push("配置是开的但通道没起来 —— 点「打开通道」，还不行就看运行日志");
+  } else {
+    bits.push("通道关着 —— 点「打开通道」");
+  }
+  if (check.source === "env") bits.push("凭据来自环境变量");
+  setText($("wx-state"), bits.join("  ·  "));
+  $("wx-unbind").disabled = !cred.bound;
+
+  const live = !!(runner && runner.running);
+  const toggle = $("wx-switch");
+  setText(toggle, live ? "关闭通道" : "打开通道");
+  toggle.classList.toggle("danger", live);
+  /* 没绑定就不能开；这个进程装不了开关（--no-weixin）时也不能。禁用而不是让它报错 ——
+     一个点下去只会弹错误的按钮等于在教人忽略错误。 */
+  toggle.disabled = !view.can_switch || (!live && !check.available);
+  toggle.title = !view.can_switch
+    ? "这个控制台不能在线开关通道（启动时带了 --no-weixin）"
+    : (!live && !check.available ? (check.reason || "还没绑定") : "");
+
+  const select = $("wx-chat");
+  const keep = select.value;
+  select.innerHTML = "";
+  for (const chat of view.chats || []) {
+    const option = document.createElement("option");
+    option.value = chat.chat_id;
+    option.textContent = `${chat.chat_id.slice(0, 12)} · ${chat.messages} 条 · ${chat.last || ""}`;
+    select.appendChild(option);
+  }
+  if (keep) select.value = keep;
+}
+
+/* 一条会话记录一行。**不用 .row**（四列网格，理由见样式表里 .msgrow 上面那段），
+   也不用 innerHTML：sender 与正文都来自微信那一侧，是外部输入，而原先手工只转义了
+   < 和 & —— 走 el()/textContent 就不必记得转义哪几个字符。 */
+function wxRow(entry) {
+  const row = el("div", { class: "msgrow" });
+  const head = el("div", { class: "mg-head" });
+  head.appendChild(el("code", null, entry.at || ""));
+  head.appendChild(el("b", null, entry.direction === "in"
+    ? (entry.sender ? "他 " + String(entry.sender).slice(-4) : "他")
+    : (entry.by === "console" ? "我（手打）" : "Vox")));
+  const marks = [];
+  if (entry.kind === "voice") marks.push("语音");
+  if (entry.source === "provider") marks.push("微信转写");
+  if (entry.voice_out) marks.push("带语音");
+  if (entry.sent === false) marks.push("发送失败");
+  if (marks.length) head.appendChild(el("em", null, marks.join(" · ")));
+  row.appendChild(head);
+  row.appendChild(el("p", { class: "mg-text" }, entry.text || ""));
+  return row;
+}
+
+async function pullWeixin() {
+  let payload;
+  try { payload = await api("/api/weixin/messages?since=" + wxCursor); }
+  catch { return; }
+  const host = $("wx-log");
+  if (!payload.running) {
+    if (!host.childElementCount) setText(host, "通道没在跑 —— 绑定并在 config/channels.toml 里打开 enabled，然后重启。");
+    return;
+  }
+  if (wxCursor === 0) host.innerHTML = "";
+  for (const entry of payload.entries || []) host.appendChild(wxRow(entry));
+  if ((payload.entries || []).length) {
+    wxCursor = payload.next;
+    host.scrollTop = host.scrollHeight;
+    renderWeixin();
+  }
+}
+
+/* 自动跟随：2 秒一次，只在这一页可见且标签页在前台时拉。理由和 refreshState 那条一样 ——
+   没人看的时候它只是在给守护进程添活儿。 */
+setInterval(() => {
+  if (document.hidden) return;
+  if ($("v-weixin").hidden) return;
+  if (!$("wx-follow").checked) return;
+  pullWeixin();
+}, 2000);
+
+$("wx-refresh").onclick = () => { wxCursor = 0; pullWeixin(); renderWeixin(); };
+
+$("wx-login").onclick = async () => {
+  const box = $("wx-qr");
+  const err = $("wx-error");
+  err.hidden = true;
+  $("wx-login").disabled = true;
+  setText($("wx-login-state"), "取二维码…");
+  try {
+    const first = await api("/api/weixin/login", { method: "POST", body: {} });
+    $("wx-qr-img").innerHTML = first.svg;
+    box.hidden = false;
+    setText($("wx-login-state"), "请用手机微信扫码");
+    if (wxPolling) clearInterval(wxPolling);
+    /* 一次一问，等待留在页面上：一个 8 分钟不返回的 HTTP 请求会被任何一层超时掐断。 */
+    wxPolling = setInterval(async () => {
+      let step;
+      try { step = await api("/api/weixin/poll", { method: "POST", body: {} }); }
+      catch (pollErr) {
+        clearInterval(wxPolling); wxPolling = null;
+        $("wx-login").disabled = false;
+        err.hidden = false; setText(err, pollErr.message);
+        setText($("wx-login-state"), "登录中断");
+        return;
+      }
+      if (step.svg && step.status === "refreshed") $("wx-qr-img").innerHTML = step.svg;
+      const words = {
+        wait: "请用手机微信扫码", scaned: "已扫码，请在微信里确认…",
+        refreshed: "二维码过期了，换了一张 —— 请重新扫",
+        confirmed: "绑定成功",
+      };
+      setText($("wx-login-state"), words[step.status] || step.status);
+      if (step.status === "confirmed") {
+        clearInterval(wxPolling); wxPolling = null;
+        $("wx-login").disabled = false;
+        box.hidden = true;
+        renderWeixin();
+        /* 后端在确认那一刻就把通道打开了（写 enabled + 起线程），所以这里报的是结果
+           而不是一份待办清单。上一版这句话是「通道要在 config/channels.toml 里打开
+           enabled 并重启才开始收消息」—— 让人刚扫完码就去改一个文件。 */
+        setText($("wx-login-state"), step.started
+          ? "绑定成功 —— 通道已经在收消息了，直接在微信里跟它说话"
+          : "绑定成功，但通道没自动打开：" + (step.start_error || "原因未知"));
+      }
+    }, 1500);
+  } catch (loginErr) {
+    $("wx-login").disabled = false;
+    err.hidden = false; setText(err, loginErr.message);
+    setText($("wx-login-state"), "");
+  }
+};
+
+$("wx-switch").onclick = async () => {
+  const button = $("wx-switch");
+  const err = $("wx-error");
+  const turningOn = button.textContent.indexOf("打开") >= 0;
+  err.hidden = true;
+  button.disabled = true;
+  setText($("wx-login-state"), turningOn ? "打开通道…" : "关闭通道…");
+  try {
+    await api("/api/weixin/switch", { method: "POST", body: { on: turningOn } });
+    setText($("wx-login-state"), turningOn ? "通道已打开 —— 在微信里跟它说话" : "通道已关闭");
+  } catch (switchErr) {
+    err.hidden = false; setText(err, switchErr.message);
+    setText($("wx-login-state"), "");
+  } finally {
+    button.disabled = false;
+    renderWeixin();
+  }
+};
+
+$("wx-unbind").onclick = async () => {
+  if (!confirm("解绑会停掉通道并删掉凭据，要重新扫码才能收发微信消息。继续？")) return;
+  try { await api("/api/weixin/unbind", { method: "POST", body: {} }); }
+  catch (err) { $("wx-error").hidden = false; setText($("wx-error"), err.message); return; }
+  if (wxPolling) { clearInterval(wxPolling); wxPolling = null; }
+  $("wx-qr").hidden = true;
+  setText($("wx-login-state"), "已解绑");
+  renderWeixin();
+};
+
+$("wx-send").onclick = async () => {
+  const chat = $("wx-chat").value;
+  const text = $("wx-text").value;
+  const err = $("wx-send-error");
+  err.hidden = true;
+  if (!chat) { err.hidden = false; setText(err, "先选一个会话 —— 会话是从收到的消息里长出来的"); return; }
+  if (!text.trim()) return;
+  $("wx-send").disabled = true;
+  try {
+    await api("/api/weixin/send", { method: "POST", body: { chat_id: chat, text } });
+    $("wx-text").value = "";
+    pullWeixin();
+  } catch (sendErr) { err.hidden = false; setText(err, sendErr.message); }
+  finally { $("wx-send").disabled = false; }
+};
+
+$("wx-text").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); $("wx-send").click(); }
+});
+
+let saved = "overview";
+try { saved = localStorage.getItem("vox.console.view") || "overview"; } catch {}
+setView(location.hash.slice(1) || saved);
+
+busy($("ov-tiles"), "问守护进程要读数…");
+busy($("ov-board"), "等就绪项…");
+busy($("ov-warn"), "等运行时报告告警…");
+renderClips();
+renderOrbPreview();
+renderFactory();
+busy($("sk-tools"), "等运行时报出工具清单…");
+refreshState();
+loadModels();
+loadWake();
+pullVoices();
+pullLog();
+renderSpeakers();
+renderInputLevel();
+renderAgents();
+renderAgentConfig();
+renderProfile();
+renderMcp();
+loadConfigFiles();
+/* 聊天那一页也在启动时拉一次。**独立的两条调用**，和上面几条一样 —— 一条失败不该
+   把别的页拖黑（`/api/state` 500 的那两天就是这么保住其余几页的）。 */
+loadChatSessions();
+loadChat("");
+renderWeixin();
+pullWeixin();
+
+/* 2.3 秒而不是 2 或 5：够快到点了按钮能看见结果，够慢到不让一个空闲页面每秒都去敲一次运行时。
+   事件流轮询（上一版的 1.1 秒那条）随面板一起删掉了。
+   标签页在后台时不发请求：那 2.3 秒的理由全都是「用户正在看」，没人看的时候它只是在
+   给守护进程添活儿。切回来立刻补一次，免得先看到一屏过期读数。 */
+setInterval(() => { if (!document.hidden) refreshState(); }, 2300);
+document.addEventListener("visibilitychange", () => {
+  syncSky();
+  if (!document.hidden) refreshState();
+});
+</script>
+</body>
+</html>

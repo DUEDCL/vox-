@@ -16,7 +16,7 @@ import importlib
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -58,6 +58,9 @@ class SherpaTtsProvider:
         #: Playback backend. ``None`` means sounddevice; a fake is how the turn
         #: orchestrator is tested without a speaker.
         self.playback = playback
+        #: Set by ``stop()`` (barge-in). A queued ``speak_segments`` batch checks
+        #: this between sentences and drops whatever has not been spoken yet.
+        self._stopped = False
         self._tts: Any = None
 
     @property
@@ -82,7 +85,15 @@ class SherpaTtsProvider:
                 tokens=str(self.model_dir / "tokens.txt"),
                 lexicon=str(self.model_dir / "lexicon.txt"),
                 dict_dir=str(self.model_dir / "dict"),
-                data_dir=str(self.model_dir),
+                # **不要设 data_dir。** 它是 espeak-ng 的数据目录，一给值 sherpa-onnx 就
+                # 从 lexicon 前端切到 espeak-ng 前端 —— 而 espeak-ng 会把中文按它自己的
+                # 规则念，出来的是一段听得出是人声、但完全不是中文的东西。
+                #
+                # 这是个只在**听**的时候才暴露的错：音频有正常的语音包络、正常的零穿越率、
+                # 采样率也对，`played: true` 一样返回，所以每一条自动断言都是绿的。唯一的
+                # 数字线索是时长 —— 同一句话 13 个汉字，设了 data_dir 是 1.32 秒
+                # （101 ms/字），不设是 2.60 秒（200 ms/字，中文的正常语速）。
+                # `tests/integration/test_tts_model.py` 现在钉的就是这个比值。
             )
             model = sherpa.OfflineTtsModelConfig(
                 vits=vits, num_threads=self.num_threads, provider=self.execution_provider
@@ -136,6 +147,62 @@ class SherpaTtsProvider:
             player = SounddevicePlayback()
         player.play(audio.samples, audio.sample_rate, blocking=blocking)
         return audio
+
+    def stop(self) -> None:
+        """Interrupt in-flight audio and mark any queued sentences as dropped.
+
+        Barge-in runs on the capture callback thread while a turn's speak loop
+        runs on the pump thread, so this must be safe to call concurrently with
+        ``speak``/``speak_segments``. Idempotent: stopping twice is one stop.
+        """
+        self._stopped = True
+        player = self.playback
+        if player is None:
+            from .playback import SounddevicePlayback
+
+            player = SounddevicePlayback()
+        try:
+            player.stop()
+        except Exception:
+            pass
+
+    def is_stopped(self) -> bool:
+        """Whether ``stop()`` was requested since the last utterance started."""
+        return self._stopped
+
+    def speak_segments(
+        self,
+        texts: Sequence[str],
+        *,
+        speaker_id: int | None = None,
+        speed: float | None = None,
+        blocking: bool = True,
+    ) -> list[TtsAudio]:
+        """Speak pre-split sentences in order, dropping the rest on ``stop()``.
+
+        The turn orchestrator owns the splitting (it emits the matching
+        ``tts.chunk`` events); this method only drains the queue. Synthesis of
+        sentence *n+1* starts only after sentence *n* finished playing, so the
+        first audible reply no longer waits for the whole response to render --
+        and a barge-in that lands mid-synthesis skips everything still queued.
+        """
+        self._stopped = False
+        player = self.playback
+        if player is None:
+            from .playback import SounddevicePlayback
+
+            player = SounddevicePlayback()
+        spoken: list[TtsAudio] = []
+        for text in texts:
+            if self._stopped:
+                break
+            audio = self.synthesize(text, speaker_id=speaker_id, speed=speed)
+            if self._stopped:
+                # Cancelled while the (slow) synthesis ran; do not open audio.
+                break
+            player.play(audio.samples, audio.sample_rate, blocking=blocking)
+            spoken.append(audio)
+        return spoken
 
     def close(self) -> None:
         """Release native inference state; the Python wrapper has no explicit close."""
