@@ -4,7 +4,7 @@
 > 验证基线：Python **1190 passed, 3 skipped** · DesktopBridge 专项 **33 passed** · Rust **15 passed** · `npm run build` 通过
 > 基线在**干净 shell**（未设置 `PYTHONUTF8` / `PYTHONIOENCODING`）下复现；数字取决于环境变量的话就不是基线。
 > 本文件是**接手者的第一份材料**。项目全貌看 [`docs/project-overview.md`](project-overview.md)，
-> 干活的规矩看 [`.claude/CLAUDE.md`](../.claude/CLAUDE.md)（那份是硬约束，本文件只做导航），
+> 干活的规矩看 [`AGENTS.md`](../AGENTS.md)（本文件只做项目导航），
 > 故意没做的技术债看 [`docs/backlog.md`](backlog.md)。
 
 ## 接手第一件事：起控制台
@@ -34,9 +34,9 @@ Windows 上的**开放式语音唤醒对话平台**。目标链路：
 → 流式回复 → TTS 朗读 → 继续多轮 → 说唤醒词随时打断
 ```
 
-三条设计红线（**任何改动都不许破**，细则见 CLAUDE.md）：
+三条设计红线（**任何改动都不许破**，细则见 [`AGENTS.md`](../AGENTS.md)）：
 
-1. **本地优先** —— 唤醒 / VAD / ASR / TTS / 声纹全部本机执行，项目代码不存不传音频。
+1. **本机准入、处理可配置** —— 唤醒词、VAD、声纹注册与校验在本机执行；被接受的语音可按 `config/voice.toml` 发送到云端 ASR/TTS，也可切回本机 provider。项目不把音频写入记忆库。
 2. **组件可替换** —— KWS/ASR/TTS/传输/agent 后端都在契约之后，第三方 SDK 类型不得泄漏进事件。
 3. **验证等级诚实** —— DOC < AUTO < SIM < REAL-MIC < REAL-AGENT < REAL-EVOX < REAL-WIN，**mock 不算真机**。
 
@@ -171,7 +171,7 @@ Push-Location desktop/src-tauri; cargo build; Pop-Location
   掩盖的是一个路径缺陷而不是「本机没这个依赖」。不修的理由见 [docs/backlog.md](backlog.md) B1。
 
 
-## 6. 最容易踩的坑（血泪版，完整清单在 CLAUDE.md）
+## 6. 最容易踩的坑（血泪版，完整清单在 [`AGENTS.md`](../AGENTS.md)）
 
 1. **必须用 `.venv\Scripts\python.exe`** —— 系统 Python 没装 sherpa-onnx / soundfile。
 2. **`contracts/voice-events.schema.json` 字节不变** —— 有 SHA-256 摘要测试钉死；平台事件走另一个契约文件。

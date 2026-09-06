@@ -338,7 +338,7 @@ CSP widened to `default-src 'self'; style-src 'self' 'unsafe-inline'; connect-sr
 
 ### A real defect, found by re-running the claimed baseline in a clean shell
 
-`docs/handoff.md` and `.claude/CLAUDE.md` both recorded `599 passed, 2 skipped`. In a shell with no `PYTHON*` variables set the actual result was **`1 failed, 597 passed, 3 skipped`**. The failure:
+`docs/handoff.md` and the legacy Agent rules both recorded `599 passed, 2 skipped`. In a shell with no `PYTHON*` variables set the actual result was **`1 failed, 597 passed, 3 skipped`**. The failure:
 
 ```
 tests/test_agent_acp.py::test_a_chinese_prompt_crosses_the_process_boundary_intact
@@ -385,7 +385,7 @@ Result: **600 passed, 3 skipped**, identical in a clean shell and under `PYTHONU
 
 ## Session 2026-08-24 (TTS multi-segment queueing — AUTO)
 
-- Target: the long-standing gap 「长回复一次性合成播放」(handoff §5 / CLAUDE.md 未实现清单).
+- Target: the long-standing gap 「长回复一次性合成播放」(handoff §5 / historical Agent notes).
 - Splitting lives in the orchestrator per ADR 001: `vox_plugin.plugin.split_speech()` cuts on CJK 。！？；… and ASCII ! ? ; ; newline; an ASCII dot between digits stays a decimal point (「3.14」 unsplit). Abbreviations like e.g. still split — prosody-only cost.
 - `complete_turn` now emits one `tts.chunk` (index 0..n-1) per sentence; single-sentence replies produce byte-identical event sequences to before.
 - New provider API: `speak_segments(texts)` synthesizes/plays sentence-by-sentence (first audio no longer waits for full-reply synthesis) and `stop()`/`is_stopped()` drop the unspoken remainder. This also fixes a real defect found en route: the concrete provider had **no** `stop()`, so plugin `cancel()` was a silent no-op with the real engine attached — barge-in could not actually silence audio.

@@ -31,8 +31,10 @@
 
 ## 3. 开工：一条命令，三个判据
 
-```bash
-git status --short && git branch --show-current && git log --oneline -3
+```powershell
+git status --short
+git branch --show-current
+git log --oneline -3
 ```
 
 - 输出的第一段是空的 → 工作区干净 ✅
@@ -45,25 +47,25 @@ git status --short && git branch --show-current && git log --oneline -3
 
 顺序不能换。测试没绿就提交，等于把「不知道能不能跑」这件事留给下一个会话去发现。
 
-```bash
-.venv/Scripts/python.exe -m pytest tests -q
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests -q --basetemp ".pytest-git-$PID"
 ```
 
-当前基线 **1190 passed, 3 skipped**。**passed 数下降才是回归**，skip 数会随环境变化
-（可选依赖、模型在不在）。必须用 `.venv` 里的 Python，系统 Python 没装 sherpa-onnx。
+测试数量会随功能演进和可选依赖变化，以当前命令输出为准。必须用 `.venv` 里的 Python，系统 Python 没装 sherpa-onnx。
 
-基线要在**干净 shell** 里记 —— 先确认 `env | grep PYTHON` 是空的。设了 `PYTHONUTF8` 的
+基线要在**干净 shell** 里记 —— 先运行 `Get-ChildItem Env:PYTHON*`，确认没有影响基线的临时变量。设了 `PYTHONUTF8` 的
 shell 曾经把一个失败用例变成通过，那次的基线数字整整错了一轮。
 
 绿了再提交：
 
-```bash
-git add -A && git commit -m "feat(scope): 描述"
+```powershell
+git add <本次任务明确修改的文件>
+git commit -m "feat(scope): 描述"
 ```
 
 **当场推送，不要留到下次**：
 
-```bash
+```powershell
 git push
 ```
 
@@ -84,8 +86,9 @@ git push
 
 先看，再决定，**不要 stash 也不要 reset**：
 
-```bash
-git status --short && git diff --stat
+```powershell
+git status --short
+git diff --stat
 ```
 
 是你要的 → 跑测试然后提交。不是你要的 → 停下来问人。**这个仓库禁止**
@@ -93,14 +96,15 @@ git status --short && git diff --stat
 
 ### 不在 main 上
 
-```bash
+```powershell
 git branch --show-current
 ```
 
 先把当前分支的东西提交掉（别带着改动切分支），然后：
 
-```bash
-git switch main && git merge --ff-only <那个分支>
+```powershell
+git switch main
+git merge --ff-only <那个分支>
 ```
 
 `--ff-only` 是故意的：能快进说明是直线，不能快进说明真的分叉了，那时候才需要想。
@@ -109,19 +113,19 @@ git switch main && git merge --ff-only <那个分支>
 
 先确认它们都已经在 `main` 里（**这一步不能跳**）：
 
-```bash
+```powershell
 git branch --merged main
 ```
 
 列出来的才可以删。没列出来的分支有独有提交，删了就丢代码：
 
-```bash
+```powershell
 git branch -d <分支名>
 ```
 
 用 `-d` 不用 `-D`：`-d` 在有独有提交时会拒绝，`-D` 会闷头删掉。远端同名分支：
 
-```bash
+```powershell
 git push origin --delete <分支名>
 ```
 
@@ -130,13 +134,13 @@ git push origin --delete <分支名>
 Claude Code 有时会为一次任务开 worktree。它本身没问题，**忘了收才有问题** —— 第 1 节
 最坑的那一条就是 worktree 留着、人站错了地方。看一眼：
 
-```bash
+```powershell
 git worktree list
 ```
 
 只该有一行（主目录 `D:\program\vioce-wake`）。多出来的，确认干净后移除：
 
-```bash
+```powershell
 git worktree remove .claude/worktrees/<名字>
 ```
 
@@ -152,13 +156,13 @@ git worktree remove .claude/worktrees/<名字>
 
 | 项 | 状态 |
 |---|---|
-| 分支 | `main` 一条，`origin/HEAD` → `main` |
-| worktree | 只有主目录 |
-| 测试基线 | 1190 passed, 3 skipped（干净 shell） |
-| 已删除的流程 | `.ai/`（协议 + 25 个任务/交接/审查档）、`AGENTS.md`、`scripts/ai/*.ps1`、`.github/` 的 Issue/PR 模板与 `ai-contract.yml` |
+| 分支 | `main` 是发布主线；其他远端分支应定期审查 |
+| worktree | 目标状态只有主目录；本机残留需确认干净后再移除 |
+| 测试基线 | 以当前隔离 `--basetemp` 命令输出为准 |
+| 已删除的流程 | `.ai/`（协议 + 25 个任务/交接/审查档）、旧版双 Agent 流程文件、`scripts/ai/*.ps1`、`.github/` 的 Issue/PR 模板与 `ai-contract.yml` |
 
 删掉的文件都还在 git 历史里，需要时可以取回：
 
-```bash
+```powershell
 git show 4f5e526:.ai/CONTRACT.md
 ```

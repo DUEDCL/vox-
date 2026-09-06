@@ -60,7 +60,7 @@ DesktopBridge 专项 **33 passed**；采集专项 **36 passed**。声纹模型�
 **只跑测试不算验证。** 前端是一个单文件 HTML，测试碰不到它，所以还要一次渲染取证：
 
 ```powershell
-# 起服务（.claude/launch.json 里的 console 配置，autoPort，不占唤醒球的 5173）
+# 起服务（直接运行项目入口；本机调试配置不进入版本库）
 #   preview_start console
 # 然后：
 #   preview_snapshot        读结构，确认侧栏九个视图都在
@@ -1064,7 +1064,7 @@ python -m pytest tests/test_console.py -q -k "weixin or qr or unbind or cursor o
      试完请把结果记进 `docs/research/prototype-results.md` —— 不管成没成。
 
 安全边界照旧，不需要验但要知道：这条路上 `speaker` 永远是 `None`，所以 `shell.run` 进不来；
-Vox 麦克风录到的音频永不出网（`core/channels/` 不 import 采集侧）。
+Vox 待机阶段的唤醒词与声纹音频永不出网；通过准入后的请求是否发送到云端 ASR，由 `config/voice.toml` 决定（`core/channels/` 不直接接入采集侧）。
 
 ## EvoX 会话桥接回归
 

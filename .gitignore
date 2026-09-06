@@ -112,3 +112,19 @@ desktop/ae-omtemplate.jsx
 .vox-demo.png
 .vox-six.png
 .vox-three.png
+
+# 本机 Agent / 浏览器调试状态（不进版本库）
+.claude/
+.codex/
+.agents/
+.agent-workspace/
+.agent-scratch/
+.open-design-review/
+.playwright-mcp/
+
+# 唤醒球视觉取证截图：正式文档资产请改名放到 docs/assets/
+/bot-*.png
+/design/companion-orb/*.png
+/desktop/bot-*.png
+/desktop/life-*.png
+/desktop/seq-*.png

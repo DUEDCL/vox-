@@ -8,7 +8,7 @@
 **发现日期**：2026-08-28
 **状态**：不修（可选依赖，不在发布路径上）
 
-`docs/project-overview.md` 与 `.claude/CLAUDE.md` 长期写着「`D:\program\voxcord` 不存在」。
+`docs/project-overview.md` 与旧版 Agent 规则曾长期写着「`D:\program\voxcord` 不存在」。
 这是**错的事实陈述**，虽然结论（不可用）碰巧对。实测：
 
 ```
@@ -65,7 +65,7 @@ VoxCordAdapter().load()
 `desktop/src/style.css` 抄（那是另一个产品表面，它的色值由素材取样定，控制台没有那条
 依据）。语义上只借了一件事：琥珀表示「等你处理」。
 
-按 `D:\program\CLAUDE.md` 的判等级，新页面属 L 级，该写一条
+按当时的本机设计规则判级，新页面属 L 级，该写一条
 `docs/design/DESIGN_DECISIONS.md`。本轮**没写** —— 那份文档正被做唤醒球 UI 的并行会话
 使用，两个会话同时写同一个文件会冲突。
 

@@ -5,7 +5,7 @@
 
 ## 项目目标
 
-Vox 是 Windows 本地优先的语音唤醒对话原型：中文唤醒 → 本地 ASR/VAD → 可替换 Agent 会话桥 → 本地 TTS → 连续对话与打断，并通过 Tauri 透明置顶窗口呈现状态。
+Vox 是 Windows 语音唤醒对话平台：中文唤醒、VAD 与声纹准入在本机完成，ASR/TTS 与 Agent 后端按配置使用本机或云端能力，并通过 Tauri 透明置顶窗口呈现状态。
 
 ## 技术栈与模块边界
 
@@ -16,7 +16,7 @@ Vox 是 Windows 本地优先的语音唤醒对话原型：中文唤醒 → 本�
 
 ## 必须保持的边界
 
-1. 本地优先：不得新增云端调用、遥测或音频上传；记忆只存文本，声纹缓冲不落盘。
+1. 本机准入、处理可配置：唤醒词与声纹不出网；通过准入后的请求可按版本化配置使用云端 ASR/TTS；记忆只存文本，声纹缓冲不落盘，未经配置不启用遥测。
 2. 契约优先：`contracts/voice-events.schema.json` 字节内容和版本保持不变；公开事件不能泄漏具体音频实现。
 3. 安全拒绝优先：凭据、声纹、原始音频和模型权重不可读/不可提交；工具、确认、桥接错误默认 fail-closed。
 4. EvoX 是外部会话/Agent 后端名称，不等同于 Vox 项目品牌；只有项目自有命名使用 `vox`/`VOX_*`。
@@ -25,7 +25,7 @@ Vox 是 Windows 本地优先的语音唤醒对话原型：中文唤醒 → 本�
 
 ## 开发规范
 
-- 改动前先读取 `CLAUDE.md`、`.claude/CLAUDE.md` 和相关记忆。
+- 改动前先读取 `AGENTS.md` 和相关项目文档。
 - 开工先明确「完成的判据」，收尾对照判据逐条报告，并给出实际跑过的命令与输出。
 - UI 组件考虑空、错、边界状态；接口输入校验、输出结构一致、错误可追溯；测试覆盖正常、边界和拒绝路径。
 - 证据等级必须诚实：DOC < AUTO < SIM < REAL-MIC < REAL-AGENT < REAL-EVOX < REAL-WIN。
@@ -44,4 +44,4 @@ Vox 是 Windows 本地优先的语音唤醒对话原型：中文唤醒 → 本�
 - 2026-08-23：同步当前测试基线与生命周期加固进度；保留真实设备/Agent/窗口证据边界。
 - 2026-08-23：补强工具事件的固定原因过滤与 sink 隔离；内部诊断和公开事件继续分层。
 - 2026-08-24：统一 Dispatcher、CircuitBreaker、MemoryWriter、MemoryRecaller 的 sink best-effort 语义并增加失败计数。
-- 2026-08-29：双 Agent 审查流程（`.ai/`、`AGENTS.md`、GitHub Agent HQ 模板与 CI）由使用者决定移除；分支收敛到 `main` 单主干，规则来源改为 `CLAUDE.md` + `.claude/CLAUDE.md`。证据诚实与安全边界不变。
+- 2026-08-29：双 Agent 审查流程（`.ai/`、`AGENTS.md`、GitHub Agent HQ 模板与 CI）由使用者决定移除；分支收敛到 `main` 单主干，规则来源收敛为公开的 `AGENTS.md`，`CLAUDE.md` 仅作兼容入口。证据诚实与安全边界不变。
